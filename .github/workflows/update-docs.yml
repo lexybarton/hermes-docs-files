@@ -4,8 +4,8 @@ on:
   schedule:
     # Twice a day, off the top of the hour (GitHub recommends avoiding :00
     # since that's when most scheduled workflows across GitHub fire).
-    - cron: "20 5 * * *"
-    - cron: "20 17 * * *"
+    - cron: "17 5 * * *"
+    - cron: "17 17 * * *"
   workflow_dispatch: {} # lets you trigger a refresh manually from the Actions tab
 
 permissions:
@@ -21,10 +21,10 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -46,9 +46,6 @@ jobs:
             exit 1
           fi
 
-          # Fail (without committing) if more than 10% of pages vanished --
-          # that's more likely an upstream bundle-format change than real
-          # doc deletions, and shouldn't get auto-pushed unreviewed.
           threshold=$(( before * 90 / 100 ))
           if [ "$before" -gt 0 ] && [ "$after" -lt "$threshold" ]; then
             echo "::error::Page count dropped from $before to $after (>10%). The upstream bundle format may have changed -- investigate before merging, not auto-committing this run."
