@@ -23,7 +23,13 @@ after fixing a bug in this script).
 Re-running is safe: existing files are overwritten in place, and
 pages removed from the bundle are simply not re-written (stale files
 from a previous run are not deleted automatically).
+
+Fails closed (non-zero exit) if the bundle's source markers are
+missing entirely, or if more than 10% of expected pages fail to
+write -- both are treated as "the upstream format probably changed,"
+not "silently commit a broken mirror."
 """
+import os
 import argparse
 import re
 import sys
@@ -66,12 +72,19 @@ def fetch(url: str) -> str:
         return resp.read().decode("utf-8")
 
 
+def fail(msg: str) -> None:
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        print(f"::error::{msg}")
+    else:
+        print(msg, file=sys.stderr)
+    sys.exit(1)
+
+
 def split_bundle(text: str, root: Path) -> int:
     """Split the concatenated bundle into individual files under root."""
     matches = list(SOURCE_RE.finditer(text))
     if not matches:
-        print("No '<!-- source: ... -->' markers found -- nothing to split.", file=sys.stderr)
-        return 0
+        fail("No '<!-- source: ... -->' markers found -- bundle format may have changed.")
 
     written = 0
     for i, m in enumerate(matches):
@@ -104,6 +117,11 @@ def split_bundle(text: str, root: Path) -> int:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(chunk, encoding="utf-8")
         written += 1
+
+    skippable = sum(1 for m in matches if m.group(1) in SKIP_SOURCES or not m.group(1).startswith(SOURCE_ROOT))
+    expected = len(matches) - skippable
+    if expected > 0 and written < expected * 90 // 100:
+        fail(f"Only wrote {written}/{expected} expected pages -- investigate before this is committed.")
 
     return written
 
