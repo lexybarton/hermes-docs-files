@@ -42,6 +42,14 @@ LOCAL_INDEX_FILENAME = "llms.local.txt"
 SOURCE_RE = re.compile(r"^<!--\s*source:\s*(\S+)\s*-->\s*$", re.MULTILINE)
 SOURCE_ROOT = "website/docs/"
 
+# Pages that are just a heading + a live React/MDX component
+# (e.g. "<UserStoriesCollage />") with no actual static content in the
+# bundle -- there's nothing useful to mirror, so skip writing them
+# rather than committing a near-empty stub every run.
+SKIP_SOURCES = {
+    "website/docs/user-stories.mdx",
+}
+
 # The generator glues sections together with a blank line, a bare
 # "---" rule, and another blank line, immediately before the next
 # marker (verified against the current bundle: every one of the 227
@@ -85,6 +93,10 @@ def split_bundle(text: str, root: Path) -> int:
 
         if not source_path.startswith(SOURCE_ROOT):
             print(f"  skip (unexpected source root): {source_path}", file=sys.stderr)
+            continue
+
+        if source_path in SKIP_SOURCES:
+            print(f"  skip (component-only stub, no static content): {source_path}", file=sys.stderr)
             continue
 
         rel_path = source_path[len(SOURCE_ROOT):]
