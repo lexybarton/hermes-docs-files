@@ -37115,8 +37115,6 @@ Pool state is stored in `~/.hermes/auth.json` under the `credential_pool` key:
 
 The OpenRouter entry above was borrowed from an external source, so the raw key is not stored in `auth.json`. The manual Anthropic entry was intentionally added to Hermes' credential store, so its token remains persistable.
 
-An `env:` row is re-hydrated from the environment on every load, and the variable name does not have to be one Hermes declares for the provider: a second row with `"source": "env:OPENROUTER_API_KEY_2"` is filled from `OPENROUTER_API_KEY_2` (shell, `.env`, or your secret manager) and rotates alongside the primary key without the secret ever being written to `auth.json`.
-
 Strategies are stored in `config.yaml` (not `auth.json`):
 
 ```yaml
@@ -75318,9 +75316,6 @@ The full checklist lives in the
 in short, an entry must be:
 
 1. **Owner-submitted** — the PR author owns or maintains the plugin repo.
-   Maintainers also add batches of community plugins from a reviewed sweep
-   (each pin validated and scanned at the pinned commit); if yours was swept
-   in and you want it changed or removed, open a PR on your entry.
 2. **A public repository** — the `repo` URL is publicly cloneable.
 3. **Released** — the repo has real releases/tags, not just a default branch.
 4. **Passing validation** — the catalog validation GitHub Action is green on
