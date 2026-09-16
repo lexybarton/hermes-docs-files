@@ -1,0 +1,267 @@
+# Hermes Agent
+
+> The self-improving AI agent built by Nous Research. A terminal-native autonomous coding and task agent with persistent memory, agent-created skills, and a messaging gateway that lives on 21+ messaging platforms — 19 native to the gateway plus IRC and Microsoft Teams via plugins (Telegram, Discord, Slack, SMS, Matrix, ...). Runs on local, Docker, SSH, Daytona, Modal, or Singularity backends. Works with Nous Portal, OpenRouter, OpenAI, Anthropic, Google, or any OpenAI-compatible endpoint.
+
+Install: `curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash`  (Linux, macOS, WSL2, Termux)
+
+Repo: https://github.com/NousResearch/hermes-agent
+
+## Getting Started
+
+- [Installation](./getting-started/installation.md): Install Hermes Agent on Linux, macOS, WSL2, native Windows, or Android via Termux
+- [Quickstart](./getting-started/quickstart.md): Your first conversation with Hermes Agent — from install to chatting in under 5 minutes
+- [Learning Path](./getting-started/learning-path.md): Choose your learning path through the Hermes Agent documentation based on your experience level and goals.
+- [Updating](./getting-started/updating.md): How to update Hermes Agent to the latest version or uninstall it
+- [Termux (Android)](./getting-started/termux.md): Run Hermes Agent directly on an Android phone with Termux
+- [Nix Setup](./getting-started/nix-setup.md): Install and deploy Hermes Agent with Nix — from quick `nix run` to fully declarative NixOS module with container mode
+- [Platform Support](./getting-started/platform-support.md): Which operating systems, distribution methods, and features Hermes Agent supports.
+
+## Using Hermes
+
+- [CLI](./user-guide/cli.md): Master the Hermes Agent terminal interface — commands, keybindings, personalities, and more
+- [TUI (Ink terminal UI)](./user-guide/tui.md): Launch the modern terminal UI for Hermes — mouse-friendly, rich overlays, and non-blocking input.
+- [Configuration](./user-guide/configuration.md): Configure Hermes Agent — config.yaml, providers, models, API keys, and more
+- [Configuring Models](./user-guide/configuring-models.md)
+- [Sessions](./user-guide/sessions.md): Session persistence, resume, search, management, and per-platform session tracking
+- [Profiles](./user-guide/profiles.md)
+- [Git Worktrees](./user-guide/git-worktrees.md): Run multiple Hermes agents safely on the same repository using git worktrees and isolated checkouts
+- [Docker Backend](./user-guide/docker.md): Running Hermes Agent in Docker and using Docker as a terminal backend
+- [Security](./user-guide/security.md): Security model, dangerous command approval, user authorization, container isolation, and production deployment best practices
+- [Checkpoints & Rollback](./user-guide/checkpoints-and-rollback.md): Filesystem safety nets for destructive operations using shadow git repos and automatic snapshots
+- [Bot Mode](./user-guide/bot-mode.md): Turn your Hermes profiles into a roster of named Bots — each with its own chat, role, model, memory, skills, and avatar. Bots run routines, share group chats, and message each other.
+- [Hermes Desktop](./user-guide/desktop.md): The native Hermes desktop app — a polished experience for chatting with Hermes, with streaming tool output, side-by-side previews, a file browser, voice, cron, profiles, skills, and settings. macOS, Windows, and Linux.
+- [Egress proxy](./user-guide/egress.md)
+- [Egress credential-injection proxy (iron-proxy)](./user-guide/egress/iron-proxy.md)
+- [Network Egress Isolation (Docker)](./user-guide/egress/network-isolation.md): Segment Docker networks so the agent sandbox can only reach allowlisted hosts
+- [Import from Other Agents](./user-guide/import-from-other-agents.md): One-command import of a Claude Code (~/.claude) or OpenAI Codex CLI (~/.codex) setup into Hermes — instructions, allowlists, MCP servers, skills, and memories.
+- [Local Models](./user-guide/local-models.md): Run models entirely on your own machine — no account, no API key, nothing leaves your computer.
+- [Managed Scope](./user-guide/managed-scope.md): Administrator-pinned, user-immutable config and secrets via a system-level managed directory
+- [Connecting Desktop to Many Hermes Instances](./user-guide/multi-connection-desktop.md)
+- [Running Many Gateways at Once](./user-guide/multi-profile-gateways.md)
+- [Profile Distributions: Share a Whole Agent](./user-guide/profile-distributions.md)
+- [Secrets](./user-guide/secrets.md)
+- [Bitwarden Secrets Manager](./user-guide/secrets/bitwarden.md)
+- [Command Helper Secret Source](./user-guide/secrets/command.md)
+- [1Password](./user-guide/secrets/onepassword.md)
+- [Google Workspace — Gmail, Calendar, Drive, Sheets & Docs](./user-guide/skills/google-workspace.md): Send email, manage calendar events, search Drive, read/write Sheets, and access Docs — all through OAuth2-authenticated Google APIs
+- [Which File Does What?](./user-guide/which-file-does-what.md): SOUL.md vs USER.md vs MEMORY.md vs AGENTS.md — a one-page map of the agent's files, who writes each one, and when the agent actually sees them
+- [Windows (Native) Guide](./user-guide/windows-native.md): Run Hermes Agent natively on Windows 10 / 11 — install, feature matrix, UTF-8 console, Git Bash, gateway as a Scheduled Task, editor handling, PATH, uninstall, and common pitfalls
+- [Windows (WSL2) Guide](./user-guide/windows-wsl-quickstart.md): Run Hermes Agent on Windows via WSL2 — setup, filesystem access between Windows and Linux, networking, and common pitfalls
+
+## Core Features
+
+- [Features Overview](./user-guide/features/overview.md)
+- [Tools](./user-guide/features/tools.md): Overview of Hermes Agent's tools — what's available, how toolsets work, and terminal backends
+- [Skills System](./user-guide/features/skills.md): On-demand knowledge documents — progressive disclosure, agent-managed skills, and the Skills Hub
+- [Curator](./user-guide/features/curator.md): Background maintenance for agent-created skills — usage tracking, staleness, archival, and LLM-driven review
+- [Memory](./user-guide/features/memory.md): How Hermes Agent remembers across sessions — MEMORY.md, USER.md, and session search
+- [Memory Providers](./user-guide/features/memory-providers.md): External memory provider plugins — Honcho, OpenViking, Mem0, Hindsight, Holographic, RetainDB, ByteRover, Supermemory
+- [Context Files](./user-guide/features/context-files.md): Project context files — .hermes.md, AGENTS.md, CLAUDE.md, global SOUL.md, and .cursorrules — automatically injected into every conversation
+- [Context References](./user-guide/features/context-references.md): Inline @-syntax for attaching files, folders, git diffs, and URLs directly into your messages
+- [Personality & SOUL.md](./user-guide/features/personality.md): Customize Hermes Agent's personality with a global SOUL.md, built-in personalities, and custom persona definitions
+- [Plugins](./user-guide/features/plugins.md): Extend Hermes with custom tools, hooks, and integrations via the plugin system
+- [Built-in Plugins](./user-guide/features/built-in-plugins.md): Plugins shipped with Hermes Agent that run automatically via lifecycle hooks — disk-cleanup and friends
+- [Codex App-Server Runtime (optional)](./user-guide/features/codex-app-server-runtime.md)
+- [Computer Use](./user-guide/features/computer-use.md)
+- [Passwords & Logins](./user-guide/features/credential-vault.md): The agent signs into sites, pays and fills addresses for you without ever seeing a password.
+- [Deliverable Mode (Artifacts in Chat)](./user-guide/features/deliverable-mode.md): How the agent ships generated charts, PDFs, spreadsheets, and other files as native attachments in messaging platforms.
+- [Document Extraction](./user-guide/features/document-extraction.md): How read_file converts PDFs, Office documents, and notebooks to text — and what to do when a PDF is scanned images
+- [Extending the Dashboard](./user-guide/features/extending-the-dashboard.md): Build themes and plugins for the Hermes web dashboard — palettes, typography, layouts, custom tabs, shell slots, page-scoped slots, and backend API routes
+- [Session Heartbeats](./user-guide/features/heartbeat.md): A recurring prompt that re-enters your current session whenever it's idle — /heartbeat every 10m Check the deployment.
+- [Kanban Multi-Gateway Deployment](./user-guide/features/kanban-multi-gateway.md): Running one kanban board across several per-profile gateways: single dispatcher, profile-owned delivery
+- [Kanban worker lanes](./user-guide/features/kanban-worker-lanes.md)
+- [Recurring Loops](./user-guide/features/loops.md): Re-run a prompt on a recurring interval inside your session — Hermes' take on Claude Code's /loop.
+- [LSP — Semantic Diagnostics](./user-guide/features/lsp.md): Real language servers (pyright, gopls, rust-analyzer, …) wired into the post-write lint check used by write_file and patch.
+- [Mixture of Agents](./user-guide/features/mixture-of-agents.md): Create named MoA presets that appear as selectable models under the Mixture of Agents provider
+- [Pets (Petdex Mascots)](./user-guide/features/pets.md): Adopt an animated mascot that reacts to agent activity across the CLI, TUI, and desktop app
+- [Plugin Catalog](./user-guide/features/plugin-catalog.md): Browse and install reviewed, SHA-pinned Hermes plugins from the curated catalog
+- [Skins & Themes](./user-guide/features/skins.md): Customize the Hermes CLI with built-in and user-defined skins
+- [Spotify](./user-guide/features/spotify.md)
+- [Subscription Proxy](./user-guide/features/subscription-proxy.md): Use your Nous Portal subscription (or other OAuth provider) as an OpenAI-compatible endpoint for external apps
+- [Nous Tool Gateway](./user-guide/features/tool-gateway.md): One subscription, every tool. Web search, image generation, TTS, and cloud browsers — all routed through Nous Portal with no extra API keys.
+- [Tool Search](./user-guide/features/tool-search.md)
+- [Wake Word](./user-guide/features/wake-word.md): Hands-free 'Hey Hermes' wake word — start a voice session by speaking, the 'Hey Siri' way
+- [Hermes Web Dashboard](./user-guide/features/web-dashboard.md): Browser-based administration panel for managing configuration, API keys, MCP servers, messaging pairing, webhooks, the gateway, memory, credentials, sessions, logs, analytics, cron jobs, and skills
+- [Web Search & Extract](./user-guide/features/web-search.md): Search the web and extract page content with multiple backend providers — including free self-hosted SearXNG.
+- [X (Twitter) Search](./user-guide/features/x-search.md): Search X (Twitter) posts and threads from within the agent using xAI's built-in x_search Responses tool — works with either a SuperGrok OAuth login or an XAI_API_KEY.
+
+## Automation
+
+- [Cron Jobs](./user-guide/features/cron.md): Schedule automated tasks with natural language, manage them with one cron tool, and attach one or more skills
+- [Delegation](./user-guide/features/delegation.md): Spawn isolated child agents for parallel workstreams with delegate_task
+- [Kanban Multi-Agent](./user-guide/features/kanban.md): Durable SQLite-backed task board for coordinating multiple Hermes profiles
+- [Kanban Tutorial](./user-guide/features/kanban-tutorial.md)
+- [Persistent Goals](./user-guide/features/goals.md): Set a standing goal and let Hermes keep working across turns until it's done. Our take on the Ralph loop.
+- [Code Execution](./user-guide/features/code-execution.md): Programmatic Python execution with RPC tool access — collapse multi-step workflows into a single turn
+- [Hooks](./user-guide/features/hooks.md): Run custom code at key lifecycle points — log activity, send alerts, post to webhooks
+- [Batch Processing](./user-guide/features/batch-processing.md): Generate agent trajectories at scale — parallel processing, checkpointing, and toolset distributions
+
+## Media & Web
+
+- [Voice Mode](./user-guide/features/voice-mode.md): Real-time voice conversations with Hermes Agent — CLI, Telegram, Discord (DMs, text channels, and voice channels)
+- [Browser](./user-guide/features/browser.md): Control browsers with multiple providers, local Chromium-family browsers via CDP, or cloud browsers for web interaction, form filling, scraping, and more.
+- [Vision](./user-guide/features/vision.md): Paste images from your clipboard into the Hermes CLI for multimodal vision analysis.
+- [Image Generation](./user-guide/features/image-generation.md): Generate images via FAL.ai — 11 models including FLUX 2, GPT Image (1.5 & 2), Nano Banana Pro, Ideogram, Recraft V4 Pro, Krea 2, and more, selectable via `hermes tools`.
+- [Text-to-Speech](./user-guide/features/tts.md): Text-to-speech and voice message transcription across all platforms
+
+## Messaging Platforms
+
+- [Overview](./user-guide/messaging.md): Chat with Hermes from Telegram, Discord, Slack, WhatsApp, Signal, SMS, Email, Home Assistant, Mattermost, Matrix, DingTalk, Yuanbao, Microsoft Teams, LINE, Raft, Webhooks, or any OpenAI-compatible frontend via the API server — architecture and setup overview
+- [Telegram](./user-guide/messaging/telegram.md): Set up Hermes Agent as a Telegram bot
+- [Discord](./user-guide/messaging/discord.md): Set up Hermes Agent as a Discord bot
+- [Slack](./user-guide/messaging/slack.md): Set up Hermes Agent as a Slack bot using Socket Mode
+- [WhatsApp](./user-guide/messaging/whatsapp.md): Set up Hermes Agent as a WhatsApp bot via the built-in Baileys bridge
+- [Signal](./user-guide/messaging/signal.md): Set up Hermes Agent as a Signal messenger bot via signal-cli daemon
+- [Email](./user-guide/messaging/email.md): Set up Hermes Agent as an email assistant via IMAP/SMTP
+- [SMS](./user-guide/messaging/sms.md): Set up Hermes Agent as an SMS chatbot via Twilio
+- [Matrix](./user-guide/messaging/matrix.md): Set up Hermes Agent as a Matrix bot
+- [Mattermost](./user-guide/messaging/mattermost.md): Set up Hermes Agent as a Mattermost bot
+- [Home Assistant](./user-guide/messaging/homeassistant.md): Control your smart home with Hermes Agent via Home Assistant integration.
+- [Webhooks](./user-guide/messaging/webhooks.md): Receive events from GitHub, GitLab, and other services to trigger Hermes agent runs
+- [A2A (Agent-to-Agent)](./user-guide/messaging/a2a.md)
+- [BlueBubbles (iMessage)](./user-guide/messaging/bluebubbles.md)
+- [Buzz](./user-guide/messaging/buzz.md)
+- [DingTalk](./user-guide/messaging/dingtalk.md): Set up Hermes Agent as a DingTalk chatbot
+- [Feishu / Lark](./user-guide/messaging/feishu.md): Set up Hermes Agent as a Feishu or Lark bot
+- [Google Chat](./user-guide/messaging/google_chat.md): Set up Hermes Agent as a Google Chat bot using Cloud Pub/Sub
+- [IRC](./user-guide/messaging/irc.md)
+- [LINE](./user-guide/messaging/line.md): Set up Hermes Agent as a LINE Messaging API bot
+- [Microsoft Graph Webhook Listener](./user-guide/messaging/msgraph-webhook.md): Receive Microsoft Graph change notifications (meetings, calendar, chat, etc.) in Hermes
+- [ntfy](./user-guide/messaging/ntfy.md)
+- [Open WebUI](./user-guide/messaging/open-webui.md): Connect Open WebUI to Hermes Agent via the OpenAI-compatible API server
+- [Photon iMessage](./user-guide/messaging/photon.md)
+- [QQ Bot](./user-guide/messaging/qqbot.md)
+- [Raft](./user-guide/messaging/raft.md): Connect Hermes Agent to Raft as an external agent via wake-channel bridge
+- [Hermes Relay](./user-guide/messaging/relay.md): Connect Hermes to messaging platforms through a relay connector that owns the platform credentials — enrollment, capabilities, config, and troubleshooting
+- [SimpleX Chat](./user-guide/messaging/simplex.md)
+- [Microsoft Teams](./user-guide/messaging/teams.md): Set up Hermes Agent as a Microsoft Teams bot
+- [Teams Meetings](./user-guide/messaging/teams-meetings.md): Set up the Microsoft Teams meeting summary pipeline with Microsoft Graph webhooks
+- [WeCom (Enterprise WeChat)](./user-guide/messaging/wecom.md): Connect Hermes Agent to WeCom via the AI Bot WebSocket gateway
+- [WeCom Callback (Self-Built App)](./user-guide/messaging/wecom-callback.md)
+- [Weixin (WeChat)](./user-guide/messaging/weixin.md): Connect Hermes Agent to personal WeChat accounts via the iLink Bot API
+- [WhatsApp Business (Cloud API)](./user-guide/messaging/whatsapp-cloud.md): Set up Hermes Agent as a WhatsApp bot via Meta's official Business Cloud API
+- [Yuanbao](./user-guide/messaging/yuanbao.md): Connect Hermes Agent to the Yuanbao enterprise messaging platform via WebSocket gateway
+
+## Integrations
+
+- [Integrations Overview](./integrations.md)
+- [Providers](./integrations/providers.md)
+- [MCP (Model Context Protocol)](./user-guide/features/mcp.md): Connect Hermes Agent to external tool servers via MCP — and control exactly which MCP tools Hermes loads
+- [ACP (Agent Context Protocol)](./user-guide/features/acp.md): Use Hermes Agent inside ACP-compatible editors and collaboration platforms
+- [API Server](./user-guide/features/api-server.md): Expose hermes-agent as an OpenAI-compatible API for any frontend
+- [Honcho Memory](./user-guide/features/honcho.md): AI-native persistent memory via Honcho — dialectic reasoning, multi-agent user modeling, and deep personalization
+- [Provider Routing](./user-guide/features/provider-routing.md): Configure OpenRouter provider preferences to optimize for cost, speed, or quality.
+- [Fallback Providers](./user-guide/features/fallback-providers.md): Configure automatic failover to backup LLM providers when your primary model is unavailable.
+- [Credential Pools](./user-guide/features/credential-pools.md): Pool multiple API keys or OAuth tokens per provider for automatic rotation and rate limit recovery.
+- [Buzz Integration](./integrations/buzz.md): All three ways to connect Hermes Agent to Buzz — Block's Nostr-based human+agent workspace
+- [Nous Portal](./integrations/nous-portal.md): One subscription, 300+ frontier models, and the Tool Gateway — the recommended way to run Hermes Agent
+
+## Guides & Tutorials
+
+- [Tips & Best Practices](./guides/tips.md): Practical advice to get the most out of Hermes Agent — prompt tips, CLI shortcuts, context files, memory, cost optimization, and security
+- [Local LLMs on Mac](./guides/local-llm-on-mac.md): Set up a local OpenAI-compatible LLM server on macOS with llama.cpp or MLX, including model selection, memory optimization, and real benchmarks on Apple Silicon
+- [Daily Briefing Bot](./guides/daily-briefing-bot.md): Build an automated daily briefing bot that researches topics, summarizes findings, and delivers them to Telegram or Discord every morning
+- [Team Telegram Assistant](./guides/team-telegram-assistant.md): Step-by-step guide to setting up a Telegram bot that your whole team can use for code help, research, system admin, and more
+- [Use Hermes as a Python Library](./guides/python-library.md): Embed AIAgent in your own Python scripts, web apps, or automation pipelines — no CLI required
+- [Use MCP with Hermes](./guides/use-mcp-with-hermes.md): A practical guide to connecting MCP servers to Hermes Agent, filtering their tools, and using them safely in real workflows
+- [Use Voice Mode with Hermes](./guides/use-voice-mode-with-hermes.md): A practical guide to setting up and using Hermes voice mode across CLI, Telegram, Discord, and Discord voice channels
+- [Use SOUL.md with Hermes](./guides/use-soul-with-hermes.md): How to use SOUL.md to shape Hermes Agent's default voice, what belongs there, and how it differs from AGENTS.md and /personality
+- [Automate with Cron](./guides/automate-with-cron.md): Real-world automation patterns using Hermes cron — monitoring, reports, pipelines, and multi-skill workflows
+- [Work with Skills](./guides/work-with-skills.md): Find, install, use, and create skills — on-demand knowledge that teaches Hermes new workflows
+- [Delegation Patterns](./guides/delegation-patterns.md): When and how to use subagent delegation — patterns for parallel research, code review, and multi-file work
+- [GitHub PR Review Agent](./guides/github-pr-review-agent.md): Build an automated AI code reviewer that monitors your repos, reviews pull requests, and delivers feedback — hands-free
+- [Give Your Agent Its Own Email Address](./guides/agent-email-address.md): Set up a dedicated mailbox your agent can read and send from using the bundled Himalaya skill, with a cron polling pattern and safety notes
+- [Automation Blueprints](./guides/automation-blueprints.md): Ready-to-use automation blueprints — scheduled tasks, GitHub event triggers, API webhooks, and multi-skill workflows
+- [AWS Bedrock](./guides/aws-bedrock.md): Use Hermes Agent with Amazon Bedrock — native Converse API, Anthropic SDK routing, OpenAI models via Bedrock Mantle, IAM authentication, Guardrails, and cross-region inference
+- [Microsoft Foundry](./guides/azure-foundry.md): Use Hermes Agent with Microsoft Foundry — OpenAI-style and Anthropic-style endpoints, auto-detection of transport and deployed models
+- [Script-Only Cron Jobs (No LLM)](./guides/cron-script-only.md): Classic watchdog cron jobs that skip the LLM entirely — a script runs on schedule and its stdout gets delivered to your messaging platform. Memory alerts, disk alerts, CI pings, periodic health checks.
+- [Cron Troubleshooting](./guides/cron-troubleshooting.md): Diagnose and fix common Hermes cron issues — jobs not firing, delivery failures, skill loading errors, and performance problems
+- [Desktop Native Sign-In (RFC 8252)](./guides/desktop-native-signin.md): How the Hermes Desktop app signs in to a gated gateway using your system browser and PKCE — no embedded webview, no session cookies
+- [Google Gemini](./guides/google-gemini.md): Use Hermes Agent with Google Gemini — native AI Studio API, API-key setup, tool calling, streaming, and quota guidance
+- [Google Vertex AI](./guides/google-vertex.md): Use Hermes Agent with Gemini on Google Cloud Vertex AI — OAuth2 service account or ADC, GCP billing and quotas, no static API key
+- [Run Hermes Locally with Ollama — Zero API Cost](./guides/local-ollama-setup.md): Step-by-step guide to running Hermes Agent entirely on your own machine with Ollama and open-weight models like Gemma 4, no cloud API keys or paid subscriptions needed
+- [Manage Hermes Cloud with MCP](./guides/manage-hermes-cloud-with-mcp.md): Connect Hermes Agent to the Nous Portal MCP server so your local agent can list, start, stop, and manage your Hermes Cloud instances conversationally
+- [Register a Microsoft Graph Application](./guides/microsoft-graph-app-registration.md): Azure portal walkthrough for creating the app registration that powers the Teams meeting pipeline
+- [Migrate from OpenClaw](./guides/migrate-from-openclaw.md): Complete guide to migrating your OpenClaw / Clawdbot setup to Hermes Agent — what gets migrated, how config maps, and what to check after.
+- [MiniMax OAuth](./guides/minimax-oauth.md): Log into MiniMax via browser OAuth and use MiniMax-M2.7 models in Hermes Agent — no API key required
+- [OAuth over SSH / Remote Hosts](./guides/oauth-over-ssh.md): How to complete browser-based OAuth (Spotify, MCP servers) when Hermes runs on a remote machine, container, or behind a jump box
+- [Operate the Teams Meeting Pipeline](./guides/operate-teams-meeting-pipeline.md): Runbook, go-live checklist, and operator worksheet for the Microsoft Teams meeting pipeline
+- [Pipe Script Output to Messaging Platforms](./guides/pipe-script-output.md): Send text from any shell script, cron job, CI hook, or monitoring daemon to Telegram, Discord, Slack, Signal, and other platforms using `hermes send`.
+- [Run Hermes Agent with Nous Portal](./guides/run-hermes-with-nous-portal.md): Start-to-finish walkthrough: subscribe, set up, switch models, enable gateway tools, and verify routing
+- [Run Nemotron 3 Ultra free in Hermes Agent](./guides/run-nemotron-3-ultra-free.md): Try NVIDIA Nemotron 3 Ultra on Nous Portal — free June 4–18 — with day 0 support in Hermes Agent
+- [Running Hermes on a Personal or Work Machine](./guides/secure-hermes-on-a-work-machine.md): A security-posture walkthrough for running Hermes Agent on the machine you live on — what the defaults protect, how to tighten further, and how to undo mistakes
+- [Troubleshooting: \"My Agent Feels Dumber\"](./guides/troubleshooting-agent-quality.md): A diagnostic checklist for when Hermes seems less capable than before or forgets things mid-session — model switches, context pressure, wrong context detection, and the frozen memory snapshot
+- [Automated GitHub PR Comments with Webhooks](./guides/webhook-github-pr-review.md): Connect Hermes to GitHub so it automatically fetches PR diffs, reviews code changes, and posts comments — triggered by webhooks with no manual prompting
+- [xAI Grok OAuth (SuperGrok / X Premium+)](./guides/xai-grok-oauth.md): Sign in with your SuperGrok or X Premium+ subscription to use Grok models in Hermes Agent — no API key required
+
+## Developer Guide
+
+- [Contributing](./developer-guide/contributing.md): How to contribute to Hermes Agent — dev setup, code style, PR process
+- [Architecture](./developer-guide/architecture.md): Hermes Agent internals — major subsystems, execution paths, data flow, and where to read next
+- [Agent Loop](./developer-guide/agent-loop.md): Detailed walkthrough of AIAgent execution, API modes, tools, callbacks, and fallback behavior
+- [Prompt Assembly](./developer-guide/prompt-assembly.md): How Hermes builds the system prompt, preserves cache stability, and injects ephemeral layers
+- [Context Compression & Caching](./developer-guide/context-compression-and-caching.md)
+- [Gateway Internals](./developer-guide/gateway-internals.md): How the messaging gateway boots, authorizes users, routes sessions, and delivers messages
+- [Session Storage](./developer-guide/session-storage.md)
+- [Provider Runtime](./developer-guide/provider-runtime.md): How Hermes resolves providers, credentials, API modes, and auxiliary models at runtime
+- [Adding Tools](./developer-guide/adding-tools.md): How to add a new tool to Hermes Agent — schemas, handlers, registration, and toolsets
+- [Adding Providers](./developer-guide/adding-providers.md): How to add a new inference provider to Hermes Agent — auth, runtime resolution, CLI flows, adapters, tests, and docs
+- [Adding Platform Adapters](./developer-guide/adding-platform-adapters.md)
+- [Creating Skills](./developer-guide/creating-skills.md): How to create skills for Hermes Agent — SKILL.md format, guidelines, and publishing
+- [Extending the CLI](./developer-guide/extending-the-cli.md): Build wrapper CLIs that extend the Hermes TUI with custom widgets, keybindings, and layout changes
+- [ACP Internals](./developer-guide/acp-internals.md): How the ACP adapter works: lifecycle, sessions, event bridge, approvals, and tool rendering
+- [Billing Lifecycle (TUI)](./developer-guide/billing-lifecycle.md): Map from every billing/subscription state and typed refusal to the exact TUI copy and recovery action
+- [Browser Provider Plugins](./developer-guide/browser-provider-plugin.md): How to build a cloud browser backend plugin for Hermes Agent
+- [Browser CDP Supervisor](./developer-guide/browser-supervisor.md): How Hermes detects and responds to native JS dialogs and interacts with cross-origin iframes via a persistent CDP connection.
+- [Chronos Managed-Cron Contract](./developer-guide/chronos-managed-cron-contract.md): Agent ↔ NAS wire contract for the Chronos cron provider
+- [CLI Internals](./developer-guide/cli-internals.md): How hermes_cli is shaped: slash dispatch, config loaders, the skin engine, the transactional update pipeline, and process-identity rules
+- [Codebase Ownership Map](./developer-guide/codebase-ownership.md): Which directories belong to which subsystem, and where the right docs entry point lives for each
+- [Background completion backlogs](./developer-guide/completion-backlog-delivery.md)
+- [Context Engine Plugins](./developer-guide/context-engine-plugin.md): How to build a context engine plugin that replaces the built-in ContextCompressor
+- [Cron Internals](./developer-guide/cron-internals.md): How Hermes stores, schedules, edits, pauses, skill-loads, and delivers cron jobs
+- [Desktop Plugin SDK (@hermes/plugin-sdk)](./developer-guide/desktop-plugin-sdk.md): Extend the native Hermes Desktop app — panes, pages, sidebar nav, status bar, palette commands, keybinds, themes, and a scoped backend namespace, with one import and no build step.
+- [Egress proxy internals](./developer-guide/egress-internals.md): How the iron-proxy egress firewall integrates with Hermes — module layout, lifecycle, security invariants, and extension points
+- [Gateway Monitoring](./developer-guide/gateway-monitoring.md): Health export, structured diagnostics, fleet queries and how to extend the monitoring plane
+- [Gateway Session Lifecycle](./developer-guide/gateway-session-lifecycle.md): SessionSource, SessionEntry, SessionStore, session-key rules and multi-user isolation in the gateway
+- [Image Generation Provider Plugins](./developer-guide/image-gen-provider-plugin.md): How to build an image-generation backend plugin for Hermes Agent
+- [Memory Provider Plugins](./developer-guide/memory-provider-plugin.md): How to build a memory provider plugin for Hermes Agent
+- [Micro-compaction](./developer-guide/micro-compaction.md): How micro-compaction amortizes context compression cost: triggers, tail sizing, the cached-prefix trade-off
+- [Middleware](./developer-guide/middleware.md): Behavior-changing plugin middleware for LLM and tool calls: contract, execution order, examples
+- [Model Provider Plugins](./developer-guide/model-provider-plugin.md): How to build a model provider (inference backend) plugin for Hermes Agent
+- [Multiplexing Gateway Internals](./developer-guide/multiplexing-gateway.md): Design of the one-gateway-for-all-profiles mode: scope composition, secret scope, inbound routing, persistence
+- [Observer Hooks](./developer-guide/observer-hooks.md): Read-only telemetry contract for plugins: event families, correlation IDs, payload safety
+- [Plugin LLM Access](./developer-guide/plugin-llm-access.md): Run any LLM call from inside a plugin via ctx.llm — chat or structured, sync or async. Host-owned auth, fail-closed trust gate, optional JSON Schema validation.
+- [Build a Hermes Plugin](./developer-guide/plugins.md): Step-by-step guide to building a complete Hermes plugin with tools, hooks, data files, and skills
+- [Programmatic Integration](./developer-guide/programmatic-integration.md): Three protocols for driving hermes-agent from external programs: ACP, the TUI gateway JSON-RPC, and the OpenAI-compatible HTTP API
+- [Relay ↔ Connector Contract](./developer-guide/relay-connector-contract.md): Wire contract between the Hermes gateway relay adapter and external connectors (experimental)
+- [Relay Shared Metrics](./developer-guide/relay-shared-metrics.md): NeMo Relay shared metrics: what is exported, consent and retention, staging validation
+- [Secret Source Plugins](./developer-guide/secret-source-plugin.md): How to build a secret-manager backend plugin for Hermes Agent
+- [State DB Recovery](./developer-guide/state-db-recovery.md): How Hermes recovers state.db when the FTS index or the file itself is corrupt
+- [Streaming TTS Internals](./developer-guide/streaming-tts.md): Sentence chunker, streaming provider ABC, capability matrix and how to add a streaming TTS provider
+- [Public Subagent Lifecycle API](./developer-guide/subagent-lifecycle-api.md)
+- [Terminal Environment Provider Plugins](./developer-guide/terminal-environment-plugin.md)
+- [Tools Runtime](./developer-guide/tools-runtime.md): Runtime behavior of the tool registry, toolsets, dispatch, and terminal environments
+- [Trajectory Format](./developer-guide/trajectory-format.md)
+- [Video Generation Provider Plugins](./developer-guide/video-gen-provider-plugin.md): How to build a video-generation backend plugin for Hermes Agent
+- [Web Search Provider Plugins](./developer-guide/web-search-provider-plugin.md): How to build a web-search/extract/crawl backend plugin for Hermes Agent
+- [TUI & Desktop from Worktrees](./developer-guide/worktree-ui-dev.md): Run the Ink TUI and Electron desktop app from a git worktree without a full npm install per checkout
+
+## Reference
+
+- [CLI Commands](./reference/cli-commands.md): Authoritative reference for Hermes terminal commands and command families
+- [Slash Commands](./reference/slash-commands.md): Complete reference for interactive CLI and messaging slash commands
+- [Profile Commands](./reference/profile-commands.md)
+- [Environment Variables](./reference/environment-variables.md): Complete reference of all environment variables used by Hermes Agent
+- [Tools Reference](./reference/tools-reference.md): Authoritative reference for Hermes built-in tools, grouped by toolset
+- [Toolsets Reference](./reference/toolsets-reference.md): Reference for Hermes core, composite, platform, and dynamic toolsets
+- [MCP Config Reference](./reference/mcp-config-reference.md): Reference for Hermes Agent MCP configuration keys, filtering semantics, and utility-tool policy
+- [Model Catalog](./reference/model-catalog.md): Remotely-hosted manifest driving curated model picker lists for OpenRouter and Nous Portal.
+- [Bundled Skills Catalog](./reference/skills-catalog.md): Table of all ~90 skills bundled with Hermes
+- [Optional Skills Catalog](./reference/optional-skills-catalog.md): Table of ~60 additional installable skills
+- [FAQ & Troubleshooting](./reference/faq.md): Frequently asked questions and solutions to common issues with Hermes Agent
+- [Automation Blueprints Catalog](./reference/automation-blueprints-catalog.md): Ready-to-run automation blueprints — set one up from the dashboard, CLI, TUI, any messenger, or the desktop app.
+- [CLI Symbols Glossary](./reference/cli-symbols.md): What every symbol in the Hermes terminal UI means — transcript markers, status-bar badges, overlay glyphs, and approval prompts.
+
+## More
+
+- [User Stories & Use Cases](./user-stories.md): Real stories from the Hermes Agent community — what people are actually building, scraped from X, GitHub, Reddit, Hacker News, YouTube, blogs, and podcasts.
