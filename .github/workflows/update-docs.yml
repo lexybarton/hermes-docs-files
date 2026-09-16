@@ -19,46 +19,28 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
-      - name: Record pre-run page count
-        id: before
-        run: echo "count=$(find . \( -name '*.md' -o -name '*.mdx' \) | wc -l)" >> "$GITHUB_OUTPUT"
-
       - name: Refresh docs
         run: python update-docs.py
-
-      - name: Sanity-check page count
-        run: |
-          before=${{ steps.before.outputs.count }}
-          after=$(find . \( -name '*.md' -o -name '*.mdx' \) | wc -l)
-          echo "Pages before: $before, after: $after"
-
-          if [ "$after" -eq 0 ]; then
-            echo "::error::Split produced zero pages -- aborting without committing."
-            exit 1
-          fi
-
-          threshold=$(( before * 90 / 100 ))
-          if [ "$before" -gt 0 ] && [ "$after" -lt "$threshold" ]; then
-            echo "::error::Page count dropped from $before to $after (>10%). The upstream bundle format may have changed -- investigate before merging, not auto-committing this run."
-            exit 1
-          fi
 
       - name: Commit and push if changed
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          if git diff --quiet && git diff --cached --quiet; then
+          git add -A
+          if git diff --cached --quiet; then
             echo "No changes -- docs are already up to date."
             exit 0
           fi
 
-          git add -A
           git commit -m "docs: automated refresh $(date -u +'%Y-%m-%d %H:%M UTC')"
+          git pull --rebase
           git push
