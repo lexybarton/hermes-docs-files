@@ -1,0 +1,18 @@
+# Controls what ends up in GitHub's auto-generated archives:
+#   - "Download ZIP" on the repo page
+#   - https://codeload.github.com/<owner>/<repo>/zip/refs/heads/<branch>
+#   - the source zip/tar.gz GitHub attaches to Releases
+#
+# GitHub builds all of these with `git archive` under the hood, which honors
+# the export-ignore attribute below. A `git clone` (and this working tree)
+# is unaffected -- export-ignore only strips paths from the generated
+# archive, never from history or from anyone who clones normally.
+#
+# Net effect: the ZIP download is just the docs, README and LICENSE.
+# Everything used to build/refresh the docs stays in the repo and in git
+# history, it's just not bundled into the convenience download.
+
+/update-docs.py             export-ignore
+/DONTREADWHOLEFILE-llms-full.txt export-ignore
+/.github/                   export-ignore
+/.gitattributes             export-ignore
