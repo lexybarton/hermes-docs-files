@@ -8202,6 +8202,7 @@ User-modified skills are never overwritten.
 hermes profile list           # show all profiles with status
 hermes profile show coder     # detailed info for one profile
 hermes profile rename coder dev-bot   # rename (updates alias + service)
+hermes profile migrate-identity coder dev-bot   # retry a rename's identity migration
 hermes profile export coder   # pack into coder.tar.gz (shareable; keys stripped)
 hermes profile import coder.tar.gz   # install an archive as a new profile
 ```
@@ -10910,6 +10911,52 @@ See also:
 
 - [Bundled Skills Catalog](/reference/skills-catalog)
 - [Official Optional Skills Catalog](/reference/optional-skills-catalog)
+
+## Browse and install in Desktop
+
+Open **Capabilities → Skills** and switch between **Installed** and **Browse**.
+Search stays at the top; the tab switch and actions share one row.
+**Installed** reads the selected profile's actual skills and enabled state;
+it is not inferred from the public catalog. **Browse** is a native catalog UI,
+not an embedded website or a second, smaller catalog.
+
+Desktop and the public [Skills Hub](/skills) read the same published CDN
+snapshot: [`/docs/api/skills.json`](https://hermes-agent.nousresearch.com/docs/api/skills.json).
+The public docs alias serves the same snapshot as Desktop's fetch URL,
+`https://nousresearch.github.io/hermes-agent/docs/api/skills.json`. The docs
+build generates it from bundled `skills/`, `optional-skills/`, and the
+centralized skills index. Browsing does not crawl GitHub or query upstream
+marketplaces live; installation still retrieves the selected skill through
+its source's installer.
+
+### Install from the website
+
+The Skills Hub has an **Install in Hermes** button on each installable card. It opens the
+installed Hermes Desktop app with a URL-encoded, source-qualified skill target:
+for example, `official/...` for optional skills or `clawhub/...` for ClawHub.
+Bundled skills use an explicit repository path rather than an ambiguous bare
+name. When an older snapshot lacks that explicit bundled target, the website
+omits its install link and native Browse disables installation rather than
+resolving an ambiguous name. The next docs publish supplies those targets.
+The same target is used by native Browse and the card's CLI fallback:
+
+```text
+hermes://skill/install?identifier=official%2Fsecurity%2F1password
+```
+
+Hermes shows **Install “skill-name”?** with separate **Source** and **Install to**
+rows. Cancel makes no changes. After confirmation, the same dialog shows
+**Installing…**, then **Installed** and a completion notification. Errors stay
+in the dialog so you can read them and retry. Installation uses the existing
+Skills Hub pipeline, including security scanning, action logs, and installed-list
+refresh. If you switch profile or connection while the confirmation is open,
+reopen the link for the new destination. Changes apply to
+new sessions; a link cannot bypass scanning or select a different profile.
+
+The public links use `hermes://`, not the development-only `hermes-dev://`
+scheme. The `skill/install` route requires an updated Desktop build. If the
+app is missing or the link is not recognized, update Desktop or expand the
+card to copy its CLI install command instead.
 
 ## Starting with a blank slate
 
@@ -14388,10 +14435,11 @@ plugin; choose a new exact commit explicitly with
 profile-local install metadata contains no config values, environment values,
 secrets, or capability grants.
 
-The same pin is available in Hermes Desktop: **Skills → Plugins → Install from
-Git** has a *Pin to commit* field that takes the full 40-character SHA, and the
-plugins list shows a `pinned @ <sha8>` badge on every pinned install so a team
-can confirm everyone is running the same commit. `hermes plugins list` prints
+The same agent-plugin pin is available in Hermes Desktop: **Capabilities →
+Plugins → Install from Git** has a *Pin to commit* field that takes the full
+40-character SHA, and **Installed** shows a `pinned @ <sha8>` badge on pinned
+agent plugins. This does not guarantee a pinned standalone desktop-plugin
+install. `hermes plugins list` prints
 the pin in its Source column (`git pinned@<sha8>`). Pins work for private
 repositories too, through the same stored credentials described below.
 
@@ -14573,6 +14621,24 @@ hermes plugins disable my-plugin             # remove from allow-list + add to d
 hermes plugins capabilities [my-plugin]      # declared vs granted capabilities
 ```
 
+### Installed and Browse in Desktop
+
+Open **Capabilities → Plugins**. **Installed** reads the app's desktop-plugin
+registry and the selected profile's actual agent-plugin state, combining both
+halves in one row where appropriate. It is not a list of catalog entries
+assumed to be installed. **Browse** is a native catalog view, not an embedded
+website; it uses the same **Installed / Browse** tabs as Skills, with search
+at the top and the tab switch and actions on one row.
+
+Desktop and the public [Plugin Catalog](/plugins) consume the same CDN
+snapshot, [`/docs/api/plugins.json`](https://hermes-agent.nousresearch.com/docs/api/plugins.json).
+The public alias serves the same data as Desktop's fetch URL,
+`https://nousresearch.github.io/hermes-agent/docs/api/plugins.json`. The docs
+build generates it from `plugin-catalog/*.yaml` and cached star counts. The
+same publish also supplies the removed-entry list used by the installer.
+Browsing does not query GitHub live or fetch source repos;
+the installer retrieves code only as part of the separate install flow.
+
 ### One-click install links (Desktop)
 
 Hermes Desktop registers the `hermes://` URL scheme, so a website, README, or
@@ -14598,6 +14664,23 @@ dialog. The same modal is reachable without a link via **Capabilities →
 Plugins → Install from Git**. Legacy `hermes://plugin-agent/…` and
 `hermes://plugin-desktop/…` URLs route into the same dialog. In dev builds
 (`npm run dev`) the scheme is `hermes-dev://`.
+
+The public [Plugin Catalog](/plugins) includes **Install in Hermes** on every
+card. Catalog links carry `catalog_name`, a URL-encoded `repo` (including
+`#subdir` when present), and `sha`:
+
+```text
+hermes://plugin/install?repo=owner%2Frepo&catalog_name=example-plugin&sha=0123456789abcdef0123456789abcdef01234567
+```
+
+The SHA parameter is display metadata only. For the agent-plugin install,
+the backend resolves `catalog_name` to its reviewed pin when you confirm;
+the link cannot override that pin. Do not treat the displayed SHA as a pin
+guarantee for a standalone desktop plugin. These catalog parameters require
+an updated Desktop build; older builds may only understand the repository
+link. If the app is missing or too old, update Desktop or use the copyable
+`hermes plugins install <catalog-name>` command in the expanded card to retain
+catalog resolution.
 
 Websites need no SDK — a normal anchor works:
 
@@ -48639,6 +48722,40 @@ hermes profile rename mybot assistant
 # ~/.local/bin/mybot → ~/.local/bin/assistant
 ```
 
+The rename also migrates the profile's persisted session/routing identity — session keys
+(`agent:<old>:*`), `sessions.profile_name`, heartbeats, and routing/delivery rows — to the new
+name. A live multiplexed gateway owns that migration (it holds the routing index in memory), so
+when it is running the CLI delegates to it.
+
+## `hermes profile migrate-identity`
+
+```bash
+hermes profile migrate-identity <old-name> <new-name>
+```
+
+Retries the identity migration of a rename that already completed. Run it if `hermes profile
+rename` warned that the live gateway could not migrate session identity: restart the gateway
+(it reloads the routing index from the database, so the migration lands), or stop it — with no
+gateway holding the store the command performs the durable rewrite itself.
+
+The migration is driven by the rows that still name `<old>`, so `profiles/<old>` does not have
+to exist; only `<new>` is checked. Idempotent — re-running a completed migration succeeds with
+nothing left to rekey. Exits non-zero when a live gateway refuses the migration, when a
+database rejects the rewrite (a routing collision, a lock, or one of the two databases failing
+while the other succeeds), naming the database and error.
+
+**Example:**
+
+```bash
+hermes profile rename mybot assistant
+# ⚠ Profile was renamed, but the live gateway could not migrate session identity (…).
+#   Restart the gateway, then run:
+#     hermes profile migrate-identity mybot assistant
+
+hermes profile migrate-identity mybot assistant
+# ✓ Session/routing identity migrated: mybot → assistant
+```
+
 ## `hermes profile export`
 
 ```bash
@@ -70508,6 +70625,8 @@ Changing any of these values invalidates only that profile's disk-discovery cach
 
 The model picker lives in the **composer**, just left of the microphone. Click it to switch the model; hover a model row for its options (thinking, effort, fast). Next to it, a **reasoning pill** shows the active model's effort level (`Med`, `High`, …) and opens the same options directly, so you can change effort without finding the model's row. The pill is hidden for models whose catalog reports no reasoning control.
 
+The **microphone** is dictation; hover it and the other voice toggles fan out above it — **Read replies aloud** and the **wake word** ear. A toggle that is on shows as a solid disc. Starting a full voice conversation stays on the primary button to the right. In the HUD and in narrow tiles the same controls fold into one menu behind the mic instead.
+
 - **The composer picker is sticky UI state and never touches your default.** It's remembered locally (per device) and **follows** across new chats and restarts instead of snapping back to the default — pick a model once and the next `Cmd/Ctrl+N` opens on it. With a live chat, switching models scopes the change to that **current chat**; either way the selection rides along when the session is created/switched and is **never** written to the profile default — with one exception: on a fresh profile that has no `model.default`/`model.provider` configured yet, the first pick is persisted so the app has a real default instead of falling through to a stray API-key env var on restart. Persistence follows the same rule as `/model` (`model.persist_switch_by_default`); use **Settings → Model** to change the default deliberately. (Switching [profiles](#sessions--profiles) reseeds to that profile's own default.)
 - **Set the default in Settings → Model.** That "main" model is your **per-profile global default** — it's what new chats, crons, subagents, and auxiliary tasks start from, and it's the only place that writes it. Each [profile](#sessions--profiles) keeps its own default.
 - **Per-model effort/fast presets.** Each model remembers its own reasoning effort and fast-mode choice in the desktop app, re-applied to the session whenever you pick that model. These presets are a desktop convenience and don't change crons or subagents.
@@ -70623,12 +70742,38 @@ When you have two or more [profiles](./profiles.md), the config-backed settings 
 
 The app also surfaces the broader Hermes management surface so you don't have to drop to a terminal:
 
-- **Skills** — browse, install, and manage [skills](./features/skills.md). The Skills tab lists your installed skills with enable/disable toggles, and below them the full built-in optional-skills catalog that ships with Hermes — each entry has a one-click **Install** button that flips the row into the installed list once it finishes.
+- **Skills** — open **Capabilities → Skills** to manage [skills](./features/skills.md). **Installed** shows the selected profile's actual skills and enable/disable state. **Browse** searches the same full published catalog as the public Skills Hub, with native list and detail views.
+- **Plugins** — **Capabilities → Plugins** uses the same **Installed / Browse** layout. Installed combines actual app-level desktop plugins with agent plugins from the selected profile; Browse shows the public [Plugin Catalog](./features/plugin-catalog.md). Search stays at the top, and the tab switch and actions share one row on both pages.
 - **Memory graph (Star Map)** — type `/journey` (aliases `/learning`, `/memory-graph`) in chat to open an interactive constellation of learned skills and memories over time, with a playback scrubber. Nodes can be edited or deleted right from the panel (skills are archived, memories removed). See [Learning Journey](./features/memory.md#learning-journey-journey).
 - **Cron** — view and manage [scheduled jobs](../reference/cli-commands.md#hermes-cron).
 - **Profiles** — switch between [Hermes profiles](./profiles.md) (isolated config/skills/sessions).
 - **Messaging** — set up gateway channels. Telegram has a **Quick setup** card: click **Create with QR**, scan the code (or open the link) in Telegram, and Hermes creates the bot, detects your user ID for the allowlist, saves the credentials, and restarts the gateway for you. Any credential save, clear, or enable toggle keeps a **Restart now** banner on the page until the gateway has actually restarted; if a restart fails, the banner stays so you can retry or restart manually.
 - **Agents** and **Command Center** — orchestration surfaces for multi-agent work.
+
+#### Where Browse gets its data
+
+These are native Desktop views, **not embedded website pages**. Desktop and
+the public website consume the same generated CDN snapshots:
+
+| Catalog | Public docs alias | Desktop fetch URL |
+|---|---|---|
+| Skills | [`/docs/api/skills.json`](https://hermes-agent.nousresearch.com/docs/api/skills.json) | `https://nousresearch.github.io/hermes-agent/docs/api/skills.json` |
+| Plugins | [`/docs/api/plugins.json`](https://hermes-agent.nousresearch.com/docs/api/plugins.json) | `https://nousresearch.github.io/hermes-agent/docs/api/plugins.json` |
+
+The skills snapshot combines `skills/`, `optional-skills/`, and the centralized
+skills index. The plugin snapshot comes from `plugin-catalog/*.yaml` and cached star
+counts; the same publish supplies the installer's removed-entry list. Browsing does not make live
+GitHub API calls or fetch plugin/skill source repositories. **Installed** is
+separate: its state comes from the selected profile's backend and the app's
+desktop-plugin registry, not those public snapshots.
+
+The public hubs' **Install in Hermes** buttons open `hermes://skill/install`
+or `hermes://plugin/install` links and require confirmation in Desktop. Use
+an updated Desktop build for the skill route and plugin catalog parameters;
+the cards retain copyable CLI commands if the app is missing or too old. See
+[skill links](./features/skills.md#install-from-the-website) and
+[plugin links](./features/plugins.md#one-click-install-links-desktop) for the
+parameters and review flow.
 
 ### Bot Mode (built in)
 
@@ -70872,8 +71017,8 @@ hot-reloads every save. Manage installed plugins live in **Capabilities → Plug
 See [Desktop Plugin SDK](../developer-guide/desktop-plugin-sdk.md) for the full
 reference. (This is separate from the [web dashboard plugin system](./features/extending-the-dashboard.md).)
 
-**Capabilities → Plugins** is the one place for everything that extends
-Hermes: **one row per plugin**, with two switch columns.
+**Capabilities → Plugins → Installed** shows the actual installed state:
+**one list entry per plugin**, with Desktop and Agent controls in its detail pane.
 
 - A plugin can extend **this app**, **the agent**, or **both** — the badge on
   each row says which, inferred from what the package contains (`plugin.yaml`
@@ -70900,13 +71045,14 @@ Hermes: **one row per plugin**, with two switch columns.
   [Accent Picker](https://github.com/NousResearch/hermes-desktop-accent-picker)
   install from their own repos via **Install from Git**.
 
-Discovery sits underneath: the live [Plugin Catalog](./features/plugin-catalog.md)
-picker installs reviewed entries at their pinned commit into the selected
-profile, and **Install from Git** takes any other repository through the same
-review-then-install dialog; its optional **Pin to commit** field installs one
-exact 40-character commit SHA (private repos included), and pinned plugins
-carry a `pinned @ <sha8>` badge in the list. Old `Settings → Plugins` links
-redirect here.
+Switch to **Browse** for the native [Plugin Catalog](./features/plugin-catalog.md).
+Both Browse and **Install from Git** open the review-then-install dialog. For
+an agent-plugin catalog install, the backend resolves the catalog name to its
+reviewed pin; a link's `sha` is display metadata, not an override. This does
+not guarantee a pinned standalone desktop-plugin install. **Install from Git**
+also offers **Pin to commit** for agent-plugin installs (a full 40-character
+SHA, including private repositories); pinned agent plugins show a
+`pinned @ <sha8>` badge. Old `Settings → Plugins` links redirect here.
 
 ## Troubleshooting
 
@@ -75431,12 +75577,32 @@ hermes plugins install <name>
 Browse it visually at **[/docs/plugins](/plugins)** — entries are shelved by
 category (Memory, Desktop, Platforms, Web & Browser, Tools, Voice, Automation,
 Models), with search, tier filters (Official / Community), capability chips, and
-copyable install commands for every entry.
+**Install in Hermes** buttons and copyable CLI commands for every entry.
+
+In Desktop, open **Capabilities → Plugins → Browse** for the native catalog
+view. It is not an embedded website. **Installed** is a separate tab backed
+by the app's desktop-plugin registry and the selected profile's agent-plugin
+state, rather than catalog metadata. Skills uses the same **Installed / Browse**
+layout; search stays at the top and the tab switch and actions share one row.
 
 The catalog complements — it does not replace — the existing
 [plugin system](plugins.md). Anything you can install from the catalog is a
 normal plugin under the hood; the catalog just adds discovery and a review
 layer on top.
+
+### Published browse data
+
+The website and Desktop read the same generated CDN snapshot:
+[`https://hermes-agent.nousresearch.com/docs/api/plugins.json`](https://hermes-agent.nousresearch.com/docs/api/plugins.json).
+Desktop fetches it through
+`https://nousresearch.github.io/hermes-agent/docs/api/plugins.json`; the public
+docs alias serves the same data. The docs build reads `plugin-catalog/*.yaml`
+and adds cached repository star counts. It also publishes the installer's
+removed-entry list. Neither
+Browse view crawls source repositories or queries the GitHub API live.
+
+This browse snapshot is distinct from the installer's
+[`plugin-catalog.json`](#live-refresh), which resolves catalog names and pins.
 
 ## What's in an entry
 
@@ -75485,6 +75651,24 @@ repository. Review the code of anything you give credentials to.
 :::
 
 ## Installing from the catalog
+
+On the website, **Install in Hermes** opens a protocol link of this form:
+
+```text
+hermes://plugin/install?repo=owner%2Frepo&catalog_name=example-plugin&sha=0123456789abcdef0123456789abcdef01234567
+```
+
+`repo` is URL-encoded, including any `#subdir`. Desktop asks you to review the
+source, destination and components before confirming; the link does not
+auto-install. For the agent-plugin component, the backend resolves
+`catalog_name` to its reviewed pin. The link's `sha` is **display metadata
+only**, not authority to choose or override a commit, and it is not a pin
+guarantee for a standalone desktop plugin.
+
+Use an updated Desktop build for the catalog parameters (and for the public
+Skills Hub's new `hermes://skill/install?identifier=...` route). Older builds
+may only understand repository-only plugin links. The expanded cards retain
+CLI commands, so you can install by catalog name without Desktop:
 
 ```bash
 # Install a reviewed catalog entry by name (checks out the pinned SHA)
@@ -76945,7 +77129,8 @@ cd ~/.hermes/hermes-agent && uv pip install -e ".[wake]"
 /wake off       # stop listening
 ```
 
-In the desktop app, click the ear icon in the composer.
+In the desktop app, hover the microphone in the composer and click the ear
+that fans out of it. The ear is solid when the wake word is listening.
 
 The toggle IS the setting: turning the wake word on or off — via `/wake` or the
 desktop ear button — also writes `wake_word.enabled` to `~/.hermes/config.yaml`,
@@ -77148,7 +77333,8 @@ proves the *renderer* has mic access — the wake listener runs in the Python
 *backend*, which needs its own grant. Without it, CoreAudio hands the backend a
 "working" stream that only ever delivers silence, so the ear shows listening
 but the phrase never fires. Hermes detects this (`/wake status` shows
-"mic delivers only silence"; the desktop ear tooltip carries the same hint).
+"mic delivers only silence"; the desktop's folded voice menu carries the same
+hint on its trigger).
 Fix: System Settings → Privacy & Security → Microphone → enable the Hermes
 backend (it may appear as your terminal, `python`, or Hermes), then toggle the
 wake word off and on.
@@ -85858,6 +86044,8 @@ profile and never shares with the default or any sibling:
 | MCP discovery in the Desktop/dashboard backend | Once per served profile home | A profile selected after another has already built an agent still discovers its own `mcp_servers` |
 | MCP connections in the Desktop/dashboard backend and the per-profile cron ticker | Keyed per served profile even with `gateway.multiplex_profiles` off — same rule as the multiplexer | A same-named `mcp_servers` entry with other credentials is its own connection; a served profile never calls a server as another profile |
 | Dashboard actions (`hermes -p <name> …` spawned by the Desktop/dashboard) | A scrubbed child env pinned to that profile's `HERMES_HOME` | The child loads its own `.env`; the dashboard profile's tokens and ports are not inherited |
+| Every child that acts for a served profile (slash worker, Bot Chat delivery, A2A forward, `key_cmd` helper, browser driver) | That profile's own `.env` + secret sources over a credential-scrubbed base — with or without `gateway.multiplex_profiles` (the Desktop/dashboard `?profile=` route counts) | Absent from the child — a key that reached the launch process only through systemd / Compose / the shell is never inherited by another profile's child |
+| The launch (default) profile's own credentials in a `hermes serve` / dashboard process that also serves another profile | Its `.env` + secret sources over the process env **frozen the moment the first other profile is served**; not re-read afterwards | A credential rotated only in the process env (`systemctl set-environment`, a refreshed `op run` wrapper that did not re-exec) is not picked up until the process restarts — put rotating keys in `.env` or a secret source, or restart after rotating |
 | Cron `.env` tuning (`HERMES_CRON_TIMEOUT`, `HERMES_MODEL` fallback, `HERMES_CRON_MAX_PARALLEL`, prefill file), worker / Bot Chat child env | The profile's own `.env`; children never inherit the default profile's `.env` settings or bridged `TERMINAL_*` policy | Cron defaults / model refusal, exactly as a standalone `hermes -p <name> gateway run` |
 | Kanban workers and notifications for a profile's tasks | The assignee's `.env` + `config.yaml` (toolset pin, terminal backend, media policy, display language) | — |
 | `/loop` ticks, `background_process_notifications` gate, `notice_delivery`, background-process checkpoint recovery | The owning profile's `state.db` / `config.yaml` / `processes.json` | — |
@@ -86264,7 +86452,7 @@ A standalone secondary behind any of these boundaries stops the automatic path:
 |---|---|
 | different service manager or scope | default on user systemd, a secondary on **system** systemd (or launchd), or the default detached with a service-managed secondary |
 | more than one installed unit on a profile | a user **and** a system unit for the same profile (the explicit command removes both) |
-| different UNIX user | a system unit with its own `User=`, or a live gateway owned by another uid; a system unit whose `User=` this host cannot resolve counts as unknown, never as "same user" |
+| different UNIX user | a system unit with its own `User=`, or a live gateway owned by another uid; a system unit whose `User=` this host cannot resolve — on the secondary **or** on the default — counts as unknown, never as "same user" |
 | `HERMES_HOME` outside `<default home>/profiles/` | a unit pinning `HERMES_HOME=/opt/hermes/profiles/emma` |
 
 In that case `hermes update` prints the boundary it found plus
@@ -86367,13 +86555,17 @@ previous value, restarts the default gateway, and reinstalls/starts every
 recorded per-profile service (a system unit comes back with the `User=` it had).
 The manifest is removed once everything is back.
 
-The forward migration is transactional in the same way: if bringing the default
-gateway up fails after the per-profile gateways were removed (for example a
-system unit that has to run as root), `--multiplex` rolls back through the
-manifest on the spot so no profile is left without a gateway. Should the
-process die between flipping the flag and starting the default, the next
-`hermes gateway migrate --multiplex` sees the manifest with no live gateway and
-resumes from it instead of reporting "already multiplexed".
+The forward migration is transactional in the same way. Failures it can see
+coming from the plan (a system unit that would have to run as root without a
+recorded `User=`, a config file it cannot rewrite) are refused before any
+per-profile gateway is stopped. Anything that fails after the manifest is
+written — the flag write, a later secondary's stop or unit removal, the
+default's install or start — rolls back through the manifest on the spot, so no
+profile is left without a gateway. Should the process die anywhere in that
+window, the next `hermes gateway migrate --multiplex` sees the flag on, the
+manifest, and no live multiplexer serving the migrated profiles (an installed
+but stopped default unit does not count) and resumes from the manifest instead
+of reporting "already multiplexed".
 If no manifest exists (you enabled multiplexing by hand), leave multiplex mode
 with `hermes config set gateway.multiplex_profiles false && hermes gateway restart`
 and reinstall the per-profile services you want.
