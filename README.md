@@ -16,7 +16,7 @@ The repo's "Download ZIP" / `codeload` archive intentionally excludes `update-do
 
 ## Staying up to date
 
-A scheduled GitHub Action (`.github/workflows/update-docs.yml`) refreshes this mirror twice a day: it re-downloads the bundle, re-splits it, and pushes a commit only if something actually changed. If the page count drops by more than 10% in one run, it aborts without committing instead of silently deleting pages -- that's usually a sign the upstream bundle format changed rather than real doc removals. You can also trigger a refresh manually from the repo's Actions tab.
+A scheduled GitHub Action (`.github/workflows/update-docs.yml`) refreshes this mirror every 30 minutes: it re-downloads the bundle, re-splits it, and pushes a commit only if something actually changed. If the page count drops by more than 10% in one run, it aborts without committing instead of silently deleting pages -- that's usually a sign the upstream bundle format changed rather than real doc removals.
 
 ## License
 
