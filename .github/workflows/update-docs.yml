@@ -2,11 +2,8 @@ name: Update Hermes docs mirror
 
 on:
   schedule:
-    # Twice a day, off the top of the hour (GitHub recommends avoiding :00
-    # since that's when most scheduled workflows across GitHub fire).
-    - cron: "17 5 * * *"
-    - cron: "17 17 * * *"
-  workflow_dispatch: {} # lets you trigger a refresh manually from the Actions tab
+    - cron: "7,37 * * * *"   # every 30 minutes, offset from :00/:30
+  workflow_dispatch: {}
 
 permissions:
   contents: write

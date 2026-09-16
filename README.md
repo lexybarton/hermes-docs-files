@@ -14,6 +14,10 @@ Official docs from https://hermes-agent.nousresearch.com/docs/llms-full.txt, spl
 
 The repo's "Download ZIP" / `codeload` archive intentionally excludes `update-docs.py`, `DONTREADWHOLEFILE-llms-full.txt`, and `.github/` (see `.gitattributes`) -- so a plain zip download is just the doc pages plus this README and the LICENSE, nothing else. Clone the repo instead if you want the update tooling too.
 
+## Staying up to date
+
+A scheduled GitHub Action (`.github/workflows/update-docs.yml`) refreshes this mirror twice a day: it re-downloads the bundle, re-splits it, and pushes a commit only if something actually changed. If the page count drops by more than 10% in one run, it aborts without committing instead of silently deleting pages -- that's usually a sign the upstream bundle format changed rather than real doc removals. You can also trigger a refresh manually from the repo's Actions tab.
+
 ## License
 
 MIT -- matching the license of the upstream Hermes Agent documentation.
