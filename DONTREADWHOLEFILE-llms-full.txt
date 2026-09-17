@@ -969,6 +969,8 @@ Close the listed processes and re-run. If you're sure the concurrent process won
 
 A second, separate guard refuses to touch the venv while any process is running from its Python interpreter (the Desktop app's backend, a gateway, a Python REPL). Those processes keep native extension files (`.pyd`) locked, and a dependency sync that dies partway on an access-denied error strands the install between versions. This guard is **not** bypassed by `--force`; if you're certain the detected holders are false positives, use the explicit `hermes update --force-venv`.
 
+Both guards, the Desktop update preflight, and the dependency repair steps look for the environment at `venv` first and then at the uv-default `.venv`, so a source checkout set up with `uv venv` / `uv sync` updates the same way an installer-created `venv` does. When both directories exist, `venv` is the one that gets updated.
+
 #### Windows venv recreation is transactional
 
 When the Windows installer must recreate an existing `venv`, it first moves the old directory to a unique `venv.stale.*` name, then creates and verifies the replacement. The old tree is deleted only after the dependency install completes and the baseline imports pass in the new tree — until then it is the rollback source (recorded in `venv.pending-backup`).
@@ -2902,7 +2904,7 @@ Start a line with `!` to run it as a shell command instead of sending it to the 
 
 - **Zero cost.** The model is never invoked — no API call, no tokens, no latency.
 - **Nothing enters the conversation.** The command and its output are not added to history, so your context stays clean and the prompt cache is untouched.
-- **Runs where the agent's `terminal` tool runs.** Uses the session working directory, so `!pwd` matches what the agent would see.
+- **Runs on your machine, in the session working directory.** With the default local terminal backend `!pwd` matches what the agent would see. A remote or sandboxed `terminal.backend` (`ssh`, `docker`, …) is **not** used for `!` commands — they always run on the host where Hermes itself runs, so `!hostname` names your machine while the agent's `terminal` tool names the backend. Ask the agent (or open a shell on the target) to run something *inside* the backend. Path completion in the composer, by contrast, does follow the configured backend and lists the target's filesystem.
 - **Approvals still apply.** A dangerous command (`rm -rf`, writes to `~/.hermes/config.yaml`, etc.) goes through the same approval prompt the agent's `terminal` tool uses. `!` is a cost/latency shortcut, not a security bypass.
 - **Non-zero exits are shown.** A failing command prints `! exited <code>` after its output.
 - `!` on its own prints a one-line usage reminder.
@@ -3632,7 +3634,7 @@ hermes config set OPENROUTER_API_KEY sk-or-...  # Saves to .env
 ```
 
 :::tip
-The `hermes config set` command automatically routes values to the right file — every `UPPER_SNAKE` name (`OPENROUTER_API_KEY`, `DISCORD_HOME_CHANNEL`, `TELEGRAM_GROUP_ALLOWED_USERS`, `HERMES_TIMEZONE`, …) is an environment variable and is saved to `.env`, never to `config.yaml`; dotted settings go to `config.yaml`. Any other `UPPER_SNAKE` name is saved to `.env` as-is (it is exported to the process environment for plugins and skills); names on the env writer's denylist (`HERMES_YOLO_MODE`, `PATH`, …) are refused. A misspelled path under a known section (`gateway.discord.foo`) is refused with a did-you-mean before anything is written; pass `--force` to write it anyway.
+The `hermes config set` command automatically routes values to the right file — every `UPPER_SNAKE` name (`OPENROUTER_API_KEY`, `DISCORD_HOME_CHANNEL`, `TELEGRAM_GROUP_ALLOWED_USERS`, `HERMES_TIMEZONE`, …) is an environment variable and is saved to `.env`, never to `config.yaml`; dotted settings go to `config.yaml`. Any other `UPPER_SNAKE` name is saved to `.env` as-is (it is exported to the process environment for plugins and skills); names on the env writer's denylist (`HERMES_YOLO_MODE`, `PATH`, …) are refused. A misspelled path under a known section (`gateway.discord.foo`) is refused with a did-you-mean before anything is written; pass `--force` to write it anyway. `hermes config get` on such a path prints the value from your file together with a stderr notice that Hermes may not read it, so a leftover key cannot silently pass for a live setting.
 :::
 
 ## Configuration Precedence
@@ -3712,7 +3714,10 @@ mode is not live-downgraded when you set `journal_mode: delete` (a downgrade
 under open connections can corrupt it). `hermes doctor` warns
 `<db> is in WAL mode despite database.journal_mode=delete` until you stop
 every Hermes process for the profile and run a one-time offline
-`PRAGMA journal_mode=DELETE` on the file.
+`PRAGMA journal_mode=DELETE` on the file. Under that warning it names the
+processes currently holding the database (`<db> is held by PID <n> (<command>)`)
+so you know what to stop; when the holder scan is partial or unavailable it says
+`cannot prove the database is quiet` instead of giving an all-clear.
 
 ## Environment Variable Substitution
 
@@ -4985,6 +4990,8 @@ Auxiliary task blocks additionally accept a `reasoning_effort` knob:
 
 This is the per-task counterpart of the global `agent.reasoning_effort`: run compression at `low` or vision at `none` to cut side-task latency and cost when your main model is an expensive reasoning model, without touching your main chat behavior. It applies to auxiliary-client tasks such as `vision`, `compression`, `title_generation`, and `curator`, across all three auxiliary wire formats (chat completions, Codex Responses, Anthropic Messages). An explicit `extra_body.reasoning` on the same task wins over the shorthand.
 
+If the endpoint rejects the reasoning field outright (a chat-only model behind an OpenAI-compatible relay answering `400 Unrecognized request argument supplied: reasoning_effort`), the auxiliary call is retried once with every reasoning field omitted, so the task (for example the session title) still completes with the endpoint's default behaviour.
+
 **Background review is different:** a same-model review fork always inherits the parent's reasoning effort. `auxiliary.background_review.reasoning_effort` is ignored on that path, including when the parent provider/model is explicitly selected. This preserves byte-identical reasoning settings, system prompt, full conversation snapshot, and tool definitions for prompt-cache parity; there is no independent-effort switch for same-model reviews. See [background review reasoning](/user-guide/features/memory#same-model-review-reasoning). When the review is routed to a different provider/model, `reasoning_effort` applies to that routed fork (unset = the routed provider's default). Hermes prints a one-time warning when the key is set but the review runs on the main model.
 
 **MoA also uses a different configuration:** reasoning depth for Mixture-of-Agents is configured **per slot** in the MoA preset (`moa.presets.<name>.reference_models[].reasoning_effort` / `aggregator.reasoning_effort`), not on the `moa_reference`/`moa_aggregator` auxiliary blocks — see [Mixture of Agents](/user-guide/features/mixture-of-agents).
@@ -5388,7 +5395,7 @@ There is no `hermes config set` support for `reasoning_overrides` keys — edit 
 3. Global `agent.reasoning_effort`
 4. Provider default
 
-The override applies automatically everywhere: CLI startup, messaging gateway, Desktop/TUI, cron jobs, `/model` mid-session switches, and fallback model activation.
+The override applies automatically everywhere: CLI startup, messaging gateway, Desktop/TUI, cron jobs, `/model` mid-session switches (including a switch issued before the first message), session resume (`--resume`, `/resume`), `/new`, and fallback model activation.
 
 ## Fast Mode
 
@@ -6189,6 +6196,8 @@ Supported values: any IANA timezone identifier (e.g. `America/New_York`, `Europe
 
 `hermes doctor` (and the startup config check) reports a value the runtime cannot load — a typo such as `Asia/Tokio` would otherwise silently put the agent clock and every cron schedule on server-local time. `HERMES_TIMEZONE` overrides this key when set.
 
+The agent clock, cron schedules and time-aware tools follow this zone on every OS. Code run through `execute_code` also inherits it as `TZ` on Linux and macOS; on Windows those children keep the OS-configured zone instead (the Windows C runtime only parses POSIX-form `TZ` strings, and an IANA name there produces a wrong UTC offset), so set the Windows zone itself when child scripts must render local time in this zone.
+
 ## Discord
 
 Configure Discord-specific behavior for the messaging gateway:
@@ -6976,7 +6985,7 @@ Each session is tagged with its source platform:
 
 | Source | Description |
 |--------|-------------|
-| `cli` | Interactive CLI (`hermes` or `hermes chat`) |
+| `cli` | Interactive CLI (`hermes` or `hermes chat`), and one-shot runs (`hermes chat -q`, `hermes -z`). A one-shot child launched from inside a TUI or Desktop session is still tagged `cli`, not `tui`/`desktop` — it is not that conversation, so it never shows up in the TUI/WebUI picker as a resumable chat. Pass `--source tool` to keep one-shot integration runs out of session lists entirely. |
 | `telegram` | Telegram messenger |
 | `discord` | Discord server/DM |
 | `slack` | Slack workspace |
@@ -7133,7 +7142,8 @@ What happens:
    - **Telegram** — opens a new forum topic (DM topics if Bot API 9.4+ Topics mode is enabled in the chat, or a forum supergroup topic).
    - **Discord** — creates a 1440-min auto-archive thread under the home text channel.
    - **Slack** — posts a seed message and uses its `ts` as the thread anchor.
-   - **WhatsApp / Signal / Matrix / SMS** — no native threads, falls back to the home channel directly.
+   - **Matrix** — posts a seed message and uses its event id as the thread root (`m.thread` relation).
+   - **WhatsApp / Signal / SMS** — no native threads, falls back to the home channel directly.
 4. The gateway re-binds the destination key to your existing CLI session id, then forges a synthetic user turn asking the agent to confirm and summarize. The reply lands in the new thread.
 5. When the gateway acknowledges success, the CLI prints a `/resume` hint and exits cleanly:
 
@@ -7153,7 +7163,7 @@ What happens:
 - Thread creation fails (permissions, topics-mode off) → falls back to the home channel directly and still completes; no thread isolation but the handoff itself works.
 - `adapter.send` fails (rate limit, transient API error) → handoff marked failed with the reason; the row clears so you can retry.
 
-**Limitation worth knowing:** for non-thread-capable platforms with multi-user group home channels, the synthetic turn keys as a DM-style session. This works for self-DM home channels (the typical setup) but isn't ideal for genuinely shared group chats. Threading covers Telegram / Discord / Slack — by far the common case — so most setups never hit this.
+**Limitation worth knowing:** for non-thread-capable platforms with multi-user group home channels, the synthetic turn keys as a DM-style session. This works for self-DM home channels (the typical setup) but isn't ideal for genuinely shared group chats. Threading covers Telegram / Discord / Slack / Matrix — by far the common case — so most setups never hit this.
 
 ## Session Naming
 
@@ -7902,13 +7912,39 @@ Run multiple independent Hermes agents on the same machine — each with its own
 
 ## What are profiles?
 
-A profile is a separate Hermes home directory. Each profile gets its own directory containing its own `config.yaml`, `.env`, `SOUL.md`, memories, sessions, skills, cron jobs, and state database. Profiles let you run separate agents for different purposes — a coding assistant, a personal bot, a research agent — without mixing up Hermes state.
+A profile is a separate Hermes home directory. Each profile gets its own directory containing its own `config.yaml`, `.env`, `SOUL.md`, memories, sessions, skills, cron jobs, and state database. Hermes recognises a directory under `~/.hermes/profiles/` as a profile only when it carries one of those identity files (`config.yaml`, `.env`, `SOUL.md`, `profile.yaml`, `auth.json`, `state.db`); a bare directory left behind by logging or cron is ignored by `profile list`, gateways and `-p`. Profiles let you run separate agents for different purposes — a coding assistant, a personal bot, a research agent — without mixing up Hermes state.
 
 :::caution Give every agent its own profile
 Never point two agent processes at the same profile (the same Hermes home). Both write memory automatically, and each loads the other's writes into its system prompt at session start — so two writers on one home compound each other's state until it stops being anything you configured. Profiles exist exactly to prevent this; agents that need shared memory should use an [external memory provider](/user-guide/features/memory-providers) instead.
 :::
 
 When you create a profile, it automatically becomes its own command. Create a profile called `coder` and you immediately have `coder chat`, `coder setup`, `coder gateway start`, etc.
+
+### Profiles, agents, and bots
+
+These terms describe different parts of Hermes:
+
+- **Profile** is the persistent home for an assistant's configuration and data.
+  It keeps the same state across conversations and restarts.
+
+- **Agent** is the running Hermes assistant that uses that configuration and
+  state. "Hermes Agent" also names the product.
+
+- **Bot Mode bot** is a profile presented as a named entry in the desktop's
+  [Bot Mode](./bot-mode.md) roster, with an avatar and a persistent Bot Chat.
+  The same profile remains accessible from the CLI. Every Bot is a profile, but
+  not every profile is a Bot: a profile becomes a Bot when Bot Mode stores its
+  roster presentation (title, avatar, section, hidden state) in the profile's
+  metadata and pins its canonical Bot Chat. A profile you only ever drive from
+  the CLI, Docker, or a gateway and never add to the roster stays a plain profile.
+
+- **Messaging bot** is an account on a platform such as Telegram, Discord, or
+  Slack, connected to Hermes through the gateway. Its
+  [bot token](#different-bot-tokens) identifies that platform account.
+
+- **Subagent** is a child assistant spawned by
+  [`delegate_task`](./features/delegation.md) for a task, with a fresh
+  conversation. A separate conversation is different from a separate profile.
 
 ## Quick start
 
@@ -7969,9 +8005,13 @@ hermes profile create backup --clone-all
 
 Copies **everything** — config, API keys, personality, all memories, skills, plugins. A complete working snapshot. Per-profile history is excluded (session history, `state.db`, `backups/`, `state-snapshots/`, `checkpoints/`) — these belong to the source profile and can reach tens of GB. When cloning from the default profile, the local-model runtime trees (`models/`, `runtimes/`, `node/` — downloaded weights and managed binaries, re-fetched on demand) are skipped too, as `hermes backup` already does. **Cron jobs are not cloned** either: they are scheduled work bound to the source profile and its delivery channel, and a clone that inherited them would run every job twice (two gateways, same job ids). The new profile starts with an empty `cron/`. For a full backup including history and cron jobs, use `hermes profile export` or `hermes backup` instead.
 
-:::note OAuth logins are shared, not copied
-Anthropic (Claude Pro/Max), OpenAI Codex, and xAI OAuth logins use **single-use refresh tokens** — a copy of one is not a second credential, it is the same credential with two owners, and the first profile to refresh it revokes it for every other copy. `--clone-all` (and the dashboard's credential mirroring) therefore drops those OAuth rows from the clone. The new profile keeps reading the login from the root `~/.hermes/auth.json`, and a token refresh performed inside any profile is written back to root, so all profiles stay signed in. Static API keys are copied as usual. To give a profile its own separate OAuth login, run `hermes -p <name> auth add <provider>` inside it.
+:::note OAuth logins are never copied
+Anthropic (Claude Pro/Max), OpenAI Codex, and xAI OAuth logins use **single-use refresh tokens** — a copy of one is not a second credential, it is the same credential with two owners, and the first profile to refresh it revokes it for every other copy. `--clone-all` (and the dashboard's credential mirroring) therefore drops those OAuth rows from the clone. Static API keys are copied as usual. Sign the new profile into the OAuth provider itself: `hermes -p <name> auth add <provider>` (or `hermes -p <name> model`).
 :::
+
+### Every profile owns its credentials
+
+A named profile resolves providers from **its own** `auth.json` and `.env` only. It never inherits the root profile's logins or API keys, and a token refresh inside a profile never writes to the root store. A profile with no provider of its own is asked to set one up (`hermes -p <name> model`, or `hermes -p <name> auth add <provider>`) — it does not silently act as the owner. `hermes update` lists every profile that has no provider of its own so a bot never goes quiet unannounced.
 
 ### Clone from a specific profile
 
@@ -8203,6 +8243,7 @@ hermes profile list           # show all profiles with status
 hermes profile show coder     # detailed info for one profile
 hermes profile rename coder dev-bot   # rename (updates alias + service)
 hermes profile migrate-identity coder dev-bot   # retry a rename's identity migration
+hermes profile purge-identity dev-bot   # retry a delete's identity purge
 hermes profile export coder   # pack into coder.tar.gz (shareable; keys stripped)
 hermes profile import coder.tar.gz   # install an archive as a new profile
 ```
@@ -10149,6 +10190,30 @@ When on, web tools, the browser, vision URL fetches, and gateway media downloads
 
 The host-substring guard (which blocks lookalike Unicode domain tricks even when the underlying IP is public) stays on regardless of this setting.
 
+#### Local proxy fake-ip ranges
+
+A TUN proxy in fake-ip mode (Mihomo/Clash `fake-ip`, Surge enhanced mode) answers DNS with an
+address from its own block — `198.18.0.0/15` (RFC 2544 benchmarking) by default — for every name
+outside its filter. Those answers are the proxy's sentinel, not an internal host, so the
+private-IP guard otherwise rejects every outbound fetch on such a host: `web_extract`, platform
+attachment downloads and the browser relay all fail with *URL targets a private or internal
+network address* while the request never reaches the network. Declare the block to let the
+sentinel through:
+
+```yaml
+security:
+  fake_ip_ranges:
+    - 198.18.0.0/15
+```
+
+Empty by default, and narrower than `allow_private_urls`: only the declared blocks get the
+exemption, they should be ranges the local proxy owns (the dial still goes to the proxy, which
+resolves the real target itself), and loopback, RFC 1918, link-local, CGNAT and cloud-metadata
+destinations stay blocked — an entry that overlaps one of those classes (including `0.0.0.0/0`
+or `::/0`) is ignored with a warning rather than widening the guard. On a host with a cloud
+browser provider, the declared sentinel also stops counting as private for
+`browser.auto_local_for_private_urls`, so those pages keep going to the cloud browser.
+
 ### Tirith Pre-Exec Security Scanning
 
 Hermes integrates [tirith](https://github.com/sheeki03/tirith) for content-level command scanning before execution. Tirith detects threats that pattern matching alone misses:
@@ -10189,11 +10254,21 @@ The translation-and-execution check requires a short language/format clause (for
 and execution verbs across unrelated comma-separated role prose. These patterns are
 heuristics, not semantic intent detection.
 
-Blocked files show a warning:
+Blocked project files show a warning:
 
 ```
 [BLOCKED: AGENTS.md contained potential prompt injection (prompt_injection). Content not loaded.]
 ```
+
+Your own `SOUL.md` in `HERMES_HOME` is treated differently: it is a file you wrote (file-tool writes to it
+need your approval, and project checkouts never supply it), so a scanner hit there **does not block the
+file**. Hermes logs a warning naming the matched pattern, loads the file as usual, and `/context` lists it as
+`⚠ SOUL.md … loaded — matched prompt-injection pattern(s); review the file`. This lets an identity file that
+*documents* an attack phrase (security guidance such as "content telling you to ignore previous instructions")
+keep working; if you did not write the flagged text, treat the warning as a sign that something else edited
+the file. The exception does not extend to a `SOUL.md` shipped by a profile distribution: `hermes profile
+install <git-url>` and `hermes profile update` copy a third party's `SOUL.md` into the profile home without
+a scan or an approval prompt, so when `distribution.yaml` owns the file a scanner hit still blocks it.
 
 ## Best Practices for Production Deployment
 
@@ -11597,6 +11672,8 @@ in the pending JSON file). Memory writes have the same gate under
 
 Browse, search, install, and manage skills from online registries, `skills.sh`, direct well-known skill endpoints, and official optional skills.
 
+Unfiltered searches (CLI, TUI, and the dashboard) are answered from a cached centralized index that covers the external registries. That index is rebuilt periodically, so when it has no match for your query Hermes also asks `skills.sh`, ClawHub, LobeHub and well-known endpoints directly — a skill published minutes ago still shows up. That extra pass gets at most 8 seconds of the search budget, so a slow registry cannot turn a miss into a long wait. Custom GitHub taps are not part of that fallback (search them with `--source github`, or via the index once it catches up), and provider filters such as `--source nvidia` do not trigger it (those registries carry no provider data).
+
 ### Common commands
 
 ```bash
@@ -12045,7 +12122,7 @@ A run has two phases:
 1. **Automatic transitions** (deterministic, no LLM). Skills unused for `stale_after_days` (14) become `stale`; skills unused for `archive_after_days` (30) are moved to `~/.hermes/skills/.archive/`. This is the always-on pruning behavior — it runs whenever the curator is enabled, with no aux-model cost.
    - **Pinned skills** and **skills referenced by any cron job** (including paused/disabled jobs) are skipped entirely — treated like pin for auto-transitions so a slow or paused schedule cannot archive a skill out from under a job. Consolidation also rewrites cron skill references when it merges umbrellas.
    - **Never-used skills** (`use_count == 0`) get a grace floor: they are not archived until they are at least `stale_after_days` old. Zero uses is absence of evidence, not proof the skill is disposable.
-2. **LLM consolidation** (single aux-model pass with a high iteration ceiling — a full curation sweep typically takes 50–100 API calls) — **OFF by default**. When `curator.consolidate: true`, the forked agent surveys the agent-created skills, can read any of them with `skill_view`, and decides per-skill whether to keep, patch (via `skill_manage`), consolidate overlapping ones into class-level umbrellas, or archive via the terminal tool. Consolidation treats a skill as a full package: if a skill has `references/`, `templates/`, `scripts/`, `assets/`, or relative links to those paths, the curator must either keep it standalone, re-home the needed support files and rewrite paths, or archive the entire package unchanged — not flatten only `SKILL.md` into another skill's `references/` file.
+2. **LLM consolidation** (single aux-model pass with a high iteration ceiling — a full curation sweep typically takes 50–100 API calls) — **OFF by default**. When `curator.consolidate: true`, the forked agent surveys the agent-created skills, can read any of them with `skill_view`, and decides per-skill whether to keep, patch (via `skill_manage`), consolidate overlapping ones into class-level umbrellas, or archive (via `skill_manage action=delete` with an `absorbed_into` target — the pass has no terminal). The candidate list it is given contains only skills it can actually read and write: bundled built-ins (even with `prune_builtins: true`, which only affects the deterministic archival pass) and skills in `skills.disabled` (which `skill_view` refuses) are never offered to it, so the pass cannot burn its tool budget on refused reads or writes. Consolidation treats a skill as a full package: if a skill has `references/`, `templates/`, `scripts/`, `assets/`, or relative links to those paths, the curator must either keep it standalone, re-home the needed support files and rewrite paths, or archive the entire package unchanged — not flatten only `SKILL.md` into another skill's `references/` file.
 
 :::info Consolidation is opt-in
 By default the curator only **prunes** — the deterministic inactivity pass marks skills stale and archives long-unused ones. The opinionated LLM **consolidation** pass (umbrella-building, merging overlapping skills) is off by default because it costs aux-model tokens on every run and makes broad structural changes to your library. Turn it on with `curator.consolidate: true`, or run it once on demand with `hermes curator run --consolidate`.
@@ -13756,11 +13833,22 @@ All context files are scanned for potential prompt injection before being includ
 - **Secret file access**: `cat .env`, `cat credentials`
 - **Invisible characters**: zero-width spaces, bidirectional overrides, word joiners
 
-If any threat pattern is detected, the file is blocked:
+If any threat pattern is detected in a project context file (`.hermes.md`, `AGENTS.md`, `CLAUDE.md`,
+`.cursorrules`), the file is blocked:
 
 ```
 [BLOCKED: AGENTS.md contained potential prompt injection (prompt_injection). Content not loaded.]
 ```
+
+Your own `SOUL.md` in `HERMES_HOME` is treated differently: it is a file you wrote (file-tool writes to it
+need your approval, and project checkouts never supply it), so a scanner hit there **does not block the
+file**. Hermes logs a warning naming the matched pattern, loads the file as usual, and `/context` lists it as
+`⚠ SOUL.md … loaded — matched prompt-injection pattern(s); review the file`. This lets an identity file that
+*documents* an attack phrase (security guidance such as "content telling you to ignore previous instructions")
+keep working; if you did not write the flagged text, treat the warning as a sign that something else edited
+the file. The exception does not extend to a `SOUL.md` shipped by a profile distribution: `hermes profile
+install <git-url>` and `hermes profile update` copy a third party's `SOUL.md` into the profile home without
+a scan or an approval prompt, so when `distribution.yaml` owns the file a scanner hit still blocks it.
 
 :::warning
 This scanner protects against common injection patterns, but it's not a substitute for reviewing context files in shared repositories. Always validate AGENTS.md content in projects you didn't author.
@@ -14940,6 +15028,11 @@ there is capped at **caution**: their fixtures deliberately hold hostile
 strings to prove the plugin rejects them, so it asks for confirmation and
 `--force` overrides it instead of blocking the install outright. The same
 finding in any other file (`setup.sh`, `src/spec/…`) is still **dangerous**.
+Likewise, a generic sample token (`hardcoded_secret`) inside a runtime `.py`
+file's `if __name__ == "__main__":` self-test block is capped at **caution**
+— the loader imports plugins and never runs that block — while every other
+finding inside it (destructive commands, provider-shaped keys such as `sk-…`)
+and the same token anywhere above the guard keep full severity.
 
 Scanning is on by default; disable it in `config.yaml`:
 
@@ -15204,7 +15297,7 @@ Auto-tracks and removes ephemeral files created during sessions — test scripts
 | `tracked.json.bak` | Atomic-write backup of the above |
 | `cleanup.log` | Append-only audit trail of every track / skip / reject / delete |
 
-**Safety** — cleanup only ever touches paths under `HERMES_HOME` or `/tmp/hermes-*`. Windows mounts (`/mnt/c/...`) are rejected. Well-known top-level state dirs (`logs/`, `memories/`, `sessions/`, `cron/`, `cache/`, `skills/`, `plugins/`, `disk-cleanup/` itself) are never removed even when empty — a fresh install does not get gutted on first session end.
+**Safety** — cleanup only ever touches paths under `HERMES_HOME` or `/tmp/hermes-*`. Windows mounts (`/mnt/c/...`) are rejected. Well-known top-level state dirs (`logs/`, `memories/`, `sessions/`, `cron/`, `cache/`, `skills/`, `plugins/`, `disk-cleanup/` itself) are never removed even when empty — a fresh install does not get gutted on first session end. User project trees (`workspace/`, `projects/`, `plans/`, `home/`) are never tracked or swept at all: a `test_*.py` or `tmp_*` file inside your project is source code, not scratch.
 
 **Enabling:** `hermes plugins enable disk-cleanup` (or check the box in `hermes plugins`).
 
@@ -16108,7 +16201,7 @@ cron:
 
 Behaviour is **thread-preferred**, scoped to the job's own conversation:
 
-- **Thread-capable platforms** (Telegram topics, Discord/Slack threads): each
+- **Thread-capable platforms** (Telegram topics, Discord/Slack/Matrix threads): each
   delivery opens its own dedicated thread and the brief is seeded into that
   thread's session, so a reply in-thread continues with full context. A
   recurring job (e.g. a daily brief) opens a fresh thread per run, keeping each
@@ -16207,6 +16300,24 @@ Otherwise, report the issue.
 ```
 
 Failed jobs always deliver regardless of the `[SILENT]` marker — only successful runs can be silenced. For quiet monitoring jobs, prompt the agent to reply with only `[SILENT]` when there is nothing to report.
+
+### Declaring a failed run
+
+Only runtime failures (exceptions, timeouts, an unreachable model) mark a run as failed. When the agent itself
+finishes its turn but the work did not get done — for example a delegated subagent or a script it ran failed —
+it can declare the run failed by putting `[CRON_FAILURE]` alone on the **first line** of its response, followed
+by the explanation:
+
+```text
+[CRON_FAILURE]
+The nightly export subagent exited with "disk full"; no report was produced.
+```
+
+The run is then recorded as failed (`last_status`, failure streak, `hermes cron runs` and `hermes cron incidents`
+all reflect it) and the failure notice is delivered like any other failed run. The full response is still saved
+under `~/.hermes/cron/output/` for triage. The marker is strict: mentioning or quoting `[CRON_FAILURE]` anywhere
+else in a report leaves the run successful. Script-only (`no_agent`) jobs ignore it — a script signals failure
+with a non-zero exit code.
 
 ## Script timeout
 
@@ -17076,7 +17187,7 @@ A child that exhausts its budget returns with `exit_reason: max_iterations` and 
 
 By default there is **no wall-clock timeout** on subagents. Children fail only from what they're actually doing — API errors, tool errors, or hitting their iteration budget — never from a delegation-level stopwatch. Earlier releases shipped a hard cap (300s, later 600s), which kept killing legitimately busy children mid-task: deep code reviews, large research fan-outs, and slow reasoning models routinely need more than 10 minutes while making steady progress the whole time.
 
-Genuinely stuck children are still detected: the heartbeat staleness monitor stops refreshing the parent's activity when a child makes no progress (no API calls, no tool starts, and no activity-timestamp ticks), letting the gateway inactivity timeout fire on a truly wedged worker. An in-flight model wait still counts as progress — subagents refresh the activity clock while waiting on the provider, so a slow local / long-prefill completion is not treated as stalled.
+Genuinely stuck children are still detected on every runtime, with or without a configured cap: the heartbeat staleness monitor watches each child's progress signals (API calls, tool starts, activity-timestamp ticks). A child whose progress is completely frozen past the stale threshold — 450s idle between turns, 1200s while inside a tool — is interrupted and its wait is **abandoned**: the parent gets a `status: "timeout"` entry whose error reads `Subagent stopped making progress after N API call(s) — no activity for 450s (heartbeat stale threshold); the pending worker was abandoned.` The wait ends even in one-shot runs (`hermes chat -Q`, Bot Chat one-shot, cron) that have no gateway inactivity watchdog behind them, so a wedged child can no longer hold the turn or its session lease forever. An in-flight model wait still counts as progress — subagents refresh the activity clock while waiting on the provider, so a slow local / long-prefill completion is not treated as stalled.
 
 If you want a hard cap anyway (e.g. cost control on unattended cron-driven delegation), opt in per-install:
 
@@ -17088,13 +17199,14 @@ delegation:
 
 A positive value enforces a hard wall-clock limit on each child; `0` or a negative value disables it.
 
-When a configured cap fires, the child's result carries structured timeout
-metadata alongside the error message so parents and hooks can distinguish a
-stopwatch kill from other failures without parsing text: `timeout_seconds`
-(the configured cap), `timed_out_after_seconds` (actual wall clock), and
-`timeout_phase` (`before_first_llm_call` when the child never reached its
-first request, `after_llm_calls` otherwise). All three are `null` on
-non-timeout errors.
+When a configured cap or the stale threshold fires, the child's result carries
+structured timeout metadata alongside the error message so parents and hooks
+can distinguish a stopwatch kill from other failures without parsing text:
+`timeout_seconds` (whichever limit actually ended the wait — the stale
+threshold when it pre-empts a longer configured cap, otherwise the cap),
+`timed_out_after_seconds` (actual wall clock), and `timeout_phase`
+(`before_first_llm_call` when the child never reached its first request,
+`after_llm_calls` otherwise). All three are `null` on non-timeout errors.
 
 ## Failure Visibility
 
@@ -17840,7 +17952,7 @@ Three reasons:
 
 **Zero schema footprint on normal sessions.** A regular `hermes chat` session has zero `kanban_*` tools in its schema unless the active profile explicitly enables the `kanban` toolset for orchestrator work. Dispatcher-spawned task workers get task-scoped tools because `HERMES_KANBAN_TASK` is set; orchestrator profiles get the broader routing surface through config. No tool bloat for users who never touch kanban.
 
-The auto-injected kanban guidance teaches the model which tool to call when and in what order.
+The auto-injected kanban guidance teaches the model which tool to call when and in what order. It is injected only for the dispatcher-spawned worker that owns the task: an interactive session that merely has the `kanban` toolset enabled keeps the tools but is not told it "has been assigned ONE task", and a `delegate_task` child or a cron run fired from inside a worker — which inherit the worker's `HERMES_KANBAN_TASK` — neither receives the worker protocol nor records a terminal outcome against the worker's card when its own turn budget runs out.
 
 ### Recommended handoff evidence
 
@@ -18322,6 +18434,8 @@ hermes kanban create "nightly backup audit" \
 The dispatcher refuses to re-spawn a ready task when it hit a quota/auth/429 error on the previous run (`blocker_auth`), or completed a run successfully within the guard window (`recent_success`), or a recent task comment links to a GitHub PR (`active_pr`). This prevents repeat worker storms on the same bug or task while a human catches up. See the `respawn_guarded` row in the [event reference](#event-reference).
 
 To see why a ready card is not spawning, run `hermes kanban dispatch --dry-run` — the output lists `Guarded (<reason>): <task id>` per held card (and `respawn_guarded`, `rate_limited`, `skipped_locked`, `memory_pressure` with `--json`). The gateway's and the standalone daemon's "dispatcher stuck" warning also names what the last tick held back, e.g. `Last tick held back: active_pr=1`.
+
+`recent_success` and `active_pr` hold the **ready** lane only — they are the inputs to a review handoff, not signals against one. To have a reviewer, closer or other recovery profile pick up a card whose PR is already open, move it to the review lane with `hermes kanban request-review <id>` (accepted from `ready` as well as `running`); the review-lane spawn is not subject to either guard, and the Dev assignee is not re-spawned against its own PR. A deliberate re-queue after a success (drag `done→ready`, `unblock`, re-promotion) also lifts `recent_success`, so a manual re-run is never silently held for the whole window.
 
 ### Drag-to-delete and bulk delete (dashboard)
 
@@ -19237,6 +19351,10 @@ Any real message you send while a goal is active takes priority over the continu
 
 While an agent is already running, `/goal status`, `/goal pause`, `/goal clear`, `/goal wait`, and `/goal unwait` are safe to run — they only touch control-plane state and don't interrupt the current turn. Setting a **new** goal mid-run (`/goal <new text>`) is rejected with a message telling you to `/stop` first, so the old continuation can't race the new one.
 
+### Continuation replies do not quote the goal message (gateway)
+
+A continuation prompt is not a reply to the message that set the goal, so on platforms that quote a reply target (Telegram) its progress bubbles and final reply are posted to the chat/topic without quoting that original message. Only your own messages are answered as replies.
+
 ### Persistence
 
 Goal state lives in `SessionDB.state_meta` keyed by `goal:<session_id>`. That means `/resume` picks up right where you left off — set a goal, close your laptop, come back tomorrow, `/resume`, and the goal is still standing exactly as you left it (active, paused, or done).
@@ -20022,7 +20140,7 @@ def register(ctx):
 **General rules for all hooks:**
 
 - Callbacks receive **keyword arguments**. Always accept `**kwargs` for forward compatibility.
-- Callback exceptions are logged and skipped; later callbacks continue.
+- Callback exceptions are logged and skipped; later callbacks continue. A callback that fails the same way on every call (typically a signature naming a field the hook does not send, e.g. `tool_data` instead of `tool_name`/`args`) is reported **once** at WARNING — the message lists the fields the hook provides — and identical repeats go to DEBUG, so a mis-declared plugin cannot flood the log.
 - If a Python plugin callback on a **timeout-bounded** hook (hot-path observers such as `post_tool_call` / `pre_llm_call`, plus the policy hook `pre_tool_call`) **blocks** longer than `plugins.hook_callback_timeout` (default 30s, set `0` to disable, max 600), it is abandoned without joining the worker so the agent loop continues. Timed-out or still-running `pre_tool_call` callbacks **fail closed** (block the tool); other bounded hooks fail open (skip). Hooks with a documented caller-thread contract (`subagent_stop`) are never moved onto a timeout worker. Shell hooks keep their own per-entry `timeout`.
 - The catalog below is descriptive: **observers** ignore returns, **transforms** accept the first valid string replacement, and **directive/control** hooks consume documented return shapes. Plugin middleware is a separate registry and surface, not another hook category.
 - Correlation fields such as `turn_id`, `api_request_id`, `task_id`, `session_id`, and `api_call_count` are hook-specific and may be absent. Treat IDs as opaque.
@@ -22701,23 +22819,33 @@ When you turn the toggle back off, Hermes deletes the snapshot store
 (`~/.hermes/browser-profile/`) on the next browser use, so the copied
 credentials don't linger after you revoke consent.
 
-:::note Windows: the browser must be fully closed
+:::note A running browser can block the login/autofill databases
 On Windows a running Chrome/Edge/Brave holds its cookie and login databases with
 an exclusive (deny-all) lock, so Hermes cannot copy them while the browser is
 open — it fails fast with a "fully quit the browser and retry" message rather
 than hang or produce a signed-out session. Real-profile browsing on Windows
 therefore requires the browser **fully quit**, including any background/tray
 instance (Chrome's "continue running background apps when closed" keeps a
-`chrome.exe` alive after you close the window). macOS and Linux can usually copy
-the profile while the browser is running. On every platform, each authentication
-database backup has a five-second retry budget. If the source or snapshot database
-stays locked, Hermes stops the launch and asks you to close the browser and retry.
-It preserves committed WAL data through SQLite rather than falling back to a raw
-file copy, which could silently lose recent logins. Unreadable or corrupt databases
-also stop the launch.
+`chrome.exe` alive after you close the window).
+
+On macOS and Linux the profile is not file-locked, but each authentication
+database is snapshotted through SQLite's online backup with a five-second
+budget, and a running Chrome typically holds `Login Data`, `Login Data For
+Account` and `Web Data` with a hot write lock that never yields within that
+budget (`Cookies` usually snapshots fine). When that happens Hermes stops the
+launch and names the databases it could not read — for example "chrome is
+running and holds the profile's Login Data, Login Data For Account, Web Data
+with a write lock" — so in practice **quit the browser before launching a
+real-profile session on macOS/Linux too**. You can reopen it once the session is
+up (the snapshot is a separate directory), but the auth files are re-synced on
+every fresh session launch, so a browser left running then hits the same lock.
+Hermes preserves committed
+WAL data through SQLite rather than falling back to a raw file copy, which could
+silently lose recent logins. Unreadable or corrupt databases also stop the
+launch, with the SQLite error named in the message.
 
 Set `browser.real_profile_autoclose: true` to let Hermes **offer to close the
-browser for you** when it's holding the profile. Even with this on, Hermes never
+browser for you** when it's holding the profile lock (the Windows case). Even with this on, Hermes never
 closes it automatically — when the profile is locked it always stops and the
 agent asks you first; only on your approval does it run `hermes browser
 close-profile` (terminates the browser process tree bound to that profile,
@@ -23628,6 +23756,8 @@ Prices are FAL's pricing at time of writing; check [fal.ai](https://fal.ai/) for
 
 :::tip Nous Subscribers
 If you have a paid [Nous Portal](https://portal.nousresearch.com) subscription, you can use image generation through the **[Tool Gateway](tool-gateway.md)** without a FAL API key. Your model selection persists across both paths. New installs can run `hermes setup --portal` to log in and turn on every gateway tool at once; existing installs can pick **Nous Subscription** as the image-gen backend via `hermes tools`.
+
+The **Nous Subscription** row is the only managed row. Its model picker spans every gateway the subscription runs — the FAL catalog above, native **Krea 2** (`krea-2-medium`, `krea-2-large`, `krea-2-medium-turbo`) and any Nous Portal image models — each model listed once, and the model you pick decides which gateway serves the request. Free tool-pool accounts see the FAL models only; Krea and Portal models are paid-subscription.
 
 If the managed gateway returns `HTTP 4xx` for a specific model, that model isn't yet proxied on the portal side — the agent will tell you so, with remediation steps (switch to FAL.ai in `hermes tools` with your own `FAL_KEY` for direct access, or pick a different model).
 :::
@@ -25284,6 +25414,10 @@ hermes ALL=(root) NOPASSWD: /usr/bin/systemctl --no-ask-password reset-failed he
 :::
 
 Avoid keeping both the user and system gateway units installed at once unless you really mean to. Hermes will warn if it detects both because start/stop/status behavior gets ambiguous.
+
+:::note Inside a container, only the system scope is offered
+`hermes gateway install` (and the `hermes gateway setup` wizard) refuse to install a **user** service when Hermes detects it is running inside a container. A user unit lands in `~/.config/systemd/user`, and when that home is bind-mounted from the host (podman/distrobox), the host's own `systemd --user` enables and starts the same unit — a second gateway polling the same bot token. Run the gateway as the container's main process (`hermes gateway run`, with a container restart policy), or in a systemd container (systemd as PID 1) install the isolated system scope: `sudo hermes gateway install --system --run-as-user <user>`.
+:::
 
 :::info Multiple installations
 If you run multiple Hermes installations on the same machine (with different `HERMES_HOME` directories), each gets its own systemd service name. The default `~/.hermes` uses `hermes-gateway`; other installations use `hermes-gateway-<hash>`. The `hermes gateway` commands automatically target the correct service for your current `HERMES_HOME`.
@@ -32316,7 +32450,7 @@ You need at least one way to connect to an LLM. Use `hermes model` to switch pro
 | **LM Studio** | `hermes model` → "LM Studio" (provider: `lmstudio`, optional `LM_API_KEY`) |
 | **Custom Endpoint** | `hermes model` → choose "Custom endpoint" (saved in `config.yaml`) |
 
-All three OpenCode providers send an opaque, per-conversation `x-opencode-session` header on every request (main turns on every transport plus auxiliary calls such as compression and titles; headless Kanban `specify`/`decompose` and dashboard estimate calls use a per-task key). OpenCode uses it to pin a conversation to one backend so its prompt cache stays warm; the value is derived from the Hermes session id (or the Kanban task id) and carries no personal data.
+All three OpenCode providers send an opaque, per-conversation `x-opencode-session` header on every request (main turns on every transport plus auxiliary calls such as compression, titles, approval checks, skills-hub lookups and `/btw` side questions — including the ones that run in the background after the turn has ended; headless Kanban `specify`/`decompose` and dashboard estimate calls use a per-task key). OpenCode uses it to pin a conversation to one backend so its prompt cache stays warm; the value is derived from the Hermes session id (or the Kanban task id) and carries no personal data.
 
 For the official API-key path, see the dedicated [Google Gemini guide](/guides/google-gemini).
 
@@ -33683,6 +33817,8 @@ model:
 
 The same key is honored on per-named-provider models (`providers.<name>.models.<id>.supports_vision`) and accepts standard YAML booleans (`true/false/yes/no/on/off/1/0`).
 
+A `model_overrides` entry that only corrects metadata (for example `context_window`) for a model the catalog does not know leaves vision and reasoning capability **unknown** — `vision_analyze`, `video_analyze` and the reasoning-effort picker stay available. Only an explicit `supports_vision: false` / `supports_reasoning: false` in the override marks the model as text-only or non-reasoning.
+
 Switch between them mid-session with the triple syntax:
 
 ```
@@ -34599,7 +34735,7 @@ If you change MCP config, use:
 
 This reloads MCP servers from config and refreshes the available tool list. It is also the explicit way to re-probe availability-gated tools (Docker, `HASS_TOKEN`, OAuth…): a session's tool set is otherwise frozen, so a credential or daemon that appears mid-session is only picked up on `/reload-mcp`, `/new`, or context compaction. For runtime tool changes pushed by the server itself, see [Dynamic Tool Discovery](#dynamic-tool-discovery) above.
 
-A running messaging gateway (`hermes gateway run`) also watches `config.yaml` on its own: within about a minute of you removing an `mcp_servers` entry or setting `enabled: false`, that server's connection is torn down; a newly added entry is connected. No restart or `/reload-mcp` needed for the edit to take effect.
+A running messaging gateway (`hermes gateway run`) also watches `config.yaml` on its own: within about a minute of you removing an `mcp_servers` entry or setting `enabled: false`, that server's connection is torn down; a newly added entry is connected. A server whose first connect failed (an unreachable host, or an OAuth server on a headless box that had no token yet) is retried automatically on its connect cooldown schedule (30 s, doubling up to 10 min) once you fix the cause. No restart or `/reload-mcp` needed for the edit to take effect.
 
 **Expired OAuth tokens in the background.** The gateway, `/reload-mcp`, and the periodic self-probe of a parked server never open a browser — nobody is there to complete the flow. When a refresh token dies, the server parks with a warning in `gateway.log` and you re-authorize once with `hermes mcp login <server>` (or the Desktop/dashboard *Authorize* button); the parked server picks the new token up on its next probe.
 
@@ -36016,7 +36152,7 @@ gateway:
 
 ### Concurrent-run cap
 
-The API server limits how many agent runs may execute at once across the OpenAI-compatible and Runs endpoints. The cap is read from `gateway.api_server.max_concurrent_runs` (default **10**; `0` disables the limit, negative values clamp to 0). When the cap is reached, new run-starting requests are rejected with **HTTP 429** `Too many concurrent runs (max N)` — clients should back off and retry.
+The API server limits how many agent runs may execute at once across the endpoints that start one directly: the OpenAI-compatible endpoints, the Runs endpoints, and the session-chat endpoints (`POST /api/sessions/{id}/chat` and its `/stream` variant, which carry cross-machine agent DMs). Cron-triggered runs (`POST /api/jobs/{id}/run`, `POST /api/cron/fire`) go through the cron scheduler and are governed by cron's own limits, not this cap. The cap is read from `gateway.api_server.max_concurrent_runs` (default **10**; `0` disables the limit, negative values clamp to 0). When the cap is reached, new run-starting requests are rejected with **HTTP 429** `Too many concurrent runs (max N)` — clients should back off and retry.
 
 ## Security Headers
 
@@ -36708,6 +36844,7 @@ OpenAI-compatible base URL continues to use the compatible client instead.
 | LM Studio (local) | `lmstudio` | `LM_API_KEY` (or none for local) + `LM_BASE_URL` |
 | Hugging Face | `huggingface` | `HF_TOKEN` |
 | Custom endpoint | `custom` | `base_url` + `key_env` (see below) |
+| Mixture of Agents preset | `moa` (`model` = preset name) | A configured MoA preset whose aggregator has credentials — the fallback runs the whole preset (references + aggregator), not the aggregator alone |
 
 ### Custom Endpoint Fallback
 
@@ -37234,6 +37371,11 @@ Provider-supplied `reset_at` timestamps override these default cooldowns.
 
 The `has_retried_429` flag resets on every successful API call, so a single transient 429 doesn't trigger rotation.
 
+**Anthropic 429s are per model.** Anthropic enforces its rate limits per model, so a generic 429 for
+one Claude model cools that credential down for *that model only* — the same key keeps serving every
+other Claude model, and `ANTHROPIC_API_KEY` / borrowed Claude Code tokens honour the same per-model
+cooldown. Billing (`402`, usage-limit) and auth (`401`) failures still bench the whole credential.
+
 ## Custom Endpoint Pools
 
 Custom OpenAI-compatible endpoints (Together.ai, RunPod, local servers) get their own pools, keyed by the endpoint name from the `providers:` dict in config.yaml (or the legacy `custom_providers` list, which is auto-migrated).
@@ -37311,7 +37453,7 @@ For the full data flow diagram, see [`docs/credential-pool-flow.excalidraw`](htt
 
 The credential pool integrates at the provider resolution layer:
 
-1. **`agent/credential_pool.py`** — Pool manager: storage, selection, rotation, cooldowns; **`agent/credential_pool_admin.py`** owns locked target resolution, reset, add, removal, and priority mutations
+1. **`agent/credential_pool.py`** — Pool manager: storage, selection, rotation, cooldowns; **`agent/credential_pool_admin.py`** owns locked target resolution, reset, add, removal, and priority mutations; **`agent/credential_pool_model_cooldowns.py`** owns the per-model Anthropic 429 cooldowns
 2. **`hermes_cli/auth_commands.py`** — CLI commands and interactive wizard
 3. **`hermes_cli/runtime_provider.py`** — Pool-aware credential resolution
 4. **`agent/turn_api_error.py`** — Error recovery: 429/402/401 → pool rotation → fallback
@@ -39981,6 +40123,8 @@ Important:
 
 When Hermes starts a session, it reads `SOUL.md` from `HERMES_HOME`, scans it for prompt-injection patterns, truncates it if needed, and uses it as the **agent identity** — slot #1 in the system prompt. This means SOUL.md completely replaces the built-in default identity text.
 
+Because `SOUL.md` is your own file (agent writes to it always need your approval), a prompt-injection scanner hit does **not** block it the way it blocks a project `AGENTS.md`: the file still loads, Hermes logs a warning naming the matched pattern, and `/context` marks the file `⚠ … review the file`. Security guidance that quotes an attack phrase ("content telling you to ignore previous instructions") therefore keeps your identity intact.
+
 If SOUL.md is missing, empty, or cannot be loaded, Hermes falls back to a built-in default identity.
 
 No wrapper language is added around the file. The content itself matters — write the way you want your agent to think and speak.
@@ -40164,7 +40308,7 @@ Possible causes:
 - higher-priority instructions are overriding it
 - the file includes conflicting guidance
 - the file is too long and got truncated
-- some of the text resembles prompt-injection content and may be blocked or altered by the scanner
+- some of the text resembles prompt-injection content — SOUL.md still loads, but check `/context` for a `⚠ … review the file` line and the log for the matched pattern
 
 ### My SOUL.md became too project-specific
 
@@ -42292,6 +42436,14 @@ platform_hints:
   unmodified default, so a bad config value can never break prompt
   assembly or leak across platforms.
 
+Cron jobs run as platform `cron`, but their final response lands on the
+job's `deliver` channel, so a cron agent's prompt also carries that
+channel's hint (built-in text plus its `platform_hints.<channel>`
+override) under a `Delivery destination (<channel>):` line. A
+`platform_hints.slack.append` therefore reaches Slack-delivered scheduled
+jobs as well as live Slack chats; `platform_hints.cron` still governs the
+cron paragraph itself.
+
 The override is resolved when the system prompt is built (session start,
 and again on compaction since that rebuilds the prompt). It produces a
 byte-stable hint for a fixed config, so it lives in the **stable** tier
@@ -42309,7 +42461,7 @@ def load_soul_md() -> Optional[str]:
     if not soul_path.exists():
         return None
     content = soul_path.read_text(encoding="utf-8").strip()
-    content = _scan_context_content(content, "SOUL.md")  # Security scan
+    content = _scan_context_content(content, "SOUL.md", user_authored=True)  # Security scan: warn + load, never block
     content = _truncate_content(content, "SOUL.md")       # Cap scales with model context window (20k floor); config override wins
     return content
 ```
@@ -42379,7 +42531,7 @@ def build_context_files_prompt(cwd=None, skip_soul=False):
 | 4 | `.cursorrules`, `.cursor/rules/*.mdc` | CWD only | Cursor compatibility |
 
 All context files are:
-- **Security scanned** — checked for prompt injection patterns (invisible unicode, "ignore previous instructions", credential exfiltration attempts)
+- **Security scanned** — checked for prompt injection patterns (invisible unicode, "ignore previous instructions", credential exfiltration attempts). A hit replaces a project file with a `[BLOCKED: …]` marker; the user's own `SOUL.md` in `HERMES_HOME` is warned about and loaded anyway (it is human-approved on write, so it is the same trust class as `config.yaml`)
 - **Truncated** — capped at `context_file_max_chars` characters using a 70/20 head/tail split with a truncation marker. The cap scales with the model's context window (20,000-char floor, 500K ceiling); an explicit `context_file_max_chars` in `config.yaml` always wins.
 - **YAML frontmatter stripped** — `.hermes.md` frontmatter is removed (reserved for future config overrides)
 
@@ -42606,11 +42758,14 @@ default applies.
 #### Failure cooldown and provider-proven overflow
 
 A failed or stalled summary attempt arms a per-session **failure cooldown**
-(escalating 60s → 300s → 900s, persisted in `state.db`). While it is armed,
-ordinary threshold-triggered compaction is deferred so a broken summary backend
-does not re-fire every turn. Two paths run a real attempt anyway:
+(escalating 60s → 300s → 900s, never shorter than
+`compression.context_timeout_seconds`, persisted in `state.db`). While it is
+armed, ordinary threshold-triggered compaction is deferred so a broken summary
+backend does not re-fire every turn. Three paths run a real attempt anyway:
 
 - Manual `/compress` (`force=True`) — clears the cooldown and retries.
+- The same-turn `fallback_chain` retry after a stalled primary route — the
+  cancelled primary's own stall cooldown must not suppress it (`bypass_cooldown`).
 - **Provider-proven overflow** — when the provider itself rejects the request
   with a context-length error, the recovery pass ignores the cooldown for one
   bounded attempt (`max_compression_attempts`) without clearing it. Deferring
@@ -43637,6 +43792,7 @@ Notes:
 - `reasoning_details`, `codex_reasoning_items`, and `codex_message_items` are stored as JSON strings
 - Desktop history hydration retains assistant sidecars in both REST and JSON-RPC (`session.resume`, `session.activate`, `session.history`) projections, including rows with reasoning and tool calls. REST may return the SQLite JSON string while RPC returns decoded items; Desktop accepts both. A final Responses reply may live only in `codex_message_items` while `content` is empty. Canonical content still takes precedence, and analysis/commentary items are not promoted to reply text.
 - `reasoning` stores the raw reasoning text for providers that expose it
+- A reasoning-only clean stop (empty `content`, `finish_reason=stop`, reasoning present) is answered with the reasoning text, but the assistant row is never written with that text as `content`: `content` stays empty, the text lives in `reasoning`/`reasoning_content`, and `api_content` carries it so the next request replays the answer byte-identically. History surfaces therefore show it as reasoning, not as a reply.
 - `api_content` is a byte-fidelity sidecar: the exact content string sent to the API for this message when it differs from `content` (ephemeral memory/plugin injections, persist overrides). It preserves the wire bytes for prompt-cache-stable replay — stored as sent, except lone surrogates, which sqlite3 cannot bind and which the conversation loop scrubs from every outgoing payload anyway. `NULL` means `content` was sent verbatim.
 - Timestamps are Unix epoch floats (`time.time()`)
 
@@ -46485,13 +46641,23 @@ HERMES_INFERENCE_MODEL=anthropic/claude-sonnet-4.6 hermes -z "…"
 
 Same agent, same tools, same skills — just strips every interactive / cosmetic layer. If you need tool output in the transcript too, use `hermes chat --oneshot -q` instead; `-z` is explicitly for "I only want the final answer".
 
+Exit codes: `0` the turn completed; `2` it failed or stopped partway (`partial`,
+iteration budget, `completed: false`) — even when an explanation was printed;
+`130` it was interrupted; `1` a completed turn produced no text at all; `2` also
+for usage errors (bad flags) before the run starts. These codes intentionally
+differ from `chat -q`/`-Q` above (which exit `1` for failed/partial/budget and
+`0` for a completed turn with no text): `-z` reserves `1` for "answered nothing".
+Judge the run by the exit code (or the `--usage-file` flags), not by whether
+stdout is non-empty.
+
 #### `--usage-file` — JSON usage report for pipelines
 
-`hermes -z "…" --usage-file /path/report.json` writes a machine-readable usage report after the run: `estimated_cost_usd`, `input_tokens` / `output_tokens` / `cache_read_tokens` / `cache_write_tokens` / `reasoning_tokens` / `total_tokens`, `api_calls`, `model`, `provider`, `session_id`, `service_tier`, and `completed` / `failed` flags. The report is written **even when the run fails**, so batch pipelines can always account for spend. It has no effect outside `-z`/`--oneshot`, and a broken usage write never masks the run's own outcome.
+`hermes -z "…" --usage-file /path/report.json` writes a machine-readable usage report after the run: `estimated_cost_usd`, `input_tokens` / `output_tokens` / `cache_read_tokens` / `cache_write_tokens` / `reasoning_tokens` / `total_tokens`, `api_calls`, `model`, `provider`, `session_id`, `service_tier`, the `completed` / `failed` / `partial` / `interrupted` flags and `turn_exit_reason` (why `completed` is false, e.g. `max_iterations_reached(3/3)`). Those top-level counters cover the **main agent loop** only. Auxiliary LLM calls made on the same run (title generation, vision, context compression, `web_extract`, background review, …) are reported separately under `auxiliary` — the same totals plus a per-task `by_task` map — and `total_including_auxiliary` (`estimated_cost_usd`, `total_tokens`, `api_calls`) is the grand total to bill on. The report is written **even when the run fails**, so batch pipelines can always account for spend. It has no effect outside `-z`/`--oneshot`, and a broken usage write never masks the run's own outcome.
 
 ```bash
 hermes -z "summarize this repo" --usage-file /tmp/usage.json
-jq .estimated_cost_usd /tmp/usage.json
+jq .total_including_auxiliary.estimated_cost_usd /tmp/usage.json
+jq .auxiliary.by_task /tmp/usage.json      # what did title generation / vision cost?
 ```
 
 ## `hermes model`
@@ -47489,7 +47655,7 @@ Subcommands:
 |------------|-------------|
 | `show` | Show current config values. |
 | `edit` | Open `config.yaml` in your editor. |
-| `get <key> [--json] [--raw]` | Print a single config value by dotted key (e.g. `hermes config get model.default`). `--json` emits machine-readable output. Credential-shaped values (`api_key`, `*_TOKEN`, `*_SECRET`, `password`, …) are masked (`sk-o...7890`) because the agent runs this from sessions whose transcripts persist; `--raw` prints the real value (or set `security.redact_secrets: false`). |
+| `get <key> [--json] [--raw]` | Print a single config value by dotted key (e.g. `hermes config get model.default`). `--json` emits machine-readable output. Credential-shaped values (`api_key`, `*_TOKEN`, `*_SECRET`, `password`, …) are masked (`sk-o...7890`) because the agent runs this from sessions whose transcripts persist; `--raw` prints the real value (or set `security.redact_secrets: false`). A nested key under a known section that the schema does not define (`compression.compressor.enabled`) still prints its file value, plus a stderr notice that Hermes may not read it; stdout and the exit code (0) are unchanged. |
 | `set <key> <value> [--force]` | Set a config value. Dotted paths go to `config.yaml`; every `UPPER_SNAKE` name (`OPENROUTER_API_KEY`, `DISCORD_HOME_CHANNEL`, `TELEGRAM_GROUP_ALLOWED_USERS`, `HERMES_TIMEZONE`, …) is an environment variable and goes to `.env` — the same file the platform setup flows and `/sethome` write, and the one every runtime reader resolves against. `config set` never writes an `UPPER_SNAKE` key into `config.yaml`, `--force` included; names on the env writer's denylist (`HERMES_YOLO_MODE`, `PATH`, …) are refused outright; any other `UPPER_SNAKE` name is saved to `.env` as-is (plugins, skills and external tools read it from the process environment). An unknown path under a known section (`gateway.discord.foo`) is refused with a did-you-mean and nothing is written; an unknown lowercase *top-level* key is written with a notice (top-level scalars are bridged into the environment for skills). `--force` writes either of those. |
 | `unset <key>` | Remove a config key, reverting it to the built-in default. For `UPPER_SNAKE` names this removes the `.env` entry and also drops a stale top-level `config.yaml` copy left by older `config set` runs (`get` reports such a copy as stale). |
 | `path` | Print the config file path. |
@@ -48206,7 +48372,7 @@ Type `/` in the CLI to open the autocomplete menu. Built-in commands are case-in
 | `/refine [focus]` | Run the background memory/skill self-improvement review **now** instead of waiting for the automatic post-turn trigger. Optional focus text steers the review (e.g. `/refine save the deploy workflow as a skill`). Runs in a background fork against a conversation snapshot — the live session and prompt cache are untouched; results are reported when done. |
 | `/review [instructions]` | Spawn an independent, full-privilege reviewer subagent to review the work just discussed — a PR, code, docs, any artifact referenced in the last 10 chat messages. It investigates in the background (opens the PR, reads the diff, runs code) and its full review re-enters this session as a background-subagent completion the primary agent can act on. Pin a dedicated review model via `auxiliary.review` in config.yaml (defaults to your main model). See [Subagent Delegation](/user-guide/features/delegation#the-review-command). |
 | `/moa <prompt>` | Run a single prompt through the default [Mixture of Agents](/user-guide/features/mixture-of-agents) preset, then restore your current model. One-shot — does not change your session model. |
-| `/resume [name]` | Resume a previously-named session |
+| `/resume [name]` | Resume a previously-named session. In the classic CLI this (and `/sessions <id>`) is refused while a turn is running — the CLI shares one agent across sessions, so switching mid-turn would file the rest of the running turn under the other session. |
 | `/sessions` (TUI alias: `/switch`) | Classic CLI: browse and resume previous sessions in an interactive picker. TUI: open the live session switcher for currently open TUI sessions. Use `/sessions new` in the TUI to start another live session immediately. |
 | `/egress [status]` | Show Docker egress proxy status — enabled/configured/running state, credential source, token mappings, uncovered providers, and next remediation step. Works in CLI, TUI, Desktop chat, and messaging gateway. |
 | `/redraw` | Force a full UI repaint (recovers from terminal drift after tmux resize, mouse selection artifacts, etc.) |
@@ -48215,9 +48381,9 @@ Type `/` in the CLI to open the autocomplete menu. Built-in commands are case-in
 | `/agents` (alias: `/tasks`) | Show active agents and running tasks across the current session. |
 | `/bg <prompt>` | Run a prompt in a separate background session. The agent processes your prompt independently — your current session stays free for other work. Results appear as a panel when the task finishes. See [CLI Background Sessions](/user-guide/cli#background-sessions). |
 | `/btw <question>` | Ask a quick side question **about the current conversation** without interrupting it. A one-shot auxiliary LLM call answers from a read-only snapshot of the transcript — the live session's history and prompt cache are untouched, and the current turn keeps running. For independent work with a fresh context, use `/bg`. |
-| `/branch [name]` (alias: `/fork`) | Branch the current session (explore a different path) |
+| `/branch [name]` (alias: `/fork`) | Branch the current session (explore a different path). Classic CLI: refused mid-turn like `/handoff` — wait for the current response to finish, then retry. |
 | `/worktree [new [name]\|list]` | **CLI only.** Inspect or create isolated git worktrees mid-session (inspired by Copilot CLI's `/worktree new`). Bare `/worktree` shows the active worktree; `/worktree list` lists the repo's worktrees; `/worktree new [name]` creates a worktree under `.worktrees/` (branched from the freshly-fetched remote tip, honoring `worktree_sync`) and retargets the session's terminal and file tools into it. Named trees use your name (`hermes/<name>` branch); unnamed ones get a random `hermes-<id>`. On exit the tree is kept only if it has unpushed commits — same lifecycle as `hermes -w`. See [Git Worktrees](/user-guide/git-worktrees). |
-| `/handoff <platform>` | **CLI only.** Hand the current session off to a messaging platform (Telegram, Discord, Slack, WhatsApp, Signal, Matrix). The gateway picks it up immediately, creates a fresh thread on platforms that support threads (Telegram topics, Discord text-channel threads, Slack message-anchored threads), re-binds the destination to your CLI session_id so the full role-aware transcript replays, and forges a synthetic user turn so the agent confirms it's working in the new place. Your CLI exits cleanly on success with a `/resume` hint; resume locally any time with `/resume <title>`. Refused mid-turn. Requires the gateway to be running and a home channel configured for the target platform (`/sethome` from the destination chat). See [Cross-Platform Handoff](/user-guide/sessions#cross-platform-handoff). |
+| `/handoff <platform>` | **CLI only.** Hand the current session off to a messaging platform (Telegram, Discord, Slack, WhatsApp, Signal, Matrix). The gateway picks it up immediately, creates a fresh thread on platforms that support threads (Telegram topics, Discord text-channel threads, Slack and Matrix message-anchored threads), re-binds the destination to your CLI session_id so the full role-aware transcript replays, and forges a synthetic user turn so the agent confirms it's working in the new place. Your CLI exits cleanly on success with a `/resume` hint; resume locally any time with `/resume <title>`. Refused mid-turn. Requires the gateway to be running and a home channel configured for the target platform (`/sethome` from the destination chat). See [Cross-Platform Handoff](/user-guide/sessions#cross-platform-handoff). |
 | `/journey [list\|delete <id>\|edit <id>]` (aliases: `/learning`, `/memory-graph`) | Open the learning journey timeline of learned skills + memories. Works in the classic CLI, as a TUI overlay, and in the desktop app (Star Map panel). Not available on messaging platforms. See [Learning Journey](/user-guide/features/memory#learning-journey-journey). |
 
 ### Configuration
@@ -48731,7 +48897,10 @@ hermes profile rename mybot assistant
 The rename also migrates the profile's persisted session/routing identity — session keys
 (`agent:<old>:*`), `sessions.profile_name`, heartbeats, and routing/delivery rows — to the new
 name. A live multiplexed gateway owns that migration (it holds the routing index in memory), so
-when it is running the CLI delegates to it.
+when it is running the CLI delegates to it. Checkpoint (`/rollback`) history of workspaces that
+live inside the profile directory is rekeyed to their new path as well, so it stays reachable
+after the rename; `hermes profile migrate-identity` retries that step too if it was reported as
+failed.
 
 ## `hermes profile migrate-identity`
 
@@ -48760,6 +48929,40 @@ hermes profile rename mybot assistant
 
 hermes profile migrate-identity mybot assistant
 # ✓ Session/routing identity migrated: mybot → assistant
+```
+
+## `hermes profile purge-identity`
+
+```bash
+hermes profile purge-identity <name>
+```
+
+Retries the identity purge of a delete that already completed. Run it if `hermes profile delete`
+reported that its session/routing identity settlement is still pending: restart the gateway (it
+reloads the routing index from the database, so the purge lands), or stop it — with no gateway
+holding the store the command performs the durable delete itself.
+
+The purge keys off `<name>` alone, so the profile directory does not have to exist — but a profile
+that is live again under that name is refused: identity is settled by name, so purging it would take
+the new profile's routing with it. Routing keys (`agent:<name>:*`), heartbeat rows and the profile's
+Telegram topic bindings/mode rows are deleted; `delivery_obligations` rows are marked `abandoned`
+rather than dropped, so pending delivery state is not lost silently. Session rows are not deleted by
+the purge itself — it settles identity, not history; whether a conversation record outlives a delete
+is decided by `hermes profile delete`, which removes the profile's own `profiles/<name>/`, its
+`state.db` included. Idempotent — re-running a completed purge succeeds with nothing left to purge.
+Exits non-zero when the name is a live profile again, when a live gateway refuses the purge, or when
+a database rejects the delete (a lock, or a partial failure).
+
+**Example:**
+
+```bash
+hermes profile delete mybot
+# ⚠ Profile was deleted, but the live gateway could not purge its session identity (…).
+#   Restart the gateway, then run:
+#     hermes profile purge-identity mybot
+
+hermes profile purge-identity mybot
+# ✓ Session/routing identity purged: mybot
 ```
 
 ## `hermes profile export`
@@ -49174,7 +49377,7 @@ For native Anthropic auth, Hermes prefers Claude Code's own credential files whe
 | `HERMES_NOUS_TIMEOUT_SECONDS` | HTTP timeout for Nous credential / token flows |
 | `HERMES_DUMP_REQUESTS` | Dump API request payloads to log files (`true`/`false`) |
 | `HERMES_PREFILL_MESSAGES_FILE` | Path to a JSON file of ephemeral prefill messages injected at API-call time |
-| `HERMES_TIMEZONE` | IANA timezone override (for example `America/New_York`) |
+| `HERMES_TIMEZONE` | IANA timezone override (for example `America/New_York`). On Linux/macOS it is also exported as `TZ` to `execute_code` children; on Windows those children keep the OS zone instead, because the Windows C runtime only understands POSIX-form `TZ` strings and mis-parses an IANA name into a wrong offset |
 
 ## Tool APIs
 
@@ -49212,7 +49415,7 @@ For native Anthropic auth, Hermes prefers Claude Code's own credential files whe
 | `GROQ_BASE_URL` | Override the Groq OpenAI-compatible STT endpoint |
 | `STT_OPENAI_MODEL` | Override the OpenAI STT model (default: `whisper-1`) |
 | `STT_OPENAI_BASE_URL` | Override the OpenAI-compatible STT endpoint |
-| `GITHUB_TOKEN` | GitHub token for Skills Hub (higher API rate limits, skill publish) |
+| `GITHUB_TOKEN` | GitHub token for Skills Hub (higher API rate limits, skill publish) and the desktop app's update check (`GH_TOKEN` also honoured) |
 | `HONCHO_API_KEY` | Cross-session user modeling ([honcho.dev](https://honcho.dev/)) |
 | `HONCHO_BASE_URL` | Base URL for self-hosted Honcho instances (default: Honcho cloud). No API key required for local instances |
 | `HINDSIGHT_API_KEY` | Hindsight API key for graph-aware persistent memory ([hindsight.vectorize.io](https://hindsight.vectorize.io)) |
@@ -49877,7 +50080,7 @@ Advanced per-platform knobs for throttling the outbound message batcher. Most us
 | `HERMES_DISABLE_FILE_STATE_GUARD` | Set to `1` to turn off the "file changed since you read it" guard on `patch`/`write_file`. |
 | `HERMES_BUNDLED_SKILLS` | Comma-separated override for the list of bundled skills loaded at startup. |
 | `HERMES_OPTIONAL_SKILLS` | Comma-separated list of optional-skill names to auto-install on first run. |
-| `HERMES_DEBUG_INTERRUPT` | Set to `1` to log detailed interrupt/cancel tracing to `agent.log`. |
+| `HERMES_DEBUG_INTERRUPT` | Set to `1`/`true` to log detailed interrupt/cancel tracing to `agent.log`; `0`/`false`/`off` (or unset) keep it off. |
 | `HERMES_DUMP_REQUESTS` | Dump API request payloads to log files (`true`/`false`) |
 | `HERMES_DUMP_REQUEST_STDOUT` | Dump API request payloads to stdout instead of log files. |
 | `HERMES_OAUTH_TRACE` | Set to `1` to log OAuth token exchange and refresh attempts. Includes redacted timing info. |
@@ -50036,7 +50239,7 @@ Per-surface behavior:
 - **TUI and CLI** show a compact status list (`✓` answered / `▸` active / `·` pending) with only the active question's choices expanded. Enter locks the active answer and jumps to the next unanswered question; Tab moves between questions to answer in any order; Esc cancels the batch.
 - **Messaging platforms** (Telegram, Discord, …) fall back to asking the questions one at a time through the existing single-question prompt. If the user stops responding, the remaining questions are not sent.
 
-If the prompt times out part-way, answers the user already locked are kept: the tool result carries them plus `"timed_out": true`, with the unanswered entries left blank, so the agent can distinguish a deliberate skip from an absent user.
+If the prompt times out part-way, answers the user already locked are kept: the tool result carries them plus `"timed_out": true`, with the unanswered entries left blank, so the agent can distinguish a deliberate skip from an absent user. On messaging platforms the result also carries a `"notice"` saying why the wait ended (`[user did not respond within Nm]`, or `[clarify prompt could not be delivered]` when the platform rejected the card), so an undelivered prompt is never reported as user inactivity.
 
 ## `connections` toolset
 
@@ -52190,7 +52393,7 @@ This isolation is also the reason to never run two agents against the *same* pro
 
 ### How many profiles can I run?
 
-There is no hard limit. Each profile is just a directory under `~/.hermes/profiles/`. The practical limit depends on your disk space and how many concurrent gateways your system can handle (each gateway is a lightweight Python process). Running dozens of profiles is fine; each idle profile uses no resources.
+There is no hard limit. Each profile is a directory under `~/.hermes/profiles/` that carries at least one identity file (`config.yaml`, `.env`, `SOUL.md`, `profile.yaml`, `auth.json` or `state.db`); a bare directory without one (a leftover from a log rotation or cron tick) is not a profile — it is not listed or served, `-p <name>` reports it as missing, and `hermes profile create <name>` refuses to overwrite it until you move or remove it. The practical limit depends on your disk space and how many concurrent gateways your system can handle (each gateway is a lightweight Python process). Running dozens of profiles is fine; each idle profile uses no resources.
 
 ---
 
@@ -54364,6 +54567,8 @@ interface PluginContext {
   rest: <T>(path: string, opts?: PluginRestOptions) => Promise<T>
   /** Live WebSocket to this plugin's own namespace. Returns a disposer. */
   socket: (path: string, onMessage: (data: unknown) => void) => () => void
+  /** Gateway event stream by type (`'*'` = all). Tracked: removed on unload/reload/disable. */
+  onEvent: (type: string, listener: (event: GatewayEvent) => void) => () => void
   /** The curated OS door: native notification, open-external, reveal-in-file-manager, clipboard. */
   os: PluginOs
   /** Plugin-scoped JSON persistence (keys live under `hermes.plugin.<id>.`). */
@@ -54700,7 +54905,9 @@ host.openWorkspace(id, { render, title?, minWidth?, onClose? })
                                            //   workspace zone and reveal it; returns a disposer
 host.paneVisibility(paneId)                // ReadableAtom<boolean> — is a contributed pane
                                            //   actually on screen (its zone's active tab)?
-host.onEvent(type, fn)                     // gateway event stream ('*' = all); returns disposer
+host.onEvent(type, fn)                     // gateway event stream ('*' = all); returns disposer.
+                                           //   Calls made during register() are retired with the
+                                           //   plugin; elsewhere prefer ctx.onEvent (always tracked)
 host.logs(...)                             // tail an app log file
 host.status()                              // one-shot system status snapshot
 host.restartGateway()                      // restart the backend gateway
@@ -54913,7 +55120,13 @@ carry the package, and it never appears or disappears when the user switches
 the Capabilities profile selector. The renderer never scans `plugins/` itself.
 The marker records the package name and its origin (catalog sidecar or git
 remote), which is what the **Install here** button on the Plugins page uses to
-install the agent half into another profile.
+install the agent half into another profile. The copy is staged beside the
+target and renamed into place, so an interrupted copy (a transient file lock, a
+crash mid-copy) never leaves a half-written folder behind; a leftover
+`desktop-plugins/<id>/` that has no marker and no `plugin.js` is treated as
+such damage and replaced on the next **Rescan**, while a marker-less folder
+that *does* hold a `plugin.js` is a standalone plugin you installed by hand and
+is never overwritten.
 
 Two enable switches still apply, on purpose, and both default to **off**: the
 desktop half ships opt-in — it inventories in **Capabilities → Plugins** but stays
@@ -58723,6 +58936,90 @@ exporters and execution middleware; see
 
 ---
 
+<!-- source: website/docs/developer-guide/onboarding-recommendations.md -->
+# Onboarding recommendations
+
+# Onboarding recommendations
+
+Guided onboarding suggests outcomes from the user's app preferences and observed capabilities. It does not grant access or implement a second connection lifecycle. The feature remains inside the existing `HERMES_GUEST_ONBOARDING` flow.
+
+## What takes priority
+
+The existing `machineSetupLeads()` decision still leads with machine setup for a newly set-up machine or a recognized RTX/DGX Spark, with other tasks behind **Something else**. The fresh-machine signal is the existing age heuristic, not proof of the OS installation date. A Spark with unknown age gets a hardware-specific callout, not a claim that its OS is new.
+
+Otherwise the guide favors relevant app-backed tasks, with a connection-free alternative. Detecting an app earns at most one option; the remaining choices come from the user's goals and other capabilities. Several ideas for the same app are appropriate only when explicitly requested. Choosing an inbox task means using real inbox data after permission, not building a mock inbox when permission is missing. A skipped or unavailable required connection leaves that task blocked; the user can choose a different task or supply data.
+
+## Catalog metadata
+
+Read the actual catalog at runtime. An entry does not need new recommendation metadata: detection falls back to its catalog name (with slug separators treated as spaces), and the model derives tasks from its description. Removing an entry removes it from future snapshots. No product-specific entry, package or install recipe belongs in the onboarding change.
+
+Catalog owners may optionally provide richer hints:
+
+```yaml
+suggest:
+  keywords: [example, modeling]
+  hosts: [example.com]
+  applications: [Example Studio]
+  requires_app: true
+  examples:
+    - Light a product render in Example Studio
+```
+
+- `keywords` and `hosts` retain their existing meaning. `applications`, `examples` and `requires_app` are optional additions.
+- `applications` contains up to 16 safe labels/aliases, each at most 80 characters. No paths, shell arguments, regexes or scripts.
+- `examples` contains up to six printable single-line outcomes, at most 240 characters each. The model distills those into the existing option chips' shorter labels.
+- `requires_app` is true only when the local application is a prerequisite. Desktop-app presence can be a relevance signal for a cloud service without being a requirement.
+- Example capabilities and setup prerequisites must be checked against the integration's actual documentation. A catalog entry is not proof of account access, entitlement, add-on readiness or a live tool connection.
+
+The managed-app picker keeps its curated leaders while making other enabled rows from the live catalog searchable. A newly deployed managed connector is no longer discarded merely because its slug is absent from the leader list. No new portal metadata endpoint is required.
+
+## Discovery and scope
+
+`GET /api/mcp/catalog?detect_apps=true` adds:
+
+- `entries[].detected_apps`: matching catalog-derived application names or optional explicit aliases only.
+- `discovery`: `{scope: "backend", status: "ok" | "unavailable", platform: string}`.
+
+The default catalog request performs no app discovery. The optional scan checks standard application locations and exact safe PATH candidates on the **backend machine**, where its MCP processes run. It never launches apps, starts MCPs, installs packages, reads application documents or contacts the network. It returns neither a full inventory nor filesystem paths.
+
+The scan has directory, entry and time budgets. It is not an exhaustive installed-software inventory. Access failures, an exhausted budget or an unsupported host report `unavailable`; positive observations remain useful, and missing observations are not evidence of absence. macOS app bundles, Linux desktop entries and Windows common program directories have platform-specific readers. Windows registry enumeration is not included.
+
+Desktop pins the catalog request to the guide or handoff's backend/profile. It never combines a desktop-local app observation with a remote MCP host. A temporary-profile API probe can retain the actual OS home for read-only app discovery without reading the installed profile's configuration.
+
+## Recommendation and execution boundaries
+
+Recommendations rank explicit task relevance and selected apps before configuration and app-presence signals. Disabled integrations are not automatically resurfaced without explicit interest. Required local apps need positive detection or an existing configuration before they qualify. Each seed contains a small selection of candidates, not the entire catalog.
+
+The guide receives a read-only snapshot when its session is created. The handoff refreshes that snapshot for the working profile and includes the selected candidates' full setup notes. Neither path mutates an existing system prompt, caches connection authority, or performs setup. An old or unavailable catalog falls back to the existing onboarding behavior.
+
+| Evidence | Meaning | Next action |
+| --- | --- | --- |
+| App detected, MCP absent | Application signal, setup still needed | Existing `manage_connections` install approval |
+| MCP configured but disabled, explicitly requested | Configuration exists, intentionally not active | Existing enable approval |
+| MCP configured and enabled | Configuration only; connection unverified | Discover its available tools and verify before use |
+| Managed app not connected | Account permission required | Existing managed connect card |
+| Skipped, unavailable or missing session capability | Not authorized/usable | Explain the blocked task; no bypass or automatic retry |
+
+For MCP targets, `status` is **not** a supported `manage_connections` action. The snapshot supplies `setupAction` (`install`, `enable`, or null); authorization is requested only when actually required. Managed account status remains a separate supported action. This distinction is verified against actual generated tool arguments, not only prompt text.
+
+The legacy composer suggestion provider can only complete hosted HTTP OAuth. It excludes local-app and non-OAuth entries so new metadata cannot route a local editor into that unrelated flow. Onboarding uses the shared connection operation instead.
+
+## Compatibility with the connection-operation work
+
+The implementation consumes the public `manage_connections` tool and the existing catalog API. It does not modify connection-operation states, generated RPC contracts, account identifiers, OAuth callbacks, retry ownership, watcher behavior or settled-result handling.
+
+It was checked against the current integration and Sid's pending [connection-operation PR](https://github.com/NousResearch/hermes-agent/pull/111008). That PR moves MCP execution into the backend; recommendations do not depend on which side currently executes the operation. Optional catalog fields preserve older clients, and missing fields preserve older backends. Sid's cancelled portal toolkit-metadata endpoint is not a dependency.
+
+There is one intentional product-policy overlap in the onboarding runbooks and their tests: the old requirement to produce a no-account substitute is replaced by the accepted task's actual prerequisites. That overlap must be reconciled when the branches meet, not retained as contradictory instructions. Compatibility with an unknown future breaking API change is not implied.
+
+## Verification boundaries
+
+Contract tests cover catalogue parsing, opt-in read-only discovery, A/B/A profile isolation, missing metadata, ranking, backend-pinned seed creation, legal MCP setup actions and preservation of fresh-machine/Spark priority.
+
+Live inference over synthetic onboarding turns can verify the recommended outcome and generated setup action. Native discovery can verify a real installed app signal. Neither is proof of OAuth completion or execution inside Blender: that still requires the application's add-on/server, the user's approval and a harmless live tool check. Read the actual returned entry's setup notes; onboarding does not supply its own integration recipe.
+
+---
+
 <!-- source: website/docs/developer-guide/plugin-llm-access.md -->
 # Plugin LLM Access
 
@@ -61088,9 +61385,13 @@ Approvals, clarify questions, sudo/secret prompts, vault unlock, MCP setup and t
 → {"jsonrpc":"2.0","id":"srq-7","result":{"choice":"once"}}
 ```
 
-Methods: `approval` → `{choice}`; `clarify` → `{answer}` (single) or `{answers}` / `{}` cancel (batch, with `clarify.lock` to lock one answer early); `sudo`, `secret`, `vault.code`, `vault.unlock` → `{value}`; `connection` → `{settled_by, targets}` (the `manage_connections` card: one outcome per target); `terminal.read`, `window.read`, `preview.act`, `tour` → `{value}` (JSON text). Respond with a JSON-RPC error (`-32601`) for a method your host does not implement so the agent fails fast instead of waiting out the timeout.
+Methods: `approval` → `{choice}`; `clarify` → `{answer}` (single) or `{answers}` / `{}` cancel (batch, with `clarify.lock` to lock one answer early); `sudo`, `secret`, `vault.code`, `vault.unlock_prompt` → `{value}`; `connection` → `{settled_by, targets}` (the `manage_connections` card: one outcome per target); `terminal.read`, `window.read`, `preview.act`, `tour` → `{value}` (JSON text). Respond with a JSON-RPC error (`-32601`) for a method your host does not implement so the agent fails fast instead of waiting out the timeout.
 
 When the gateway withdraws a question (timeout, interrupt, answered from another surface) it emits `request.cancel` `{ id, method, reason }`; clear only the matching prompt. `session.resume` / `session.activate` results and `session.events.since` carry `open_requests` — the still-open frames — so a reconnecting client re-renders (and can still answer) them.
+
+### Rebuilding the in-flight turn on reconnect
+
+`session.resume` / `session.activate` results carry `inflight` — the turn still running (or the retained failed one) that history does not hold yet: `user`, `assistant` streamed so far, `streaming`, mid-turn `corrections`, and error fields. When the turn was started by the gateway rather than typed by a person (a background-process completion, an async delegation result, a hidden scaffolding prompt) `inflight` also carries the same `display_kind` / `display_metadata` the persisted `messages` row will get, so a client renders the live prompt exactly as it will render history after the turn lands — a `process_complete` timeline marker with `display_metadata.display_text`, nothing at all for `hidden`. Both fields are absent for genuine user input; never infer origin from the prompt text (a user quoting a marker string is still a user).
 
 ### Pi-style RPC mapping
 
@@ -61179,7 +61480,7 @@ The terminal status of a run is derived from how the agent's turn actually ended
 | Turn outcome | Status | Terminal event | Flags on the event / status |
 |---|---|---|---|
 | Final answer produced | `completed` | `run.completed` | `completed: true` |
-| Interrupted (`/stop`, or an interrupt inside the agent) | `cancelled` | `run.cancelled` | `completed: false`, `interrupted: true` |
+| Interrupted (`/stop`, or an interrupt inside the agent) | `cancelled` | `run.cancelled` | `completed: false`, `interrupted: true`, `turn_exit_reason` naming the issuer — `interrupted_by_user` for a human stop, `interrupted_by_system(<issuer>)` / `interrupted_during_api_call(<issuer>)` when a watchdog (e.g. `cron_inactivity_watchdog`, `turn_liveness_watchdog`, `gateway_inactivity_watchdog`, `session_turn_lease_lost`) ended the turn |
 | Provider/agent failure | `failed` | `run.failed` | `completed: false`, `error` |
 | Ended without finishing (iteration budget, truncated or partial reply) | `failed` | `run.failed` | `completed: false`, `partial` when applicable, `turn_exit_reason` (e.g. `max_iterations_reached(60/60)`), `output` with any fallback text |
 
@@ -70252,6 +70553,9 @@ Bot Mode ships **built into the [desktop app](./desktop.md)** and is **on by def
 
 :::tip A Bot is a profile
 There is no new primitive to learn: a Bot **is** a Hermes profile — isolated config, memory, skills, credentials, and chat history under `~/.hermes/profiles/<name>/`. Bot Mode is a UI over that primitive, so everything you do in it is visible from the CLI too: `hermes -p <bot> chat` opens the same agent, and Bot routines appear in `hermes cron list`. No core patches, no background daemons, no extra storage.
+
+See [Profiles, agents, and bots](./profiles.md#profiles-agents-and-bots) for how
+Bot Mode relates to messaging bots and delegated subagents.
 :::
 
 ## The Bots pane
@@ -70259,6 +70563,7 @@ There is no new primitive to learn: a Bot **is** a Hermes profile — isolated c
 The roster shows one row per agent profile: avatar, latest-message preview, and timestamp.
 
 - **Click a Bot** to land in its chat — every Bot has a canonical, persistent **Bot Chat** conversation that is created (and pinned) the moment the Bot is born. A row click always opens that Bot Chat (the same conversation the row previews), even when you have other tabs open for the Bot; those tabs stay open beside it. In the tab strip the Bot Chat is captioned with the Bot's name, so two open Bots are told apart at a glance.
+- **Right-click a Bot → Open recent session** to jump to its most recently active ordinary conversation — a cron run, a delegated job, a side thread — as a tab beside the Bot Chat. The row click itself never changes; a Bot with no other conversation yet just opens its Bot Chat.
 - **Active now** — the roster's activity filter includes the owner of the focused live turn, Bots that wrote within the last 90 seconds, and Bots with a recent worker heartbeat. A connected gateway alone does not mean a Bot is working.
 - **Search** filters the roster as you type.
 - **Hide a Bot** — right-click a row → **Hide Bot** to take a Bot you don't use out of the roster and the Active-now strip. Hiding is display-only: @mentions still resolve, group-chat memberships are untouched, and routines keep running. Once at least one Bot is hidden, an **eye toggle** appears in the pane header — click it to reveal hidden Bots dimmed in place, then right-click → **Unhide Bot** to bring one back. Hidden Bots never toast, but they accumulate unread activity silently and the eye badges a dot so you know something happened. Hidden state is saved in the Bot's profile metadata, so it follows the Bot to every desktop connected to that backend.
@@ -70323,7 +70628,7 @@ A Bot's look, title, and description are stored in the profile's metadata on the
 
 ## Routines
 
-The **Routines** pane attaches recurring tasks to the Bot that does them — "summarize my inbox every morning" lives next to the Bot responsible for it. The pane docks beside the chat only while the Bots tab is active and steps aside when you switch back to Sessions (older desktop builds keep it always visible). A structured schedule picker builds the schedule (frequency first, then only the detail that matters), with an Advanced field exposing the raw Hermes schedule string.
+The **Routines** pane attaches recurring tasks to the Bot that does them — "summarize my inbox every morning" lives next to the Bot responsible for it. The pane docks beside the chat only while the Bots tab is active and steps aside when you switch back to Sessions (older desktop builds keep it always visible). Closing it with its ✕ hides it until you next leave and re-enter the Bots tab, when it comes back as the collapsed right-edge tab. A structured schedule picker builds the schedule (frequency first, then only the detail that matters), with an Advanced field exposing the raw Hermes schedule string.
 
 Routines are plain [Hermes cron jobs](./features/cron.md) namespaced `[bot:<name>] <routine>` — they also show up in `hermes cron list` and the core Cron page. Runs land in the Bot's own chat history, so the result is right where you would talk to that Bot anyway.
 
@@ -70332,14 +70637,25 @@ Routines are plain [Hermes cron jobs](./features/cron.md) namespaced `[bot:<name
 Messages sent during a member turn queue behind the active room drive, including
 replies in the same thread. They do not interrupt that member or mark unseen
 messages as read. Stop cancels queued continuations and holds the members until
-resumed. A quiet room watches timed-out members for another 21 minutes after the
+resumed: @mention a held member, or address the whole room (`@all …` /
+`@everyone …`, any wording) to release everyone — `@all resume` is not a
+required incantation. `stop`, `halt` or `pause` holds a member only when the
+word sits next to its @mention (`stop @bot`, `@bot please pause`); the same word
+elsewhere in the sentence is read as ordinary prose, so a German `halt` no longer
+silences the bot it was sent to — but such a message does not release a held
+member either (`@bot please just stop now` never wakes it; repeat the stop next
+to the mention to hold it). A quiet room watches timed-out members for another 21 minutes after the
 foreground wait ends; this observation window does not extend the turn itself.
 Unresolved member failures remain visible in the collapsed Activity summary after
-the room settles. Expand Activity for the turn sequence; re-address the member to
+the room settles — including a turn the member's backend itself failed (bad
+credentials, provider errors), which is reported the moment the gateway
+reports it instead of looking like twenty minutes of thinking. Expand Activity for the turn sequence; re-address the member to
 try again. An ambiguous submit failure is not automatically resubmitted.
 
 
 Right-click a local Bot → **Manage groups** to add or remove it from any number of group chats. Pick existing groups independently or create one inline. Local membership is stored in the Bot's backend-synced profile metadata, so it follows that profile across desktops; older profiles with one legacy group continue to work. Connections Bots join through the New Group Chat picker and remain source-qualified in the room's shared state.
+
+To edit an existing room as a unit, use **Manage members** — from the room header's people icon or the **Manage members…** button in **Group settings**. The checklist pre-selects the current members and lists every local and Connections Bot; add or remove several at once and **Save members** applies the new roster (still 2–6 Bots) while the room, its history and each member's room session stay in place. A removed Bot takes no further turns; an added Bot reads the recent room history on its first turn. **Cancel** changes nothing.
 
 **Rooms follow your gateways, not one Desktop.** Each room's recent transcript, members, picture, and name are mirrored into the shared profile metadata of **every** gateway your Desktop is connected to, with per-gateway versioning so two Desktops writing at once merge instead of overwriting each other. Open Hermes Desktop on another machine against the same gateway (local network, Tailscale, anywhere) and the room appears with its history; gateway-only clients see it too. Rooms carry a durable internal identity, so renaming one changes just its display name everywhere, disbanding one removes it permanently on every client — even ones that were offline at the time — and recreating a same-name group starts a genuinely fresh room. If a gateway dies or is removed, nothing is lost: every connected Desktop keeps the full room locally and re-seeds any gateway it reconnects to. (The full orchestration log stays in each Desktop's local storage; the shared mirror is a bounded recent-history projection.)
 
@@ -70350,6 +70666,10 @@ A group's identity is editable, at creation and after:
 
 Groups are standalone rows in the same activity-ordered roster as Bot DMs. A Bot keeps one DM row even when it belongs to several groups, while every group gets its own room row with member count, latest-message preview, timestamp, and needs-you state.
 
+A room row organizes like a Bot row. Right-click it → **Pin to top** to keep a daily-driver room above the unpinned Bots and rooms (**Unpin** puts it back into recency order); the pin is saved with the room on this Desktop. Right-click → **Move to section** files the room into one of your [sections](#organize-bots-into-sections) — or drag the row onto a section heading — and **Remove from section** returns it to the group-chat bucket. A room's section is stored on its room record (rooms have no profile), so it stays local to this Desktop like the section list itself.
+
+The room composer (and the reply-in-thread composer) starts as a single row and grows as your prompt wraps or gains **Shift+Enter** newlines, up to half the window (at most 24rem); past that it scrolls inside the box so the transcript keeps its space. **Enter** sends.
+
 Use the **Move up** and **Move down** arrows beside a room to choose its position among rooms. Until the first move, the existing pinned-first, recent-activity order is unchanged. After a move, room order is saved on this Desktop and survives reloads; new rooms follow the explicitly ordered rooms within their pinned or unpinned band. Moves cannot cross the pinned boundary, and filtering does not discard hidden rooms from the saved order. These controls reorder actual Group Chat rooms, not user-created Bot folders, and do not change membership or gateway ownership.
 
 **Open chat** on any group row (2–6 Bots) opens a shared room where the whole group coordinates:
@@ -70357,12 +70677,16 @@ Use the **Move up** and **Move down** arrows beside a room to choose its positio
 - **One visible conversation.** Public messages and each member's reply stay readable in arrival order, with the speaker's name and timestamp. Starting another topic does not collapse earlier replies. **Reply in thread** continues that topic without reordering the room; **Activity** is a secondary status view, not a replacement for messages. Private Bot Chats remain separate.
 - Your message triggers up to **three serial rounds** of member turns. @-mentioned Bots respond (everyone responds when nobody is mentioned); each Bot replies briefly or passes, and the room settles when a full round stays silent.
 - Teammates can hand off to the primary Bot with `@hermes`, including in older saved rooms; Bots on other gateways keep their device-qualified tags (for example, `@default-vera`).
-- Bots pull each other in with `@name`, and escalate real judgment calls to you with `@user` — the group row shows a **needs you** badge when that happens. Pending questions and command approvals also light that badge; resolving the last prompt clears only prompt attention, not an independent mention. Prompts follow a renamed room, while disbanding retires them even if a member's in-flight poll arrives later.
+- Bots pull each other in with `@name`, and escalate real judgment calls to you with `@user` — the group row shows a **needs you** badge when that happens. Pending questions and command approvals also light that badge; resolving the last prompt clears only prompt attention, not an independent mention. A command approval in the room answers on the click itself — `once`, `session`, `always` or `deny` sends at once, with no second button to find. Prompts follow a renamed room, while disbanding retires them even if a member's in-flight poll arrives later.
 - Hard caps (10 messages per send, 3 rounds) keep rooms from spinning.
 - Each member keeps its own persistent room session, so room context survives like any other conversation.
 - **Not every Bot replies to every message.** Speaking is each member's own choice — a Bot replies only when it has something new to add and passes otherwise, and @-mentioning specific members scopes the round to them. Expect the members you addressed (or whoever has something to say) to speak, and the rest to stay quiet.
+- **Rooms keep running when you close the Desktop.** When every member of a room lives on the same gateway, that gateway owns turn scheduling through a durable driver: closing Hermes Desktop (or losing its connection) does not stop a room mid-discussion, and the Desktop simply catches up from the room's log when it reconnects. `groups.capabilities` on the gateway reports `driver: true` when this applies. More than one room worker may share a home — the messaging gateway (`hermes gateway run`) and the Desktop's own backend (`hermes serve`) both run one — and whichever holds the room's driver lease runs the next turn; a member's room session is held only for the duration of its turn, so the lease can move between workers without a turn being refused. Rooms whose members span several machines are different: each member's turns run on its own gateway, and the cross-connection courier described under *Bot-to-bot messaging* still applies to them.
+
 - **Rooms keep running when you close the Desktop.** When every member of a room lives on the same gateway, that gateway owns turn scheduling through a durable driver: closing Hermes Desktop (or losing its connection) does not stop a room mid-discussion, and the Desktop simply catches up from the room's log when it reconnects. `groups.capabilities` on the gateway reports `driver: true` when this applies. Rooms whose members span several machines are different: each member's turns run on its own gateway, and the cross-connection courier described under *Bot-to-bot messaging* still applies to them.
+- **Mentions read as identities.** In the transcript a routed `@bot` mention, the human handoff `@user`, and the broadcasts `@everyone` / `@all` render as inline references (accent text, not pills); unknown `@words` and e-mail addresses stay plain. Hover a Bot's message and use **Reply to @handle** to seed `@handle ` into the composer, so your next send goes to that Bot only (when a same-named Bot from a Connection shares the room, the tag is device-qualified, e.g. `@reviewer-mini` / `@reviewer-local`) — **Reply in thread** still continues the whole thread. If a reply box for a *different* thread is open, **Reply to** seeds the main composer instead and so starts a fresh thread; use **Reply in thread** to continue that thread.
 - **Rooms can span machines.** The New Group Chat picker seats Bots from any registered connection; each member's turns run on its own machine, in its own room session there. Cross-machine members carry a device badge (`dixie · Mac Mini`) in the room and in other members' transcripts, and the disambiguated `@name-device` handle works in room mentions — so same-named agents on two machines never blur together.
+- **Rooms show the same identity as the roster.** Transcript rows, the “X is thinking…” line and Activity rows resolve each member's title and avatar by its owning connection and profile — re-titling a Bot or changing its picture updates every room it sits in, remote members keep their own titles, and two same-named Bots on different connections never borrow each other's avatar. When two members would still read identically, Activity appends the connection label (`Reviewer · Mac Mini`).
 - **Plugins can watch members work.** The durable room log records `turn.started` and `turn.settled`; what a member does in between (tools, approvals, streamed text) is projected to plugins through the [`on_room_member_activity`](/user-guide/features/hooks#on_room_member_activity) hook with room, member and turn coordinates, so community clients can build tool cards and live member status on top of Group Chat without reading Hermes internals.
 
 ## Bot-to-bot messaging
@@ -70384,6 +70708,28 @@ agent:
   bot_mode_protocol: true   # inject the bot-to-bot messaging protocol into canonical Bot Chats
 ```
 
+### What actually makes a chat a Bot Chat
+
+`agent.bot_mode_protocol` is only the master switch. Before the protocol section — or the `message_agent` tool — is injected, two further conditions must hold, and on a desktop install the Bots pane satisfies both for you the moment it creates a Bot:
+
+1. **The session is titled exactly `Bot Chat`.** That exact title is the canonical chat's identity (it is what the desktop plugin's createCanonicalChat uses and what `hermes -p <bot> chat -c "Bot Chat"` resumes); any other title, or an untitled scratch session, gets neither the section nor the tool.
+2. **At least one profile on the install carries a `ui_meta: { hermes-bots: … }` block in its `profile.yaml`.** This is the "Bot-Mode-managed" marker the desktop plugin writes for every Bot it owns; the gate scans every profile, so one marked profile marks the whole install. There is no CLI command that writes it.
+
+The practical consequence: on a **headless install with no desktop app** (gateway plus Telegram, say) nothing ever writes either marker, so `message_agent` is unreachable even though the docs-level switch is on — bots message each other fine over the messaging platform, but the agent-side `message_agent` tool never appears. To enable it headless, satisfy both conditions by hand:
+
+```bash
+# the canonical forever-chat, created once per Bot (later runs resume it)
+hermes -p <bot> chat -c "Bot Chat" --create-if-missing
+```
+
+```yaml
+# ~/.hermes/profiles/<any-bot>/profile.yaml — an empty block is enough to mark the install
+ui_meta:
+  hermes-bots: {}
+```
+
+From the next turn in that Bot Chat the teammate roster, the protocol section, and `message_agent` are all picked up — including over `hermes -p <bot> chat` on a purely terminal box.
+
 :::note
 Bot-to-bot delivery is per-invocation: the receiving Bot picks the message up when it next runs. Live interrupt of a Bot mid-conversation is future work.
 :::
@@ -70395,7 +70741,7 @@ its human-readable message. `SESSION_NOT_OWNED` produces `target_busy`; an
 unreadable coordination registry is not mislabeled as another owner. Older local
 CLIs without the code marker still use the historical refusal wording.
 
-A failed delivery turn is retried at most once, and only when a retry can actually help. Transient failures (target runtime offline, delivery timeout, provider rate limit or server error) re-run the same Bot Chat session unchanged. A context-overflow failure also re-runs the same session — the retried turn compacts the over-threshold transcript via the standard context-compression pass before calling the model, so the retry fits where the original didn't. Auth, quota, and configuration failures never auto-retry: a second attempt cannot fix them and only burns quota, so the failure is surfaced immediately. A retried turn never starts a fresh session — your Bot Chat history and context stay intact.
+A failed delivery turn is retried at most once, and only when a retry can actually help. Transient failures (target runtime offline, delivery timeout, provider rate limit or server error) re-run the same Bot Chat session unchanged. A context-overflow failure also re-runs the same session — the retried turn compacts the over-threshold transcript via the standard context-compression pass before calling the model, so the retry fits where the original didn't. Auth, quota, and configuration failures never auto-retry: a second attempt cannot fix them and only burns quota, so the failure is surfaced immediately. A retried turn never starts a fresh session — your Bot Chat history and context stay intact. The re-run resumes the message the failed attempt already wrote into the Bot Chat instead of appending it again, so the recipient's transcript carries exactly one copy of the DM.
 
 When a target has no live Desktop or TUI owner, local delivery opens that
 profile's canonical Bot Chat through a quiet CLI turn. The transport prefers
@@ -70643,9 +70989,11 @@ desktop:
 
 Changing any of these values invalidates only that profile's disk-discovery cache and starts a policy-compliant refresh. **Hide from sidebar** remains a separate per-item curation action.
 
+With **Group by → Projects**, each project row previews its three most recent sessions. A project with more ends in a **Show all N sessions** row that expands the rest in place; the sidebar menu's **Show all sessions** toggle removes the preview cap for every project at once.
+
 #### Choosing a model
 
-The model picker lives in the **composer**, just left of the microphone. Click it to switch the model; hover a model row for its options (thinking, effort, fast). Next to it, a **reasoning pill** shows the active model's effort level (`Med`, `High`, …) and opens the same options directly, so you can change effort without finding the model's row. The pill is hidden for models whose catalog reports no reasoning control.
+The model picker lives in the **composer**, just left of the microphone. Click it to switch the model; hover a model row for its options (thinking, effort, fast). Next to it, a **reasoning pill** shows the active model's effort level (`Med`, `High`, …) and opens the same options directly, so you can change effort without finding the model's row. The pill is hidden for models whose catalog reports no reasoning control. When the gateway flags a switch as risky (a large cached context, an expensive model, a data-training tier), the app asks first in a dialog: **Switch anyway** applies it, **Keep current model** (or Esc) leaves everything as it was.
 
 The **microphone** is dictation; hover it and the other voice toggles fan out above it — **Read replies aloud** and the **wake word** ear. A toggle that is on shows as a solid disc. Starting a full voice conversation stays on the primary button to the right. In the HUD and in narrow tiles the same controls fold into one menu behind the mic instead.
 
@@ -70875,6 +71223,8 @@ chats decide who replies: [Bot Mode: A Roster of Agents](./bot-mode.md).
 
 The app checks for updates in the background and offers a one-click update when one is ready.
 
+The background check asks the GitHub API for the branch tip. Anonymous GitHub requests are limited to 60 per hour **per network address**, so on a shared connection (office NAT, VPN, proxy) the check can report `GitHub API rate limit reached` even though this machine made almost none of them. If `GITHUB_TOKEN` (or `GH_TOKEN`) is set in the environment the app was launched from, the check spends that token's 5,000/hour budget instead; the token is read from the environment on each request and never stored. Applying an update uses `git`, not the API, and is unaffected.
+
 During a local update, detailed build output streams into the active profile's
 `logs/update.log`, including detached `--gateway` updates. It stays out of the
 terminal but is available for troubleshooting before the build finishes. The
@@ -71085,6 +71435,10 @@ SHA, including private repositories); pinned agent plugins show a
 ### Reconnect without restarting the app
 
 If a Desktop chat or bot stops responding while the connection still shows **Connected**, select that bot/profile or gateway, open the status bar's gateway menu, and click **Reconnect gateway**. Reconnect stays available for open, connecting, and disconnected transports. It redials the active route without restarting Desktop or deliberately closing other routes' sockets. In-flight requests on the selected socket can be interrupted; this is an explicit recovery action, not a backend or model restart.
+
+### The local backend stopped in the background
+
+If the local Hermes backend process exits after it was ready, Desktop restarts it on its own and shows a **Hermes stopped working in the background** notice; the chat reconnects once the replacement is up. `HERMES_HOME/logs/desktop.log` records the exit code together with the backend's last output lines (`Hermes backend exited (1)` followed by `Recent backend output:`), so the reason it died is in the log even when the app recovered by itself. A backend that keeps dying within seconds of every restart points at the backend itself — look at the traceback in that tail. After three such restarts within two minutes Desktop stops respawning and shows a **keeps crashing** notice instead of cycling; relaunch the app once the cause is fixed.
 
 ### Failed turns name the failing layer
 
@@ -74456,6 +74810,7 @@ Rule of thumb: if the recurring prompt needs the conversation's context, use `/h
 - **Gateway recovery.** Startup restores active heartbeats using the current persisted conversation and thread routing, in the owning profile. Each poll retries recovery after temporary storage failures or adapter downtime; paused and cleared heartbeats and suspended conversations do not restart. No new chat message is required.
 - **Persistence and conversation boundaries.** State lives in `SessionDB.state_meta` keyed by `heartbeat:<session_id>` and follows context-compression session rotations. In the messaging gateway, leaving a conversation through reset, switch, or suspension clears its heartbeat; resuming that archived conversation does not resurrect it. Firing requires the owning process (CLI session or gateway) to be running. An already-admitted gateway tick is checked again after session resolution and before agent execution: it may follow a compression child, but cannot carry its old instruction into a reset or switched conversation.
 - **Execution accounting.** The gateway reserves a due tick at adapter admission. If that exact attempt ends before entering the agent runner (including cancellation or a routing, authorization, emergency-stop, or preparation rejection), it refunds the tick unless the schedule has since changed. Once the agent runner is entered, the fire remains counted even if execution fails or is interrupted. This count is **not** proof of a successful model response or outbound delivery; abrupt process death can prevent the refund callback.
+- **Quiet when there is nothing to say (gateway).** A scheduled heartbeat turn may end with a bare silence marker (`NO_REPLY` / `[SILENT]`): the gateway sends nothing, unlike a human message that returns only a marker (that still gets the visible "try again" notice). While the heartbeat works, no typing indicator, tool-progress, streamed draft or "still working" bubble is posted, and a result it does deliver is routed to the chat/topic without quoting the message that set the heartbeat. Approval prompts and failures stay visible.
 - **Don't-invent-work guard.** The injected prompt tells the agent to reply briefly and stop when nothing meaningful changed, so an idle heartbeat doesn't generate busywork.
 
 ## Example
@@ -74769,7 +75124,7 @@ A real user message always wins over both — wakeups only fire while the sessio
 
 ## Behavior details
 
-- **A wakeup is a normal user-role turn.** No system-prompt mutation, no toolset swap — prompt caching stays intact.
+- **A wakeup is a normal user-role turn.** No system-prompt mutation, no toolset swap — prompt caching stays intact. In the messaging gateway a wakeup is not a reply to the message that set the loop, so its output is posted to the chat/topic without quoting that message.
 - **Survives `/resume` and compression.** Loop state persists per session and migrates across context-compression boundaries, same as `/goal`.
 - **One loop per session.** Setting a new `/loop` replaces the old one. Run several loops by running several sessions (or use cron for a fleet of schedules).
 - **Interrupting a wakeup turn (Ctrl+C) pauses the loop** — recoverable with `/loop resume`, so cancel actually means cancel.
@@ -75115,6 +75470,10 @@ Mixture of Agents is a virtual model provider. Each named MoA preset appears as 
 
 When you select a MoA preset, the preset's aggregator is the acting model. It is the model that writes the assistant response and emits tool calls. Reference models run first and provide analysis for the aggregator to use.
 
+:::info Who pays for a MoA run
+The **aggregator is billed for the whole run**: it runs every step of the tool loop, so almost all of a preset's cost lands on the aggregator's provider. References only advise once per user turn (with the default `fanout`). If your main model is on a subscription provider but the aggregator sits elsewhere, the run is billed to the aggregator's provider, not to your subscription — `hermes moa configure` and `hermes moa list` print a one-line notice whenever the aggregator's provider differs from `model.provider`, and the Desktop editor, `hermes model`, and `/model` mark the aggregator slot as the acting, billed model.
+:::
+
 Use MoA when a hard task benefits from multiple model perspectives but still needs Hermes' normal agent loop: tool calls, follow-up iterations, interrupts, transcript persistence, and the same session context as any other message.
 
 ## Select a MoA preset as your model
@@ -75319,6 +75678,12 @@ hermes moa configure review       # create or update a named preset
 hermes moa delete review
 ```
 
+`hermes moa list` marks the aggregator as the acting model that carries almost all of the cost and lists references as advising once per user turn (by default). When the aggregator's provider differs from your main `model.provider`, both `list` and `configure` add:
+
+```text
+Aggregator is on nous; the whole tool loop will be billed there, not to openai-codex.
+```
+
 ## Benchmarks
 
 On HermesBench, a two-model MoA preset — `claude-opus-4.8` aggregating over a `gpt-5.5` reference — outscores either model run on its own:
@@ -75338,9 +75703,9 @@ MoA is built so the **main conversation's prompt cache is never broken**. Select
 Both internal call types cache normally:
 
 - **Reference models** receive a trimmed, deterministic view of the conversation (system prompt and tool transcript stripped — see the loop above). Because that view is a stable function of the stable history, a reference model's prompt prefix repeats across iterations and caches normally. References are short advisory calls with no tools.
-- **The aggregator** is the acting model. The reference outputs are appended to the *end* of the latest user turn as private guidance. Because that text sits at the tail — below the entire stable prefix (system prompt + prior history) — it does not invalidate any cached prefix: the aggregator gets a cache hit on everything above the injection, and only the freshly appended tail is new. That is exactly how every normal turn behaves, where each new user message is also uncached tail tokens.
+- **The aggregator** is the acting model. The reference outputs are appended as their *own* trailing user message of private guidance — never merged into your message. Because that block sits at the tail — below the entire stable prefix (system prompt + your message + prior tool history) — it does not invalidate any cached prefix: on OpenAI-compatible aggregators every request in a tool loop is a byte-identical extension of the previous one minus its guidance block, so the aggregator gets a cache hit on everything above the injection and only the freshly appended tail is new. That is exactly how every normal turn behaves, where each new user message is also uncached tail tokens. (Aggregators on the Anthropic Messages, Bedrock Converse or native Gemini wire fold the guidance into your message on the first iteration of a turn — those converters merge adjacent user turns — so there the cache hit still starts above your message.)
 
-So MoA does not sacrifice prompt caching on either call type. Its only real cost is the extra reference calls per iteration — you pay for multiple model perspectives, not for broken caches. The long-lived conversation prefix shared with the rest of Hermes is fully intact.
+So MoA does not sacrifice prompt caching on either call type. Its only real cost is the extra reference calls (once per user turn with the default `fanout`) — you pay for multiple model perspectives, not for broken caches. The long-lived conversation prefix shared with the rest of Hermes is fully intact.
 
 ## Notes
 
@@ -75349,6 +75714,7 @@ So MoA does not sacrifice prompt caching on either call type. Its only real cost
 - A preset's aggregator cannot be another MoA preset. Recursive MoA trees are intentionally blocked.
 - Credential failures on one reference model do not abort the turn. Hermes includes the failure in the reference context and continues with whatever models returned.
 - MoA increases model-call count. A single model iteration can involve multiple reference calls plus the aggregator call.
+- A preset can be a fallback entry (`fallback_providers: [{provider: moa, model: <preset>}]`). When the primary fails, Hermes activates the preset itself — references and aggregator, with `moa://local` as the virtual endpoint — the same way `/model <preset> --provider moa` does. The entry is skipped when the preset does not resolve or its aggregator has no credentials.
 
 ---
 
@@ -75651,6 +76017,8 @@ directory of the hermes-agent repository, declaring:
 | `requires_hermes` | Minimum Hermes version, e.g. `>=0.19` (optional) |
 | `platforms` | OS restrictions, empty = all (optional) |
 | `docs_url` | External documentation link (optional) |
+| `version` | Human-readable label for the pinned sha, e.g. `"1.4.0"`; shown as `1.4.0 @ abcd1234` in the CLI, on the catalog card and on the Desktop **Update to** button (optional, cosmetic) |
+| `image` | Banner image for the catalog card, shown at 2:1 (1200×600 works; other shapes are centre-cropped); an `https` URL on `raw.githubusercontent.com`, `github.com` or `*.githubusercontent.com` (optional). Pin it to the entry's commit (`raw.githubusercontent.com/owner/repo/<sha>/...`) so it never changes under the review |
 
 ## Trust model
 
@@ -75662,6 +76030,13 @@ The catalog is designed so you know exactly what you're installing:
 - **Exact SHA pins.** Entries pin a specific commit, not a branch. A plugin
   author pushing new code to their repo does **not** change what the catalog
   installs — updating the pin requires another reviewed PR.
+- **Scanned at admission, trusted at install.** Admission CI runs the same
+  security scanner the installer runs (`hermes plugins validate` includes a
+  `security scan` check): a `dangerous` verdict fails the entry, `caution`
+  findings are listed for the reviewer. Because the reviewer saw them, a
+  catalog install checked out at exactly the pinned SHA does not stop to ask
+  about `caution` again; `dangerous` still blocks, and anything installed from
+  a raw URL or at another revision gets the normal prompt.
 - **Capability declarations.** Entries state up front which tools, hooks, and
   middleware the plugin provides and which environment variables (API keys
   etc.) it needs, so you can judge its blast radius before installing.
@@ -75787,7 +76162,11 @@ in short, an entry must be:
    `hermes plugins update <name>`).
 
 Pin updates (bumping `sha` to a newer commit) follow the same PR + review
-process.
+process; bump `version` in the same PR so the label users see matches the
+code. Installed plugins compare their recorded sha against the live pin:
+`hermes plugins list --json` reports `update_available`, the Desktop Plugins
+tab shows an **Update to 1.4.0** button, and `hermes plugins update <name>`
+checks out exactly the new pin.
 
 ## See also
 
@@ -76682,6 +77061,8 @@ Image generation defaults to FLUX 2 Klein 9B for speed. Override per-call by pas
 | Qwen Image | `fal-ai/qwen-image` | Alibaba multimodal |
 
 The set evolves — `hermes tools` → Image Generation shows the current live list.
+
+**Krea 2** (Medium, Large, Medium Turbo — up to 10 style-reference images, optional Enhance upscale) and any Nous Portal image models sit in the same **Nous Subscription** model picker rather than behind rows of their own. Every model appears once; picking a Krea id (`krea-2-medium`, …) sends the request to the Krea gateway instead of FAL, and the selection is still just `image_gen.provider: nous` plus the model id. Krea and Portal models need a paid subscription — the free tool pool funds the FAL models only.
 
 ---
 
@@ -79005,16 +79386,16 @@ web:
   extract_backend: "firecrawl"  # used by web_extract
 ```
 
-When per-capability keys are empty, both fall through to `web.backend`. Only when no web selection has ever been written is the backend auto-detected from whichever API key/URL is present — once a selection exists, the runtime always uses it, and adding a key to `.env` does not reroute web traffic.
+When a per-capability key is empty, that capability falls through to `web.backend`. Only when no **shared** web selection has ever been written (`web.backend` or the managed `hermes tools` row) is the backend auto-detected from whichever API key/URL is present — once a shared selection exists, the runtime always uses it, and adding a key to `.env` does not reroute web traffic. A per-capability key affects only its own capability: setting `web.extract_backend` alone leaves `web_search` on its auto-detected backend.
 
 **Priority order (per capability):**
 1. `web.search_backend` / `web.extract_backend` (explicit per-capability)
 2. `web.backend` (shared fallback; `nous` = managed Tool Gateway)
-3. Auto-detect from environment variables (never-configured setups only)
+3. Auto-detect from environment variables (no shared selection written)
 
 ### Auto-detection
 
-If no backend has **ever** been selected (no `web.backend` / per-capability key written by you or `hermes tools`), Hermes picks the first available one based on which credentials are set:
+If no shared backend has **ever** been selected (no `web.backend` written by you or `hermes tools`), Hermes picks the first available one based on which credentials are set:
 
 | Credential present | Auto-selected backend |
 |--------------------|-----------------------|
@@ -84490,6 +84871,7 @@ Only one Weixin gateway instance can use a given token at a time. The adapter ac
 | `Weixin startup failed: WEIXIN_ACCOUNT_ID is required` | Set `WEIXIN_ACCOUNT_ID` in your `.env` or run `hermes gateway setup` |
 | `Another local Hermes gateway is already using this Weixin token` | Stop the other gateway instance first — only one poller per token is allowed |
 | Session expired (`errcode=-14`) | Your login session has expired. Re-run `hermes gateway setup` to scan a new QR code |
+| Proactive send (cron / notification) fails with `ret=-2 errmsg=prepare failed` or `unknown error` | The peer's `context_token` went stale (no recent inbound message from them). The adapter treats this as a stale session — not a rate limit — and re-sends once without the token, so the message still arrives. Only other `-2` responses trigger the rate-limit backoff/cooldown |
 | QR code expired during setup | The QR auto-refreshes up to 3 times. If it keeps expiring, check your network connection |
 | Bot doesn't respond to DMs | Check `WEIXIN_DM_POLICY` — if set to `allowlist`, the sender must be in `WEIXIN_ALLOWED_USERS` |
 | Bot ignores group messages | Group policy defaults to `disabled`. Set `WEIXIN_GROUP_POLICY=open` or `allowlist` — but note that QR-login iLink bot identities (`...@im.bot`) typically cannot receive ordinary WeChat group messages at all. If the gateway logs show no raw inbound events for group messages, the limitation is on the iLink side, not in Hermes. |
@@ -85396,6 +85778,12 @@ authentication; manage sign-in from the registered connection controls.
        shell; on a `zsh` login shell the probe watchdog cannot kill the whole
        process group, so a hung probe's grandchildren may linger on the remote
        (bash/sh remotes reap them).
+     - **Hermes path (optional)** — full path to the `hermes` executable on
+       the remote (for example `/opt/hermes/bin/hermes`). Leave blank to
+       auto-detect. Set it when the remote's non-interactive shell does not
+       have `hermes` on its `PATH` and **Test** reports *"Hermes is not
+       installed on the remote host"*; clearing the field restores
+       auto-detection.
 5. Click **Save connection** (or **Cancel**).
 6. Click **Test** on the new row and wait for *"Reachable"*.
 
@@ -85511,7 +85899,8 @@ that live on one gateway.
   Remote gateways are opened only when selected; there is no periodic fleet
   polling.
 - Hovering an agent pre-warms its backend so the switch doesn't pay a cold
-  boot.
+  boot. SSH agents are the exception: hovering never dials the tunnel or
+  starts a remote backend — only opening one does.
 - The **Capabilities** page (Skills / Tools / MCP) has a matching scope: its
   **Configuring** selector lists every `(profile, device)` agent from the
   union roster, and picking one reads and writes **that machine's** skills,
@@ -86076,6 +86465,7 @@ profile and never shares with the default or any sibling:
 | Concern | Resolved from | Behaviour when the profile lacks it |
 |---|---|---|
 | Provider keys, bot tokens, `${VAR}` refs in `config.yaml` | The profile's own `.env` (its secret scope) | Unresolved / no adapter — never the default profile's value |
+| Provider logins and the credential pool (`auth.json`: OAuth tokens, `hermes auth add` keys) | The profile's own `auth.json` | "Not connected to any AI provider" with the `hermes -p <name> model` hint — never the default profile's login, and a refresh never writes to the root store |
 | Authorization (`GATEWAY_ALLOW_ALL_USERS`, `GATEWAY_ALLOWED_USERS`, per-platform allowlists and allow-all opt-ins) | The owning profile's `.env` and `config.yaml` | Closed — a default-profile opt-in never opens a secondary's bot |
 | HTTP endpoints (`/p/<profile>/api/...`, `/p/<profile>/webhooks/...`, platform event callbacks) | The named profile's `API_SERVER_KEY`, `profile:`-bound webhook routes, and its own adapter | `401`/`404`; delivery without an adapter is `502`/`503`, never another profile's bot |
 | Inbound-port platforms (`/p/<profile>/webhooks/twilio`, `/p/<profile>/line/webhook`, `/p/<profile>/api/messages`, …) | The named profile's own adapter and its secret (Twilio auth token, LINE channel secret, Teams app, BlueBubbles password, …); replies leave through that adapter | `401`/`403` on a wrong secret, `404` when the profile has no such adapter — never the default profile's adapter |
@@ -88327,8 +88717,8 @@ Flags used when spawning: `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_
 ```powershell
 hermes gateway status      # Merged view: schtasks + Startup folder + running PID
 hermes gateway start       # Starts the scheduled task now
-hermes gateway stop        # Graceful SIGTERM equivalent (TerminateProcess via psutil)
-hermes gateway restart
+hermes gateway stop        # Writes the planned-stop marker, waits for the gateway to drain (≤ agent.restart_drain_timeout, capped at 30 s), then force-kills only if it is still alive
+hermes gateway restart     # Same drain-first stop, then a fresh start
 hermes gateway uninstall   # Removes schtasks entry, Startup shortcut, pid file
 ```
 
