@@ -230,6 +230,7 @@ Repo: https://github.com/NousResearch/hermes-agent
 - [Model Provider Plugins](./developer-guide/model-provider-plugin.md): How to build a model provider (inference backend) plugin for Hermes Agent
 - [Multiplexing Gateway Internals](./developer-guide/multiplexing-gateway.md): Design of the one-gateway-for-all-profiles mode: scope composition, secret scope, inbound routing, persistence
 - [Observer Hooks](./developer-guide/observer-hooks.md): Read-only telemetry contract for plugins: event families, correlation IDs, payload safety
+- [Onboarding recommendations](./developer-guide/onboarding-recommendations.md)
 - [Plugin LLM Access](./developer-guide/plugin-llm-access.md): Run any LLM call from inside a plugin via ctx.llm — chat or structured, sync or async. Host-owned auth, fail-closed trust gate, optional JSON Schema validation.
 - [Build a Hermes Plugin](./developer-guide/plugins.md): Step-by-step guide to building a complete Hermes plugin with tools, hooks, data files, and skills
 - [Programmatic Integration](./developer-guide/programmatic-integration.md): Three protocols for driving hermes-agent from external programs: ACP, the TUI gateway JSON-RPC, and the OpenAI-compatible HTTP API
