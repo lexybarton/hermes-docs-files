@@ -5013,7 +5013,7 @@ auxiliary:
 
 When `base_url` is set, Hermes ignores the provider and calls that endpoint directly (using `api_key` or `OPENAI_API_KEY` for auth). When only `provider` is set, Hermes uses that provider's built-in auth and base URL.
 
-Available providers for auxiliary tasks: `auto`, `main`, plus any provider in the [provider registry](/reference/environment-variables) — `openrouter`, `nous`, `openai-codex`, `copilot`, `copilot-acp`, `anthropic`, `gemini`, `qwen-oauth`, `zai`, `kimi-coding`, `kimi-coding-cn`, `minimax`, `minimax-cn`, `minimax-oauth`, `deepseek`, `nvidia`, `xai`, `xai-oauth`, `ollama-cloud`, `alibaba`, `bedrock`, `huggingface`, `arcee`, `xiaomi`, `kilocode`, `opencode-zen`, `opencode-go`, `commandcode`, `commandcode-anthropic`, `ai-gateway`, `azure-foundry` — or any named custom provider from your `providers:` dict (e.g. `provider: "beans"`).
+Available providers for auxiliary tasks: `auto`, `main`, plus any provider in the [provider registry](/reference/environment-variables) — `openrouter`, `nous`, `openai-codex`, `copilot`, `copilot-acp`, `anthropic`, `gemini`, `qwen-oauth`, `zai`, `kimi-coding`, `kimi-coding-cn`, `minimax`, `minimax-cn`, `minimax-oauth`, `deepseek`, `nvidia`, `xai`, `xai-oauth`, `ollama-cloud`, `alibaba`, `bedrock`, `huggingface`, `arcee`, `xiaomi`, `kilocode`, `opencode-zen`, `opencode-go`, `opencode-free`, `commandcode`, `commandcode-anthropic`, `ai-gateway`, `azure-foundry` — or any named custom provider from your `providers:` dict (e.g. `provider: "beans"`).
 
 Local OpenAI-compatible servers work under their own names too: `provider: ollama` (also `vllm`, `llamacpp`, `llama.cpp`) with a `base_url` such as `http://127.0.0.1:11434` and an empty `api_key` routes through the custom endpoint with a placeholder key, and a bare `host:port` base_url gets the `/v1` suffix automatically.
 
@@ -5612,7 +5612,6 @@ display:
   focus_view: false       # CLI focus view (/focus) — reduced output, display-only
   platforms: {}           # Per-platform display overrides (see below)
   interim_assistant_messages: true  # Gateway: send natural mid-turn assistant updates as separate messages
-  suppress_warning_notifications: false  # Opt-in: hide automatic warning/diagnostic notices (see messaging guide)
   show_commentary: true   # Codex models: deliver commentary-channel progress narration as visible mid-turn updates
   skin: default           # Built-in or custom CLI skin (see user-guide/features/skins)
   personality: ""         # Legacy cosmetic field still surfaced in some summaries
@@ -7722,15 +7721,7 @@ By default, Hermes uses `group_sessions_per_user: true` in `config.yaml`. That m
 
 - Alice and Bob can both talk to Hermes in the same Discord channel without sharing transcript history
 - one user's long tool-heavy task does not pollute another user's context window
-- a running turn is keyed to the sender that started it, but `/stop` still reaches it — see below
-
-`/stop` means "stop what is running in this chat": it first tries the caller's own session key,
-then any live turn in this chat — other participants' runs in the caller's own thread included —
-authorization-gated, and never another room, workspace or profile. So an idle Alice's `/stop` can
-end a turn Bob (or a bot) started in the room she is in. A `/stop` sent from *inside* a thread is
-narrower: it reaches runs belonging to that thread and a room-wide run that carries no thread slot
-(the rolling-DM shape), but never another thread of the same channel and never a peer's per-sender
-top-level run.
+- interrupt handling also stays per-user because the running-agent key matches the isolated session key
 
 If you want one shared "room brain" instead, set:
 
@@ -13688,16 +13679,6 @@ Each provider's data is isolated per [profile](/user-guide/profiles):
 - **Config file providers** (Honcho, Mem0, Hindsight, Supermemory) store config in `$HERMES_HOME/` so each profile has its own credentials
 - **Cloud providers** (RetainDB) auto-derive profile-scoped project names
 - **Env var providers** (OpenViking) are configured via each profile's `.env` file
-
-## Providers Moving to the Plugin Catalog
-
-Memory providers are moving out of the Hermes tree into their maintainers' own repositories,
-published through the [plugin catalog](/user-guide/plugins). Nothing changes for you: the
-provider name, your `memory.<name>` settings, its data directory and its tools stay the same.
-When a provider you have configured stops shipping with Hermes, `hermes update` installs its
-catalog plugin for every profile that names it; if you update through the Desktop app, the
-agent does the same the first time it starts (unless `security.allow_lazy_installs` is
-`false`, in which case it prints the `hermes plugins install <name>` one-liner instead).
 
 ## Building a Memory Provider
 
@@ -20880,9 +20861,9 @@ def my_callback(session_key: str, platform: str, reason: str, invalidation_reaso
 | `session_key` | `str` | The session whose run was interrupted. |
 | `platform` | `str` | The messaging platform name (`"telegram"`, `"discord"`, etc.); empty string if unknown. |
 | `reason` | `str` | Why the agent was interrupted (e.g. `"user_stop"`, the reset/new reason). |
-| `invalidation_reason` | `str` | Why queued session state was invalidated (e.g. `"stop_command"`, `"stop_command_thread_sibling"`, `"stop_command_chat_scope"`, `"reset_command"`). |
+| `invalidation_reason` | `str` | Why queued session state was invalidated (e.g. `"stop_command"`, `"stop_command_thread_sibling"`, `"reset_command"`). |
 
-**Fires:** In `gateway/run_agent_cache.py::_interrupt_and_clear_session`, immediately after `request_hard_interrupt()` interrupts the running agent. Only when a real agent was running — the pending-sentinel `/stop` path (no agent loop yet started) does **not** fire this hook, since there is no in-flight work to drop. On the slow `/new` reset path, `on_session_finalize` fires later in `_handle_reset_command` instead.
+**Fires:** In `gateway/run.py::_interrupt_and_clear_session`, immediately after `request_hard_interrupt()` interrupts the running agent. Only when a real agent was running — the pending-sentinel `/stop` path (no agent loop yet started) does **not** fire this hook, since there is no in-flight work to drop. On the slow `/new` reset path, `on_session_finalize` fires later in `_handle_reset_command` instead.
 
 **Return value:** Ignored.
 
@@ -25700,52 +25681,6 @@ display:
       long_running_notifications: false
 ```
 
-### Warning and error notifications (opt-in suppression)
-
-Automatic warning and error notifications are shown by default. To suppress
-these notifications, enable `suppress_warning_notifications` globally or for
-an individual surface:
-
-```yaml
-display:
-  suppress_warning_notifications: true
-  platforms:
-    telegram:
-      suppress_warning_notifications: false
-```
-
-This example suppresses notifications globally while keeping them visible on
-Telegram. Omit the setting or use `false` to preserve normal delivery. Platform
-overrides take precedence; `null` inherits. Invalid values do not enable
-suppression.
-
-The setting controls automatic engine warnings, retry/fallback diagnostics,
-watchdog and database notices, cron failure notifications, Kanban failure
-notifications, background/delegation diagnostics, and adapter-generated error
-notices. It applies to messaging platforms, CLI/TUI presentation and API
-notification presentation. Classification belongs to the producer: warning-like
-text in a user request or an ordinary result is not filtered by its wording.
-
-Suppression changes presentation, not execution. Existing logs, stored diagnostic
-content, retry decisions, failure state, scheduler bookkeeping and notification
-cursors remain available. A diagnostic-only internal wake (a subagent or credit
-failure, a Kanban crash notice) still runs its agent turn — so the agent can act on
-the failure and the session history stays consistent — and that turn is billed as
-usual; only its unsolicited text, media and streaming presentation are muted. Structured
-approval and clarification controls, direct command/API outcomes and requested
-results are not converted into success or discarded. API failure flags, status
-codes and usage remain truthful even when diagnostic text is hidden.
-
-Cron `failure_deliver` still selects the destination; the destination's warning
-policy determines whether an automatic failure notice is presented there.
-Suppressed deliveries are settled without claiming a successful send. Already
-admitted deliveries retain their delivery identity and outcome.
-
-Policy is resolved for the owning profile and logical destination. Agent turns
-use their turn policy; independent notifications and deferred deliveries evaluate
-policy at their own delivery boundary. Already delivered messages are not removed.
-Suppression does not fix an underlying failure or add another logging destination.
-
 ### Progress bubble cleanup (opt-in)
 
 Tool-progress messages, the "still working…" heartbeat, and status-callback bubbles can also be auto-deleted after the final response lands. Enable per-platform via `display.platforms.<platform>.cleanup_progress`:
@@ -28727,9 +28662,6 @@ platforms:
   recoverable reason (API error, rate limit), Hermes falls back to a single continuously edited text message so
   progress stays live for the turn. A relay egress refusal of the destination
   is not recoverable and suppresses progress for the turn.
-- If Slack closes a stream during a long turn, Hermes opens a fresh card in
-  the same thread with the current task list and keeps updating there. The
-  previous card remains visible.
 - The card stream is stopped exactly once when the turn finalizes, including
   on interrupt/disconnect, so no dangling live indicator is left behind.
 
@@ -32577,6 +32509,7 @@ You need at least one way to connect to an LLM. Use `hermes model` to switch pro
 | **OpenCode Zen** | `OPENCODE_ZEN_API_KEY` in `~/.hermes/.env` (provider: `opencode-zen`) |
 | **CommandCode** | `COMMANDCODE_API_KEY` in `~/.hermes/.env` (provider: `commandcode`, alias: `commandcode-chat`; Claude models via `commandcode-anthropic`, alias: `commandcode-claude`). Works with GOAT/Pro/Max/Provider plans (not the $1 Go plan — no API access). |
 | **OpenCode Go** | `OPENCODE_GO_API_KEY` in `~/.hermes/.env` (provider: `opencode-go`) |
+| **OpenCode Free** | Keyless — no API key or account needed (provider: `opencode-free`, aliases: `free`, `opencode_free`). Select via `hermes model` or `/model free`; requests are sent anonymously. The model list refreshes automatically from OpenCode's live catalog, so rotating free promotions appear (and delisted ones disappear) without a Hermes update |
 | **DeepSeek** | `DEEPSEEK_API_KEY` in `~/.hermes/.env` (provider: `deepseek`) |
 | **Hugging Face** | `HF_TOKEN` in `~/.hermes/.env` (provider: `huggingface`, aliases: `hf`) |
 | **Google / Gemini** | `GOOGLE_API_KEY` (or `GEMINI_API_KEY`) in `~/.hermes/.env` (provider: `gemini`) |
@@ -32592,9 +32525,9 @@ You need at least one way to connect to an LLM. Use `hermes model` to switch pro
 | **LM Studio** | `hermes model` → "LM Studio" (provider: `lmstudio`, optional `LM_API_KEY`) |
 | **Custom Endpoint** | `hermes model` → choose "Custom endpoint" (saved in `config.yaml`) |
 
-Both built-in OpenCode providers send an opaque, per-conversation `x-opencode-session` header on every request (main turns on every transport plus auxiliary calls such as compression, titles, approval checks, skills-hub lookups and `/btw` side questions — including the ones that run in the background after the turn has ended; headless Kanban `specify`/`decompose` and dashboard estimate calls use a per-task key). OpenCode uses it to pin a conversation to one backend so its prompt cache stays warm; the value is derived from the Hermes session id (or the Kanban task id) and carries no personal data.
+All three OpenCode providers send an opaque, per-conversation `x-opencode-session` header on every request (main turns on every transport plus auxiliary calls such as compression, titles, approval checks, skills-hub lookups and `/btw` side questions — including the ones that run in the background after the turn has ended; headless Kanban `specify`/`decompose` and dashboard estimate calls use a per-task key). OpenCode uses it to pin a conversation to one backend so its prompt cache stays warm; the value is derived from the Hermes session id (or the Kanban task id) and carries no personal data.
 
-The two built-in OpenCode providers each pin their own relay on `opencode.ai` (`opencode-zen` → `/zen/v1`, `opencode-go` → `/zen/go/v1`). A `model.base_url` left behind by the other relay is healed to the selected provider's relay, and the model you pick (`-m`, `/model`, a fallback entry or a channel override) decides which relay is used — so switching from a Zen model to a Go-only one never sends the request to Zen. A custom provider you define under `providers:` whose name extends a family slug (for example `opencode-go-bridge`) still gets the family's per-model API-mode routing and `/v1` handling, but its `base_url` is taken as declared: name it after the relay it actually points at.
+The three built-in OpenCode providers each pin their own relay on `opencode.ai` (`opencode-zen` and `opencode-free` → `/zen/v1`, `opencode-go` → `/zen/go/v1`). A `model.base_url` left behind by the other relay is healed to the selected provider's relay, and the model you pick (`-m`, `/model`, a fallback entry or a channel override) decides which relay is used — so switching from a Zen model to a Go-only one never sends the request to Zen. A custom provider you define under `providers:` whose name extends a family slug (for example `opencode-go-bridge`) still gets the family's per-model API-mode routing and `/v1` handling, but its `base_url` is taken as declared: name it after the relay it actually points at.
 
 For the official API-key path, see the dedicated [Google Gemini guide](/guides/google-gemini).
 
@@ -36983,6 +36916,7 @@ OpenAI-compatible base URL continues to use the compatible client instead.
 | OpenCode Zen | `opencode-zen` | `OPENCODE_ZEN_API_KEY` |
 | CommandCode | `commandcode` (alias `commandcode-chat`; Claude via `commandcode-anthropic`) | `COMMANDCODE_API_KEY` |
 | OpenCode Go | `opencode-go` | `OPENCODE_GO_API_KEY` |
+| OpenCode Free | `opencode-free` | — (keyless, no credential) |
 | Kilo Code | `kilocode` | `KILOCODE_API_KEY` |
 | Ramp Router | `router` | `RAMP_ROUTER_API_KEY` |
 | Xiaomi MiMo | `xiaomi` | `XIAOMI_API_KEY` |
@@ -42785,35 +42719,6 @@ Source files: `agent/context_engine.py` (ABC), `agent/context_compressor.py` (de
 `agent/prompt_caching.py`, `gateway/run_turn.py` (session hygiene), `agent/compression_facade.py` (search for `_compress_context`)
 
 
-## Bedrock context window cache
-
-Bedrock context resolution in `agent/model_metadata.py` uses this precedence:
-
-- **Explicit overrides win.** Configured context lengths take priority over cache,
-  probes, and the static table.
-- **Provider-confirmed limits persist.** A successful probe or a limit learned
-  from a provider error remains authoritative, even below the static table.
-  The compressor uses the same value after restart.
-- **Legacy entries are revalidated.** Old scalar entries have no provenance and
-  may be either probe results or fallbacks. Their size does not establish which.
-- **Failed probes use the current table without persisting it.** Failures have a
-  five-minute in-memory cooldown scoped to Hermes home, endpoint, model, and
-  region. Expiry or explicit cache invalidation permits another attempt.
-
-The cache remains at `context_length_cache.yaml` under the active Hermes home.
-`context_lengths` retains scalar values for older readers. An additive
-`bedrock_confirmed_v1` map binds each confirmed key to its exact value in the
-same atomic write. Generic writes clear that key's provenance. Older writers
-may drop the additive map, which causes revalidation after upgrading again.
-Downgrading remains readable but restores the older runtime's resolution rules.
-
-The static fallback for `xai.grok-4.6` (including `global.` and `us.` inference
-profiles) is 500,000 tokens, per the
-[AWS model card](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-xai-grok-4-6.html).
-This is Bedrock-specific, not the direct xAI API window. Existing compression
-rules still apply: without output reservation or an explicit token cap, the
-small-window 75% threshold floor yields a 375,000-token trigger at this window.
-
 ## Pluggable Context Engine
 
 Context management is built on the `ContextEngine` ABC (`agent/context_engine.py`). The built-in `ContextCompressor` is the default implementation, but plugins can replace it with alternative engines (e.g., Lossless Context Management).
@@ -46730,7 +46635,7 @@ Common options:
 | `--oneshot` | With `-q`/`--query-file`: answer the query and exit (the pre-0.21 single-query behavior) instead of seeding an interactive session. Implied on non-TTY stdio and by `-Q`. |
 | `-m`, `--model <model>` | Override the model for this run. |
 | `-t`, `--toolsets <csv>` | Enable a comma-separated set of toolsets. |
-| `--provider <provider>` | Force a provider: `auto`, `openrouter`, `nous`, `openai-codex`, `copilot-acp`, `copilot`, `anthropic`, `gemini`, `huggingface`, `novita` (aliases `novita-ai`, `novitaai`), `openai-api`, `zai`, `kimi-coding`, `kimi-coding-cn`, `minimax`, `minimax-cn`, `minimax-oauth`, `kilocode`, `xiaomi`, `arcee`, `gmi`, `upstage` (alias `solar`), `alibaba`, `alibaba-cn`, `alibaba-coding-plan` (alias `alibaba_coding`), `alibaba-coding-plan-cn`, `alibaba-token-plan`, `alibaba-token-plan-cn`, `deepseek`, `nvidia`, `ollama-cloud`, `xai` (alias `grok`), `xai-oauth` (alias `grok-oauth`), `qwen-oauth`, `bedrock`, `opencode-zen`, `opencode-go`, `commandcode`, `commandcode-anthropic`, `ai-gateway`, `azure-foundry`, `lmstudio`, `stepfun`, `tencent-tokenhub` (alias `tencent`, `tokenhub`), `router` (aliases `ramp-router`, `ramp`), `nebius-token-factory` (aliases `nebius`, `nebius-tf`, `tokenfactory`), `tencent-tokenplan` (aliases `tokenplan`, `tencent-lkeap`). |
+| `--provider <provider>` | Force a provider: `auto`, `openrouter`, `nous`, `openai-codex`, `copilot-acp`, `copilot`, `anthropic`, `gemini`, `huggingface`, `novita` (aliases `novita-ai`, `novitaai`), `openai-api`, `zai`, `kimi-coding`, `kimi-coding-cn`, `minimax`, `minimax-cn`, `minimax-oauth`, `kilocode`, `xiaomi`, `arcee`, `gmi`, `upstage` (alias `solar`), `alibaba`, `alibaba-cn`, `alibaba-coding-plan` (alias `alibaba_coding`), `alibaba-coding-plan-cn`, `alibaba-token-plan`, `alibaba-token-plan-cn`, `deepseek`, `nvidia`, `ollama-cloud`, `xai` (alias `grok`), `xai-oauth` (alias `grok-oauth`), `qwen-oauth`, `bedrock`, `opencode-zen`, `opencode-go`, `opencode-free` (aliases `free`, `opencode_free`; keyless), `commandcode`, `commandcode-anthropic`, `ai-gateway`, `azure-foundry`, `lmstudio`, `stepfun`, `tencent-tokenhub` (alias `tencent`, `tokenhub`), `router` (aliases `ramp-router`, `ramp`), `nebius-token-factory` (aliases `nebius`, `nebius-tf`, `tokenfactory`), `tencent-tokenplan` (aliases `tokenplan`, `tencent-lkeap`). |
 | `-s`, `--skills <name>` | Preload one or more skills for the session (can be repeated or comma-separated). |
 | `-v`, `--verbose` | Verbose output. |
 | `-Q`, `--quiet` | Programmatic mode: suppress banner/spinner/tool previews. |
@@ -57371,23 +57276,6 @@ digest) and upsert, so retries and overlaps deduplicate instead of
 accumulating duplicate archives.
 
 Contract tests: `tests/agent/test_pre_compress_checkpoint_contract.py`.
-
-## Setup UX — what a standalone provider keeps
-
-Every setup surface Hermes gives a bundled provider is driven by files in the provider's
-own directory, so a provider installed from the plugin catalog keeps all of them:
-
-| Surface | What the provider ships |
-|---|---|
-| Desktop → Capabilities → Tools → Memory (config panel) | `config_schema.py` (below) |
-| `hermes memory setup` wizard | `get_config_schema()` declares the fields the wizard prompts for, `save_config(config, hermes_home)` persists them, `post_setup(hermes_home, config)` runs afterwards for anything interactive (OAuth, first sync); `get_status_config()` feeds `hermes memory status` |
-| `hermes <provider> …` subcommands | `cli.py` with `register_cli(subparser)` ([Adding CLI Commands](#adding-cli-commands)) |
-| Python dependencies | `pyproject.toml` `[project] dependencies` (or `python_dependencies` in `plugin.yaml`); installed under Hermes' own pins at install time and re-applied across `hermes update` |
-
-Your provider's name, `memory.<name>` config section, data directory and tool names are the
-contract with existing users. A provider that moves out of core keeps all four; Hermes then
-installs the catalog plugin automatically for anyone whose `memory.provider` still names it
-(on `hermes update`, and once at agent start when `security.allow_lazy_installs` is on).
 
 ## Config Schema
 
