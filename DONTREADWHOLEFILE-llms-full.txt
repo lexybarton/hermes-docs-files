@@ -810,7 +810,7 @@ When you run `hermes update`, the following steps occur:
 2. **Git pull** — pulls the latest code from the `main` branch and updates submodules
 3. **Post-pull syntax validation + auto-rollback** — after the pull, Hermes compiles the nine critical files every `hermes` invocation imports at startup. If any fails to parse (e.g. an orphan merge-conflict marker, an accidentally truncated file), Hermes runs `git reset --hard <pre-pull-sha>` to roll the install back so your shell stays bootable. Re-run `hermes update` once the upstream fix lands.
    After this point the updater re-executes itself on the freshly pulled code (`update.log` shows `=== hermes update continued on the pulled code ===`), so the remaining steps never mix old and new modules in one process. If you see two `hermes update` processes for a moment, that is the hand-off.
-4. **Dependency install** — runs `uv pip install -e ".[all]"` to pick up new or changed dependencies
+4. **Dependency install** — runs `uv pip install -e ".[all]"` to pick up new or changed dependencies. When the checkout is already current this step still runs if the venv is unhealthy (core imports fail) **or** if its installed `hermes-agent` distribution is from an older release than the checkout — the sign that a previous run's dependency install was refused or interrupted (`⚠ Checkout is current, but its dependencies were never synced after the last pull`), so `✓ Already up to date!` never hides a half-updated environment.
 5. **Config migration** — detects new config options added since your version and prompts you to set them
 6. **Desktop rebuild (stage-and-swap)** — if the Hermes Desktop app was built from this checkout, it is rebuilt so the GUI matches the new code. The rebuild packs into a temporary staging directory next to `apps/desktop/release/`, verifies the staged app, and only then renames it over the previous build (on Windows a real-time scanner briefly holding `release/win-unpacked` is ridden out with a few short retries). A rebuild that fails at any point — corrupt Electron download, missing dependency, disk full — leaves the previous app untouched and launchable; the update reports `⚠ Update partially complete` and `hermes desktop` retries the rebuild. On macOS the rebuilt bundle is then copied (with `ditto`, signature intact) over a stale `/Applications/Hermes.app` or `~/Applications/Hermes.app`, so the copy Finder and the Dock launch matches the backend; an installed copy that is currently running is left alone and the update tells you to quit it and run `hermes update` again.
 7. **Gateway auto-restart**: running gateways are refreshed after the update completes. Service-managed gateways (systemd on Linux, launchd on macOS) restart through the service manager. Manual gateways are relaunched when Hermes can map their PID to a profile. Manually launched `hermes serve` / `hermes dashboard` backends are different: the updater leaves them running and asks their owner to restart them. See [Manual backend restart reminders](#manual-backend-restart-reminders). Backends owned by a running Desktop app remain the app's responsibility.
@@ -981,6 +981,10 @@ Close the listed processes and re-run. If you're sure the concurrent process won
 A second, separate guard refuses to touch the venv while any process is running from its Python interpreter (the Desktop app's backend, a gateway, a Python REPL). Those processes keep native extension files (`.pyd`) locked, and a dependency sync that dies partway on an access-denied error strands the install between versions. This guard is **not** bypassed by `--force`; if you're certain the detected holders are false positives, use the explicit `hermes update --force-venv`.
 
 Both guards, the Desktop update preflight, and the dependency repair steps look for the environment at `venv` first and then at the uv-default `.venv`, so a source checkout set up with `uv venv` / `uv sync` updates the same way an installer-created `venv` does. When both directories exist, `venv` is the one that gets updated.
+
+#### Windows: the update finishes under the venv Python
+
+`hermes.exe` itself cannot be replaced while it runs, so an update started from it stops after the code swap and prints `→ Windows: hermes.exe cannot replace itself while it runs; the update continues under the venv Python`. Your shell returns right away; a child interpreter finishes the dependency install and prints its own result. The child first waits (up to 30 s) for the process that started the update — the `hermes.exe` launcher when it can be identified, otherwise the interpreter it ran — to exit, then takes over the update lock; it alone restarts the gateways the update paused — the process that launched it never resumes them while it still holds the shim. If the launcher is still alive after that wait, the child says so and continues; a shim that is still locked at install time is reported as before and the install is deferred to the next `hermes` run.
 
 #### Windows venv recreation is transactional
 
@@ -4567,7 +4571,7 @@ compression:
   enabled: true                                     # Toggle compression on/off
   progress_notices: false                           # Opt-in: deliver routine compression progress notices to chat platforms — see below
   threshold: 0.50                                   # Compress at this % of context limit
-  threshold_tokens: null                            # Absolute token cap (optional) — takes lower of ratio vs absolute
+  threshold_tokens: 256000                          # Absolute token cap — takes lower of ratio vs absolute
   target_ratio: 0.20                                # Fraction of threshold to preserve as recent tail
   tail_mode: lean                                   # Tail retention: "lean" (default — clamped 2.5% tail, 10K-25K, with a detailed session log + anchor index + session_search recovery pointers in the summary, all from ONE auxiliary summarizer call; ~3x fewer retained tokens after compaction) or "legacy" (0.20×threshold verbatim tail)
   protect_last_n: 20                                # Min recent messages to keep uncompressed
@@ -4621,11 +4625,11 @@ The value is the **first rung** of an escalating ladder, not a fixed interval: c
 
 `in_place` (default `true`) controls what happens to the session identity when compaction fires. When `true`, compaction rewrites the message list and rebuilds the system prompt **without rotating the session id** — the conversation keeps one durable id for its whole life (no `parent_session_id` chain, no `name #2` / `#3` renumbering in session lists). Compaction is non-destructive: the live context is compacted, but the pre-compaction turns are soft-archived under the same id (marked inactive/compacted) — still searchable via `session_search` and recoverable, not deleted. Hooks see the mode via the `in_place` field on the `session:compress` event. Set `in_place: false` to restore the legacy behavior where each compaction rotates to a new session id linked to the old one.
 
-`threshold_tokens` sets an optional **absolute token cap** for the compression trigger. When set, compression fires at the lower of the ratio-based `threshold` and this absolute count — so compression never fires later than the user's preferred token number regardless of which model is active. This solves the problem where switching between models with different context windows (e.g. 1M → 400K) shifts the absolute trigger point. The cap is clamped to the model's context length, so setting it higher than the model supports is safe — the ratio-based threshold is used instead. Default `null` (disabled — ratio-based threshold only). The cap survives model switches and fallback activations.
+`threshold_tokens` sets an **absolute token cap** for the compression trigger. Compression fires at the lower of the ratio-based `threshold` and this absolute count, so large-window models cannot silently defer compaction to hundreds of thousands of tokens. The default is `256000`: it bounds a 1M model's default 50% trigger at 256K, while any lower proportional trigger still wins (including the 272K Codex window). The cap survives model switches and fallback activations and is clamped to the model's context length. Set it to `null` to restore ratio-only behavior, or choose a different positive count for your workload.
 
 `idle_compact_after_seconds` is an **opt-in, time-based** trigger that complements the size-based `threshold`. Default `0` (disabled). When set above 0, a session that resumes after at least that many seconds of inactivity compacts its accumulated history up front, before the first reply — so a long-lived thread (e.g. a Telegram conversation you come back to hours later) doesn't re-read its full stale context on every subsequent turn. It never fires when the context is already at or below the post-compression target (`threshold × target_ratio`), and it honors the same failure-cooldown, anti-thrash, and per-session lock guards as every automatic compaction. Example: `idle_compact_after_seconds: 1800` compacts after 30 minutes idle.
 
-`proactive_prune_tokens` enables a deterministic, no-LLM prune of old tool-result payloads that runs independently of `threshold`. On large-window models the `threshold` compaction (≈50% of the window) rarely fires, so bulky tool outputs (terminal dumps, file reads, web extracts) ride along in history and get re-sent on every subsequent turn. When re-sent history exceeds `proactive_prune_tokens` (default `0` = off; try `48000` to enable), the prune dedupes identical results, summarizes older oversized ones, and truncates large tool-call arguments — protecting the most recent `protect_last_n` messages and never calling the model. Full outputs stay recoverable from the session store. `proactive_prune_min_result_chars` (default `8000`, clamped to ≥ 200) sets the size below which a tool result is left untouched. `proactive_prune_min_reclaim_tokens` (default `4096`) prevents a prune from committing unless it reclaims at least that many tokens — a committed prune rewrites already-sent history and invalidates the provider's prompt-cache prefix, so this gate keeps those cache breaks episodic and amortized (one meaningful break, like a compression boundary) instead of firing on every tool iteration. This runs only under the built-in `compressor` engine; other context engines inherit a no-op.
+`proactive_prune_tokens` enables a deterministic, no-LLM prune of old tool-result payloads that runs independently of `threshold`. On large-window models the `threshold` compaction (≈50% of the window) rarely fires, so bulky tool outputs (terminal dumps, file reads, web extracts) ride along in history and get re-sent on every subsequent turn. When re-sent history exceeds `proactive_prune_tokens` (default `0` = off; try `48000` to enable), the prune dedupes identical results, summarizes older oversized ones, and truncates large tool-call arguments — protecting the most recent `protect_last_n` messages and never calling the model. That protection is not absolute: every compaction also runs a *pressure* pass that demotes tool results and truncates tool-call arguments **inside** the protected tail when the tail alone exceeds 1.5× its token budget (it is not gated on `proactive_prune_tokens`). Both passes rewrite only the history copy the model re-reads — a tool call is executed from the provider's live response, never from history, so an already-dispatched call's arguments are never altered by either pass. Full outputs stay recoverable from the session store. `proactive_prune_min_result_chars` (default `8000`, clamped to ≥ 200) sets the size below which a tool result is left untouched. `proactive_prune_min_reclaim_tokens` (default `4096`) prevents a prune from committing unless it reclaims at least that many tokens — a committed prune rewrites already-sent history and invalidates the provider's prompt-cache prefix, so this gate keeps those cache breaks episodic and amortized (one meaningful break, like a compression boundary) instead of firing on every tool iteration. This runs only under the built-in `compressor` engine; other context engines inherit a no-op.
 
 :::tip Gateway hot-reload of compression and context length
 As of recent releases, editing `model.context_length` or any `compression.*` key in `config.yaml` on a running gateway takes effect on the next message — no gateway restart, no `/reset`, no session rotation required. The cached-agent signature includes these keys, so the gateway transparently rebuilds the agent when it sees a change. API keys and tool/skill config still require the usual reload paths.
@@ -7607,6 +7611,52 @@ conversation stays readable via `/resume` and session search either way —
 routing is the only thing the repair changes. Back up first
 (`cp ~/.hermes/state.db ~/.hermes/state.db.bak`).
 
+### Repair State Crossed Between Profiles
+
+Every profile owns one `state.db`, and every gateway session key names the
+profile that owns the conversation (`agent:main:…` for the default profile,
+`agent:<name>:…` for a named one). Older releases could leave the two
+disagreeing — a named profile's rows written into the default store, a child
+session inheriting from another profile's row, a routing row copied into the
+wrong store, a Telegram topic or `/voice` setting saved without the bot's
+profile. Current versions put new state in the right place; `hermes sessions
+repair-profiles` settles what is already crossed.
+
+```bash
+# Report only — every store is scanned, nothing is written
+hermes sessions repair-profiles
+
+# Perform the repairs (stop the gateway first; a snapshot of every store is taken)
+hermes sessions repair-profiles --apply
+
+# Machine-readable report
+hermes sessions repair-profiles --json
+```
+
+What it finds and does:
+
+| Finding | Repair |
+|---|---|
+| `profile_name` disagrees with the row's own session key | relabel from the key |
+| rows sitting in another profile's store | move (with all messages) to the owning profile's store |
+| `parent_session_id` pointing at another profile's row | sever the link; the row's own identity is kept |
+| routing rows outside the default store (under multiplexing) | move to the default store; an existing row there wins |
+| routing rows / `sessions.json` entries for a profile that no longer exists | delete |
+| Telegram topic bindings and voice-mode entries missing their bot's profile | relabel from the sessions that hold the chat |
+
+Two cases are reported but never repaired without being told what they are:
+rows keyed to a profile that does not exist (create the profile, or
+`hermes profile migrate-identity <old> <new>`), and `agent:main:…` rows inside
+a named profile's store. The latter are either the history of a gateway that
+used to run standalone for that profile (`--legacy-main rekey` gives them the
+profile's namespace) or default-profile chats that leaked in under a scoped
+write (`--legacy-main move` sends them to the default store) — the rows
+themselves cannot tell the two apart.
+
+`--apply` refuses while a gateway owns any of the stores (it holds the routing
+index in memory and would write it back), and is safe to re-run: a second run
+finds nothing.
+
 
 ## Importing Sessions from Claude Code and Codex CLI
 
@@ -10171,6 +10221,17 @@ terminal:
 
 Paths are relative to `~/.hermes/`. Files are mounted to `/root/.hermes/` inside the container. This list is read by `tools/credential_files.py` (`terminal.credential_files`) — it lives under the `terminal:` block but is loaded by the credential-files module, not the core terminal backend, so it isn't part of the bundled `DEFAULT_CONFIG` snapshot.
 
+### Borrowed CLI logins (Codex CLI, Claude Code) {#borrowed-cli-logins}
+
+When Hermes has no usable login of its own for `openai-codex` or `anthropic`, it can borrow the Codex CLI's `~/.codex/auth.json` and Claude Code's `~/.claude/.credentials.json` (or Keychain entry) and refresh them on your behalf. Both use single-use, rotating refresh tokens: once two programs hold one token family, whichever refreshes first invalidates the other's copy, which shows up as "I logged in once in the terminal and Hermes keeps failing" (or the reverse). If you run those CLIs alongside Hermes, give Hermes its own login and turn adoption off:
+
+```yaml
+auth:
+  adopt_external_logins: false   # default: true
+```
+
+With the switch off Hermes never reads or refreshes those files: the `claude_code` credential-pool row disappears, `hermes auth list` prints one line saying so, and the log carries one INFO line per process. Only automatic adoption is affected — `hermes auth add openai-codex` still asks before importing an existing Codex CLI login. Add your own logins with `hermes auth add anthropic` / `hermes auth add openai-codex`.
+
 ### What Each Sandbox Filters
 
 | Sandbox | Default Filter | Passthrough Override |
@@ -11076,55 +11137,6 @@ See also:
 
 - [Bundled Skills Catalog](../../reference/skills-catalog.md)
 - [Official Optional Skills Catalog](../../reference/optional-skills-catalog.md)
-
-## Browse and install in Desktop
-
-Open **Capabilities → Skills** and switch between **Installed** and **Browse**.
-Search stays at the top; the tab switch and actions share one row.
-**Installed** reads the selected profile's actual skills and enabled state;
-it is not inferred from the public catalog. **Browse** is a native catalog UI,
-not an embedded website or a second, smaller catalog. Cards are the default;
-the list and card icons at the right of the filters switch layouts without
-clearing search or filters. The choice is remembered across Skills and Plugins.
-Click a card for details or use its Install button directly.
-
-Desktop and the public [Skills Hub](/skills) read the same published CDN
-snapshot: [`/docs/api/skills.json`](https://hermes-agent.nousresearch.com/docs/api/skills.json).
-The public docs alias serves the same snapshot as Desktop's fetch URL,
-`https://nousresearch.github.io/hermes-agent/docs/api/skills.json`. The docs
-build generates it from bundled `skills/`, `optional-skills/`, and the
-centralized skills index. Browsing does not crawl GitHub or query upstream
-marketplaces live; installation still retrieves the selected skill through
-its source's installer.
-
-### Install from the website
-
-The Skills Hub has an **Install in Hermes** button on each installable card. It opens the
-installed Hermes Desktop app with a URL-encoded, source-qualified skill target:
-for example, `official/...` for optional skills or `clawhub/...` for ClawHub.
-Bundled skills use an explicit repository path rather than an ambiguous bare
-name. When an older snapshot lacks that explicit bundled target, the website
-omits its install link and native Browse disables installation rather than
-resolving an ambiguous name. The next docs publish supplies those targets.
-The same target is used by native Browse and the card's CLI fallback:
-
-```text
-hermes://skill/install?identifier=official%2Fsecurity%2F1password
-```
-
-Hermes shows **Install “skill-name”?** with separate **Source** and **Install to**
-rows. Cancel makes no changes. After confirmation, the same dialog shows
-**Installing…**, then **Installed** and a completion notification. Errors stay
-in the dialog so you can read them and retry. Installation uses the existing
-Skills Hub pipeline, including security scanning, action logs, and installed-list
-refresh. If you switch profile or connection while the confirmation is open,
-reopen the link for the new destination. Changes apply to
-new sessions; a link cannot bypass scanning or select a different profile.
-
-The public links use `hermes://`, not the development-only `hermes-dev://`
-scheme. The `skill/install` route requires an updated Desktop build. If the
-app is missing or the link is not recognized, update Desktop or expand the
-card to copy its CLI install command instead.
 
 ## Starting with a blank slate
 
@@ -12193,7 +12205,7 @@ The curator is a background maintenance pass for **agent-created skills**. It tr
 
 It exists so that skills created via the [self-improvement loop](./skills.md#agent-managed-skills-skill_manage-tool) don't pile up forever. Every time the agent solves a novel problem and saves a skill, that skill lands in `~/.hermes/skills/`. Without maintenance, you end up with dozens of narrow near-duplicates that pollute the catalog and waste tokens.
 
-By default (`prune_builtins: true`) the curator can archive **unused bundled built-in skills** (shipped with the repo) after `archive_after_days` of non-use, alongside the agent-created skills it primarily manages. Hub-installed skills (from [agentskills.io](https://agentskills.io)) are always off-limits. Set `curator.prune_builtins: false` to restore the old agent-created-only behavior, where bundled skills are never touched. The curator also **never auto-deletes** — the worst outcome is archival into `~/.hermes/skills/.archive/`, which is recoverable.
+By default the curator manages only agent-created skills. With `curator.prune_builtins: true` it can also archive **unused bundled built-in skills** (shipped with the repo) after `archive_after_days` of non-use; this is opt-in because shipped skills silently disappearing from `skills_list` is easy to mistake for a broken install. Hub-installed skills (from [agentskills.io](https://agentskills.io)) are always off-limits. The curator also **never auto-deletes** — the worst outcome is archival into `~/.hermes/skills/.archive/`, which is recoverable.
 
 Tracks [issue #7816](https://github.com/NousResearch/hermes-agent/issues/7816).
 
@@ -12241,7 +12253,7 @@ curator:
   stale_after_days: 14
   archive_after_days: 30
   consolidate: false           # LLM umbrella-building pass — opt-in (prune-only by default)
-  prune_builtins: true         # archive unused bundled built-in skills too (hub skills always exempt)
+  prune_builtins: false        # opt in to archiving unused bundled built-in skills too (hub skills always exempt)
 ```
 
 To disable entirely, set `curator.enabled: false`. To keep the always-on pruning but opt into LLM consolidation, set `curator.consolidate: true`.
@@ -12307,7 +12319,7 @@ hermes curator purge [--days N] [--dry-run]  # delete archived skills older than
 
 ## Backups and rollback
 
-Before every real curator pass, Hermes takes a tar.gz snapshot of `~/.hermes/skills/` at `~/.hermes/skills/.curator_backups/<utc-iso>/skills.tar.gz`. If a pass archives or consolidates something you didn't want touched, you can undo the whole run with one command:
+Before a consolidation pass (`consolidate: true`, the only pass that rewrites skill content in place), Hermes takes a tar.gz snapshot of `~/.hermes/skills/` at `~/.hermes/skills/.curator_backups/<utc-iso>/skills.tar.gz`. The snapshot covers the live skill tree only: `.archive/`, the audit ledger, `.hub/`, and the backups themselves are never rolled in, and a rollback never rewinds them (an older copy would lose archived skills or ledger entries). If a pass archives or consolidates something you didn't want touched, you can undo the whole run with one command:
 
 ```bash
 hermes curator rollback        # restore newest snapshot (with confirmation)
@@ -12319,13 +12331,13 @@ The rollback itself is reversible: before replacing the skills tree, Hermes take
 
 You can also take manual snapshots at any time with `hermes curator backup --reason "before-refactor"`. The `--reason` string lands in the snapshot's `manifest.json` and is shown in `--list`.
 
-Snapshots are pruned to `curator.backup.keep` (default 5) to keep disk usage bounded:
+The default prune-only pass takes no snapshot: it only moves whole directories into `.archive/`, which is its own undo (`hermes curator restore`), and every mutation is in the ledger below. Snapshots are pruned to `curator.backup.keep` (default 2) on every pass to keep disk usage bounded:
 
 ```yaml
 curator:
   backup:
     enabled: true
-    keep: 5
+    keep: 2
 ```
 
 Set `curator.backup.enabled: false` to disable automatic snapshotting. The manual `hermes curator backup` command still works when backups are disabled only if you set `enabled: true` first — the flag gates both paths symmetrically so there's no way to accidentally skip the pre-run snapshot on mutating runs.
@@ -12504,7 +12516,7 @@ The flag is stored as `"pinned": true` on the skill's entry in `~/.hermes/skills
 
 Skills named in any cron job's `skills:` list are protected the same way for **auto-transitions** (the curator never stales/archives them while the reference remains), even when the job is paused or disabled. Prefer an explicit pin when you also want `skill_manage delete` blocked.
 
-Only **agent-created** skills can be pinned — `hermes curator pin` refuses on bundled and hub-installed skills with an explanatory message if you try. Hub-installed skills are never subject to curator mutation. Bundled built-in skills are only touched when `curator.prune_builtins: true` (the default), and even then only archived after `archive_after_days` of non-use — never patched, consolidated, or deleted. Set `curator.prune_builtins: false` to exempt bundled skills entirely.
+Only **agent-created** skills can be pinned — `hermes curator pin` refuses on bundled and hub-installed skills with an explanatory message if you try. Hub-installed skills are never subject to curator mutation. Bundled built-in skills are only touched when you opt in with `curator.prune_builtins: true`, and even then only archived after `archive_after_days` of non-use — never patched, consolidated, or deleted.
 
 A small set of **protected built-ins** can be hardcoded as never-archivable and never-consolidatable, regardless of `curator.prune_builtins`, pin state, or LLM judgment. These back load-bearing UX, so silently archiving one would turn its slash command into an "Unknown command" error with no signal to you. (The set is currently empty — `plan`, its original member, graduated to a built-in `/plan` command with no skill on disk.) Protected built-ins are filtered out of the curator's candidate list entirely, so the consolidation pass never sees them.
 
@@ -14655,11 +14667,10 @@ plugin; choose a new exact commit explicitly with
 profile-local install metadata contains no config values, environment values,
 secrets, or capability grants.
 
-The same agent-plugin pin is available in Hermes Desktop: **Capabilities →
-Plugins → Install from Git** has a *Pin to commit* field that takes the full
-40-character SHA, and **Installed** shows a `pinned @ <sha8>` badge on pinned
-agent plugins. This does not guarantee a pinned standalone desktop-plugin
-install. `hermes plugins list` prints
+The same pin is available in Hermes Desktop: **Skills → Plugins → Install from
+Git** has a *Pin to commit* field that takes the full 40-character SHA, and the
+plugins list shows a `pinned @ <sha8>` badge on every pinned install so a team
+can confirm everyone is running the same commit. `hermes plugins list` prints
 the pin in its Source column (`git pinned@<sha8>`). Pins work for private
 repositories too, through the same stored credentials described below.
 
@@ -14845,27 +14856,6 @@ hermes plugins disable my-plugin             # remove from allow-list + add to d
 hermes plugins capabilities [my-plugin]      # declared vs granted capabilities
 ```
 
-### Installed and Browse in Desktop
-
-Open **Capabilities → Plugins**. **Installed** reads the app's desktop-plugin
-registry and the selected profile's actual agent-plugin state, combining both
-halves in one row where appropriate. It is not a list of catalog entries
-assumed to be installed. **Browse** is a native catalog view, not an embedded
-website; it uses the same **Installed / Browse** tabs as Skills, with search
-at the top and the tab switch and actions on one row. Browse defaults to cards,
-with list and card icons at the right of the filters. The layout choice is shared
-with Skills and remembered. Click a card to read its details; Install opens the
-existing review-then-install dialog.
-
-Desktop and the public [Plugin Catalog](/plugins) consume the same CDN
-snapshot, [`/docs/api/plugins.json`](https://hermes-agent.nousresearch.com/docs/api/plugins.json).
-The public alias serves the same data as Desktop's fetch URL,
-`https://nousresearch.github.io/hermes-agent/docs/api/plugins.json`. The docs
-build generates it from `plugin-catalog/*.yaml` and cached star counts. The
-same publish also supplies the removed-entry list used by the installer.
-Browsing does not query GitHub live or fetch source repos;
-the installer retrieves code only as part of the separate install flow.
-
 ### One-click install links (Desktop)
 
 Hermes Desktop registers the `hermes://` URL scheme, so a website, README, or
@@ -14891,23 +14881,6 @@ dialog. The same modal is reachable without a link via **Capabilities →
 Plugins → Install from Git**. Legacy `hermes://plugin-agent/…` and
 `hermes://plugin-desktop/…` URLs route into the same dialog. In dev builds
 (`npm run dev`) the scheme is `hermes-dev://`.
-
-The public [Plugin Catalog](/plugins) includes **Install in Hermes** on every
-card. Catalog links carry `catalog_name`, a URL-encoded `repo` (including
-`#subdir` when present), and `sha`:
-
-```text
-hermes://plugin/install?repo=owner%2Frepo&catalog_name=example-plugin&sha=0123456789abcdef0123456789abcdef01234567
-```
-
-The SHA parameter is display metadata only. For the agent-plugin install,
-the backend resolves `catalog_name` to its reviewed pin when you confirm;
-the link cannot override that pin. Do not treat the displayed SHA as a pin
-guarantee for a standalone desktop plugin. These catalog parameters require
-an updated Desktop build; older builds may only understand the repository
-link. If the app is missing or too old, update Desktop or use the copyable
-`hermes plugins install <catalog-name>` command in the expanded card to retain
-catalog resolution.
 
 Websites need no SDK — a normal anchor works:
 
@@ -15154,13 +15127,37 @@ dangerous block names the critical findings that caused it (e.g.
 `1 critical of 42 findings (destructive_root_rm)`), so a single blocking
 line is not hidden behind the total.
 
-Top-level test trees (`tests/`, `test/`, `testing/`, `spec/`, `specs/`,
-`fixtures/` at the plugin root) are still scanned — a plugin's `__init__.py`
-can import from them, so they are runtime code — but a critical finding
-there is capped at **caution**: their fixtures deliberately hold hostile
-strings to prove the plugin rejects them, so it asks for confirmation and
-`--force` overrides it instead of blocking the install outright. The same
-finding in any other file (`setup.sh`, `src/spec/…`) is still **dangerous**.
+Text that cannot run on the host at install time is scored as **context**, not
+as the plugin's behaviour, so it can lower a finding but never delete it —
+every finding stays in the report with file and line:
+
+- **Documentation prose** (`README.md`, `AGENTS.md`, `docs/**/*.md`, `.txt`,
+  `.rst`, `.html`) can never on its own produce **dangerous**: a command or
+  credential path quoted there (an uninstall step, a refusal list naming
+  `~/.ssh`) steps down one severity, and a README removing the plugin's
+  **own** install directory (`rm -rf "$HOME/.hermes/plugins/<name>"`) is a
+  note. Agent-facing shapes keep full severity — prompt injection, Markdown
+  exfil, agent-config edits, `curl … | sh` one-liners, an `authorized_keys`
+  append, a leaked provider key — and so does anything under a bundled
+  `skills/` tree or in `after-install.md`, which the agent reads as
+  instructions.
+- **Test trees and fixtures** (`tests/`, `test/`, `testing/`, `spec/`,
+  `specs/`, `fixtures/` at the plugin root; `__tests__/` and `__fixtures__/`
+  at any depth; `*.test.*`, `*.spec.*`, `test_*.py`, `*_test.*`) are still
+  scanned — a plugin's `__init__.py` can import from them — but a quoted-only
+  hostile string (`verdict_for("rm -rf /")`, a redaction corpus with a fake
+  `sk-…` key) is a note, and test code that would execute on import
+  (`os.system('rm -rf /')`) is capped at **caution**. The same finding in any
+  other file (`setup.sh`, `src/spec/…`) is still **dangerous**.
+- **Whole-line comments and `CHANGELOG.md`** describe a defense; they score as
+  prose does.
+- **Base64 that decodes to a media header** (PNG/JPEG/GIF/WOFF/PDF … in a
+  data URI or JSON scenery) is informational; `base64 -d` piped into a text
+  filter (`grep`, `jq`) is a note, piped into a shell or interpreter it keeps
+  full severity; `sudo` / `env|` as an alternation member of a regex literal
+  (`/approval|sudo|secret/`, a redaction pattern) is a note, in a command
+  string (`subprocess.run("sudo …")`) it is not.
+
 Likewise, a generic sample token (`hardcoded_secret`) inside a runtime `.py`
 file's `if __name__ == "__main__":` self-test block is capped at **caution**
 — the loader imports plugins and never runs that block — while every other
@@ -17228,7 +17225,7 @@ The dispatch handle lists each unit (`units[].delegation_id`, `group`, `task_ind
 - **Thread pool:** Uses `ThreadPoolExecutor` with the configured concurrency limit as max workers
 - **Progress display:** In CLI mode, a tree-view shows tool calls from each subagent in real-time with per-task completion lines. In gateway mode, progress is batched and relayed to the parent's progress callback. CLI and TUI completion notices use task-first titles such as `Subagent Task Completed: Review changes`; multi-task groups use the group name and task count. Unsuccessful or incomplete work gets a corresponding status label. These compact notices do not replace the full results delivered to the parent agent.
 - **Result ordering:** Within a unit, results are sorted by task index to match input order regardless of completion order; `TASK i/N` labels index the whole call
-- **Cancellation:** Follow-up messages do not cancel a top-level background batch. `/stop` or closing/resetting the owning session cancels its active children. Synchronous orchestrator children still follow their parent's interrupt state
+- **Cancellation:** Follow-up messages do not cancel a top-level background batch. `/stop` (gateway `/stop`, CLI `/stop`, the Desktop/TUI Stop button, an ACP cancel) or closing/resetting the owning session ends its background children and every synchronous descendant beneath them; each stopped child still returns as a completion with `status="interrupted"` and its partial output
 
 Synchronous single-task delegation from an orchestrator runs directly without thread pool overhead.
 
@@ -17564,11 +17561,11 @@ delegate_task(
 :::warning Background completion durability is not durable execution
 Top-level model-facing `delegate_task` calls run in the background automatically where the session supports later delivery. Hermes returns a handle immediately, and the result re-enters the conversation after the child or batch finishes. Orchestrator subagents wait for their workers in the current turn because they must synthesize those results before returning. Stateless request/response endpoints fall back to synchronous execution when they cannot deliver a detached result later.
 
-- Normal follow-up messages do not cancel background children. `/stop` cancels running background delegations, and closing or resetting the owning session discards its active children.
+- Normal follow-up messages do not cancel background children. `/stop` on any surface (gateway `/stop` — also when the session is idle after the dispatching turn ended — CLI `/stop`, the Desktop/TUI Stop button, an ACP cancel) ends the session's running background delegations, and closing or resetting the owning session does the same.
 - Explicit session close/reset interrupts that session's background children. Closing a TUI viewer of a gateway-owned session does not kill the gateway's work.
 - A Hermes process restart does **not** resume a running child. Its attempt becomes `unknown` because Hermes cannot prove which side effects happened.
 - A child that completed before restart but whose result was not delivered is restored and routed back through the owning session's normal checks.
-- Cancelled children return a structured result (`status="interrupted"`, `exit_reason="interrupted"`), but because the parent was interrupted too, that result often never makes it into a user-visible reply.
+- Stopped children return a structured result (`status="interrupted"`, `exit_reason="interrupted"`) whose `summary` is the last text the child produced before the stop (the interrupt placeholder moves to `error`). The stop recurses down the spawn tree — an orchestrator child's synchronous workers are interrupted first and their partial results roll up into the child's own interrupted result — and each background unit's result re-enters the conversation right away as its normal completion notice (`Subagent Task Interrupted: …`), so nothing waits for the child to exhaust its budget.
 
 For **durable execution** that must survive session closure or process restart, use:
 
@@ -17582,7 +17579,7 @@ For **durable execution** that must survive session closure or process restart, 
 - Subagents inherit the parent's enabled toolsets; the model cannot select or widen them per call
 - **Nested delegation is opt-in** — only `role="orchestrator"` children can delegate further, and only when `max_spawn_depth` is raised from its default of 1 (flat). Disable globally with `orchestrator_enabled: false`.
 - Leaf subagents **cannot** call: `delegate_task`, `clarify`, `memory`, `send_message`, `cronjob`. Orchestrator subagents retain `delegate_task` but keep the other blocks. Both roles retain `execute_code` (programmatic tool calling) so children can batch mechanical work instead of burning reasoning iterations.
-- **Cancellation follows ownership** — `/stop` or closing/resetting the owning session cancels its background children; synchronous descendants under orchestrators follow their parent's interrupt state
+- **Cancellation follows ownership** — `/stop` or closing/resetting the owning session ends its background children and the synchronous descendants beneath them; each returns an interrupted completion carrying its partial output
 - Only the final summary enters the parent's context, keeping token usage efficient
 - Subagents inherit the parent's **API key, provider configuration, and credential pool** (enabling key rotation on rate limits)
 
@@ -17672,7 +17669,7 @@ delegation:
 
 When `base_url` points at an Anthropic-compatible endpoint — for example a path ending in `/anthropic`, an Azure Foundry Claude route, or a MiniMax `/anthropic` proxy — `api_mode` is auto-detected as `anthropic_messages` so the subagent uses the right wire format without you setting anything. Set `api_mode` explicitly when the auto-detection guess is wrong (rare).
 
-Subagents compact at the same ratio trigger as their parent (`compression.threshold`, 0.50 × window by default). `delegation.compression_threshold_tokens` (default `0`, off) adds an optional absolute cap on a child's compaction *trigger*, applied as the lower of it and the ratio threshold; it never touches the request payload or the parent. A token count of at least 16000 enables it; `true` or `"200k"` are config errors that are warned and ignored. It stays off by default because a replay of a 1,393-agent run put 200K–400K caps within 5% of each other in cost once cache prefixes are intact, and every compaction is a chance to lose detail.
+Subagents compact where their parent does — the lower of `compression.threshold` × window and the global `compression.threshold_tokens` cap (256K on a 1M model by default). `delegation.compression_threshold_tokens` (default `0`, off) adds an optional absolute cap on a child's compaction *trigger*, applied as the lower of it and the ratio threshold; it never touches the request payload or the parent. A token count of at least 16000 enables it; `true` or `"200k"` are config errors that are warned and ignored. It stays off by default because a replay of a 1,393-agent run put 200K–400K caps within 5% of each other in cost once cache prefixes are intact, and every compaction is a chance to lose detail.
 
 `delegation.request_overrides` works on **all three** resolution branches — direct `base_url`, named `provider`, and pure inherit — so it always takes effect. Top-level keys are API kwargs (e.g. `service_tier`); an `extra_body` sub-dict is merged into the request's `extra_body`. Explicit values merge **over** runtime- or parent-derived overrides: explicit top-level keys win, and `extra_body` is deep-merged one level, so a provider's own request personality (e.g. `thinking: {type: disabled}`) survives unless your key redefines it. See [Configuration → Delegation](../configuration.md#delegation) for details.
 
@@ -18242,11 +18239,24 @@ is part of the worker
 protocol. If the worker process exits with status 0 while the task is still
 `running`, the dispatcher treats that as a protocol violation and emits a
 `protocol_violation` event. A dispatcher-spawned worker whose turn failed
-therefore exits non-zero: `1` for an ordinary failure, and `75`
+therefore exits non-zero: `1` for an ordinary failure, `75`
 (`EX_TEMPFAIL`) when the provider was rate-limited, overloaded, returning
 5xx or timing out, or the account hit a billing/quota wall — the dispatcher records that run as `rate_limited` and
 requeues the task without counting a failure, so a quota window is never
-booked as a protocol violation. The worker also writes its exit code as the
+booked as a protocol violation — and `78` (`EX_CONFIG`) when the provider
+rejected something a retry cannot fix: the profile's credential (401/403,
+revoked or invalid key), the model (404 / model not found) or the TLS chain.
+That **terminal provider error** trips the circuit breaker on the first
+occurrence: the dispatcher records the run as `crashed` with
+`exit_kind: terminal_provider`, emits `gave_up` with `terminal_provider: true`
+and parks the card `blocked` (sticky — `recompute_ready` will not auto-resume
+it) with the provider's own words in `last_failure_error`, instead of
+re-spawning into the same wall until `kanban.failure_limit` / `max_retries`
+is spent. Both lanes get the same booking: a reviewer worker that dies on a
+revoked key parks the card exactly like an implementer. `hermes kanban show`
+surfaces it as *Provider rejected this profile's credential or model — blocked
+after one attempt*; fix the assignee profile's provider (`hermes -p <profile>
+auth` / `setup`), then `hermes kanban unblock <id>`. The worker also writes its exit code as the
 last line of its own log (`[kanban-worker-exit] rc=<code>`), so a per-tick
 `hermes kanban dispatch` process — which never reaped the worker and cannot
 read its exit status — books the same death the same way the gateway-embedded
@@ -19088,7 +19098,7 @@ Every transition appends a row to `task_events`. Each row carries an optional `r
 | `respawn_guarded` | `{reason}` | Dispatcher refused to re-spawn this ready task this tick. Reasons: `infrastructure_cooldown` (the host refused the last spawn — no restart-safe systemd scope — and the cooldown has not elapsed; never counted against the card), `rate_limit_cooldown` (the last run hit a quota wall; same cooldown, never counted), `blocker_auth` (last failure was a quota/auth/429 error — wait for the rate window to reset), `recent_success` (a completed run happened in the last hour — wait for review before re-running), `active_pr` (a GitHub PR URL appears in a recent comment — a prior worker already opened a PR). The task stays in `ready`; the next tick gets another chance to spawn. If the underlying condition persists, the normal `consecutive_failures` circuit breaker will auto-block via `gave_up` after `failure_limit` failures. |
 | `spawn_failed` | `{error, failures}` | One spawn attempt failed (missing PATH, workspace unmountable, …). Counter increments; task returns to `ready` for retry. |
 | `protocol_violation` | `{pid, claimer, exit_code, protocol_violation, worker_output?}` | Worker exited successfully while the task was still `running`, usually because it answered without a terminal board call (`kanban_complete`, `kanban_request_review` or `kanban_block`). Emitted on every violation (the payload's `protocol_violation: true` marker is copied into the run metadata and feeds the violation-only retry budget). Below the budget — up to `_PROTOCOL_VIOLATION_FAILURE_LIMIT` (default 3) *consecutive* violations, per-task `max_retries` overriding — the task simply returns to `ready` for another attempt; when the streak reaches the bound the dispatcher also emits `gave_up` and auto-blocks. `worker_output` carries the worker's own last printed text (usually its explanation of why it stopped), also folded into `last_failure_error` and shown to the retry worker as the prior-attempt error. |
-| `gave_up` | `{failures, effective_limit, limit_source, error}` | Circuit breaker fired after N consecutive non-successful attempts. Task auto-blocks with the last error. The effective limit resolves as task `max_retries`, then dispatcher `failure_limit` / `kanban.failure_limit`, then the built-in default. |
+| `gave_up` | `{failures, effective_limit, limit_source, error, terminal_provider?}` | Circuit breaker fired after N consecutive non-successful attempts. Task auto-blocks with the last error. The effective limit resolves as task `max_retries`, then dispatcher `failure_limit` / `kanban.failure_limit`, then the built-in default. `terminal_provider: true` means the worker exited `78` on a provider error a retry cannot fix (credential revoked, model gone) and the breaker fired on that first attempt, sticky, regardless of the limit. |
 
 `hermes kanban tail <id>` shows these for a single task. `hermes kanban watch` streams them board-wide.
 
@@ -32911,7 +32921,7 @@ Don't have a subscription yet? Get one at [portal.nousresearch.com/manage-subscr
 
 
 :::info Codex Note
-The OpenAI Codex provider authenticates via device code (open a URL, enter a code). Hermes stores the resulting credentials in its own auth store under `~/.hermes/auth.json` and can import existing Codex CLI credentials from `~/.codex/auth.json` when present. No Codex CLI installation is required.
+The OpenAI Codex provider authenticates via device code (open a URL, enter a code). Hermes stores the resulting credentials in its own auth store under `~/.hermes/auth.json` and can import existing Codex CLI credentials from `~/.codex/auth.json` when present. No Codex CLI installation is required. Automatic adoption of the Codex CLI login (when Hermes' own refresh fails) is controlled by `auth.adopt_external_logins` — see [Borrowed CLI logins](../user-guide/security.md#borrowed-cli-logins).
 
 If a token refresh fails with a terminal error (HTTP 4xx, `invalid_grant`, revoked grant, etc.), Hermes marks the refresh token as dead and stops replaying it so you don't see a flood of identical auth failures. The next request surfaces a typed re-auth message instead. Run `hermes auth add openai-codex` (or `hermes model` → **ChatGPT or Codex Subscription**) to start a fresh device-code login; the quarantine clears on the next successful exchange.
 
@@ -32983,7 +32993,10 @@ Use Claude models directly through the Anthropic API — no OpenRouter proxy nee
 
 When no explicit environment credential is selected, Hermes-owned OAuth grants
 in the credential pool take precedence over a borrowed Claude Code login. The
-borrowed login remains the fallback when no owned OAuth grant is available.
+borrowed login remains the fallback when no owned OAuth grant is available —
+unless `auth.adopt_external_logins: false` is set, in which case Hermes never
+reads or refreshes Claude Code's credentials (see
+[Borrowed CLI logins](../user-guide/security.md#borrowed-cli-logins)).
 Auxiliary authentication recovery refreshes the credential used by the failed
 request, not an unrelated ambient login; rotating a borrowed login can otherwise
 invalidate its owner's refresh token.
@@ -35880,7 +35893,9 @@ request programmatically instead of showing it to you, in which case these
 options exist on the wire but never reach a human. Buzz Desktop does this, so
 treat that path as unattended execution regardless of your `approvals` setting.
 
-On timeout or error, the approval bridge denies the request.
+On timeout or error, the approval bridge denies the request. The wait is
+`approvals.timeout` from `config.yaml` (default 300 s), the same knob the CLI and
+gateway prompts use — raise it if your editor keeps approval cards open longer.
 
 ### Session-scoped edit auto-approval
 
@@ -43182,8 +43197,8 @@ The static fallback for `xai.grok-4.6` (including `global.` and `us.` inference
 profiles) is 500,000 tokens, per the
 [AWS model card](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-xai-grok-4-6.html).
 This is Bedrock-specific, not the direct xAI API window. Existing compression
-rules still apply: without output reservation or an explicit token cap, the
-small-window 75% threshold floor yields a 375,000-token trigger at this window.
+rules still apply: without output reservation, the small-window 75% threshold floor
+yields 375,000 at this window, which the default `threshold_tokens` cap (256,000) then lowers.
 
 ## Pluggable Context Engine
 
@@ -43388,10 +43403,11 @@ auxiliary:
 
 | Parameter | Default | Range | Description |
 |-----------|---------|-------|-------------|
-| `threshold` | `0.50` | 0.0-1.0 | Compression triggers when prompt tokens ≥ `threshold × context_length` |
+| `threshold` | `0.50` | 0.0-1.0 | Compression triggers when prompt tokens ≥ `threshold × context_length` (floored at 0.75 below 512K windows) |
+| `threshold_tokens` | `256000` | int or `null` | Absolute cap on the trigger: compaction fires at the lower of the ratio trigger and this count, so a 1M window compacts at 256K instead of 500K. `null` = ratio-only |
 | `model_thresholds` | `{}` | map | Per-model overrides of `threshold`. Keys are substring-matched against the model name (longest match wins); `"<provider>:<substring>"` keys apply only on that provider. The small-context floor still applies on top (see below) |
 | `target_ratio` | `0.20` | 0.10-0.80 | Controls tail protection token budget: `threshold_tokens × target_ratio` (legacy mode only — `lean` uses its own clamp) |
-| `tail_mode` | `lean` | `lean`, `legacy` | Tail retention policy. `legacy` keeps a `target_ratio`-sized verbatim tail (~100K+ tokens on big-window models). `lean` keeps a clamped tail of `2.5% × context window` (10K floor, 25K cap) and instead carries continuity in the summary: a detailed identifier-preserving session log (produced by the same single summary request — lean compaction makes exactly one auxiliary LLM call per attempt), a mechanically extracted anchor index (PR numbers, SHAs, paths, error strings — regex, never paraphrased), every real user message quoted verbatim (newest-first budget), and a `session_search` recovery pointer so the agent can re-access anything summarized away. Oversized regions are evenly sampled into the summarizer input (with explicit elision markers) rather than triggering extra calls. Result on 500K-token real sessions: ~49K retained vs ~162K, with higher recall when paired with recovery (see `evals/compaction/results/`). Old tool results inside the lean tail are demoted to one-line stubs carrying a recovery pointer |
+| `tail_mode` | `lean` | `lean`, `legacy` | Tail retention policy. `legacy` keeps a `target_ratio`-sized verbatim tail (~100K+ tokens on big-window models without the `threshold_tokens` cap). `lean` keeps a clamped tail of `2.5% × context window` (10K floor, 25K cap) and instead carries continuity in the summary: a detailed identifier-preserving session log (produced by the same single summary request — lean compaction makes exactly one auxiliary LLM call per attempt), a mechanically extracted anchor index (PR numbers, SHAs, paths, error strings — regex, never paraphrased), every real user message quoted verbatim (newest-first budget), and a `session_search` recovery pointer so the agent can re-access anything summarized away. Oversized regions are evenly sampled into the summarizer input (with explicit elision markers) rather than triggering extra calls. Result on 500K-token real sessions: ~49K retained vs ~162K, with higher recall when paired with recovery (see `evals/compaction/results/`). Old tool results inside the lean tail are demoted to one-line stubs carrying a recovery pointer |
 | `protect_last_n` | `20` | ≥1 | Minimum number of recent messages always preserved |
 | `min_tail_user_messages` | `1` | ≥1 | Minimum number of REAL (actionable) user messages guaranteed to survive in the uncompressed tail. `1` = the existing single last-user anchor (behavior-preserving default). Raise to e.g. `3` to keep the last 3 real user turns verbatim even when bulky tool outputs fill the tail token budget. Blank platform echoes, compaction handoffs, and synthetic continuation rows never count toward N. The guarantee wins over the tail token budget — the tail may exceed the budget when the anchor pulls the cut back |
 | `protect_first_n` | `3` | (hardcoded) | System prompt + first exchange always preserved |
@@ -43419,8 +43435,8 @@ Set `in_place: false` to restore the legacy rotating path, where each compaction
 A smaller auxiliary compression model can lower the live compression trigger without
 changing the selected tail policy. In `lean` mode the selection budget remains based
 on the **main model's context window**: 2.5%, clamped to 10K–25K tokens. For example,
-a 1M main model with a 512K auxiliary model retains a 25K selection budget even when
-feasibility lowers its trigger from 850K to 512K. Explicit `legacy` mode instead
+a 1M main model (`threshold_tokens: null`) with a 512K auxiliary model retains a 25K
+selection budget even when feasibility lowers its trigger from 850K to 512K. Explicit `legacy` mode instead
 recomputes `threshold_tokens × target_ratio` (102,400 tokens at 512K × 0.20).
 These are tail-selection budgets, not strict limits on the entire compacted context:
 protected messages, boundary alignment, summaries, and anchors can add tokens.
@@ -43590,7 +43606,7 @@ max_summary_tokens   = min(200,000 × 0.05, 12,000) = 10,000
 ```
 
 :::note Threshold is derived from the MAIN model's context window
-`threshold_tokens` is always `threshold × context_length`, where `context_length`
+`threshold_tokens` is `threshold × context_length` (then capped by `compression.threshold_tokens`), where `context_length`
 is the **main agent model's** context window — never the auxiliary/summary
 model's. On a 262,144-token model at the default `0.50`, the threshold is
 `262,144 × 0.50 = 131,072`. That number being close to a common "128K context"
@@ -44301,7 +44317,8 @@ Abridged — see `SCHEMA_SQL` in `hermes_state_common.py` (applied by `hermes_st
 (which also includes gateway routing metadata such as `session_key`, `chat_id`,
 `chat_type`, `thread_id`, `display_name`, `origin_json`, `expiry_finalized`,
 workspace fields `cwd` / `git_branch` / `git_repo_root`, handoff and
-compression-failure fields, `profile_name`, `rewind_count`, `archived`, and
+compression-failure fields, `profile_name`, `transport_profile` (the multiplex
+bot that received the lane, nullable), `rewind_count`, `archived`, and
 `pinned`):
 
 ```sql
@@ -48683,6 +48700,7 @@ Subcommands:
 | `optimize-storage` | Migrate the full-text search index to the compact v23 external-content layout; on large databases this reclaims a large fraction of `state.db`. |
 | `repair` | Repair a malformed `state.db` schema (e.g. `table messages_fts already exists`) so hidden sessions reappear; a backup is made first. |
 | `repair-routing` | Re-attach gateway conversations stranded in session rows that lost their routing identity (a chat "jumping back in time" after a restart). Dry-run by default; `--apply` performs the adoptions (stop the gateway first); `--max-gap-seconds N` tunes the contiguity window. Only unambiguous cases are repaired. See [Sessions → Repair Stranded Gateway Sessions](../user-guide/sessions.md#repair-stranded-gateway-sessions). |
+| `repair-profiles` | Settle session, routing, Telegram-topic and voice-mode state that landed under the wrong profile (rows in another profile's store, labels disagreeing with the session key, parent links crossing profiles, index rows for deleted profiles). Dry-run by default; `--apply` performs the repairs after snapshotting every store (stop the gateway first); `--legacy-main rekey\|move` decides what `agent:main` rows inside a named profile's store are; `--json` for automation. See [Sessions → Repair State Crossed Between Profiles](../user-guide/sessions.md#repair-state-crossed-between-profiles). |
 | `recover` | Offline, non-destructive recovery of a damaged `state.db` into a separate clean database. |
 | `retitle-skills` | Regenerate titles for sessions opened with a `/skill`, using what the user actually typed; lists changes unless `--apply` is passed. |
 
@@ -57140,6 +57158,17 @@ post-command drain starts it right away instead of the session idling until the 
 message. Whether a wake pinned to a session that `/new` just closed may still run is decided at
 processing time (`_resolve_async_delegation_session`, fail-closed).
 
+Both commands also end the session's **background delegations** (`tools.async_delegation.
+interrupt_for_session`, selected by routing key and by the spawner's durable session id):
+`_interrupt_and_clear_session` fans the stop out for the busy path, and `_handle_stop_command`
+does the same for an idle session whose dispatching turn already ended (replying "Stopped" rather
+than "No active task to stop"). The turn's own hard interrupt never reaches those units — they are
+detached from `_active_children` at dispatch — so without the fan-out they run to completion and wake
+the chat minutes later. Each stopped unit still finalizes normally and re-enters as its completion
+notice with `status="interrupted"` and the child's partial output. `/new` and `/reset` already did this
+in `_handle_reset_command`; the shared helper's earlier call is idempotent there (a hard interrupt
+requested twice is one stop).
+
 ### FIFO Invariant
 
 Each `/queue` invocation produces exactly one full agent turn, in FIFO order, with no
@@ -59243,7 +59272,7 @@ profile-scoped code runs without the override where one is expected.
 
 ## Inbound routing
 
-`gateway.profile_routes` maps `(platform, guild_id, chat_id, thread_id)` to a
+`gateway.profile_routes` maps `(platform, user_id, guild_id, chat_id, thread_id)` to a
 profile; matching is conjunctive, most-specific-first, with parent-chain chat
 matching for threads. Routing only runs when multiplexing is active, and a
 matched route whose target is outside the served set is rejected (the event is
@@ -59271,13 +59300,75 @@ Pairing stores are constructed per served profile.
 ## Per-bot session lanes
 
 Session keys are namespaced by profile (`agent:main` for default,
-`agent:<name>` for named profiles). Adapters carry `_owner_profile`
-(installed at adapter configuration time, before any inbound event) because
-adapter ingress runs before `SessionSource.profile` is stamped;
-`_session_key_profile` resolves source stamp → owner profile → store
-resolver. Text/media batching, active-session tracking, and the busy-session
-guard are all keyed per lane, so two bots sharing a chat do not share a
-session lane.
+`agent:<name>` for named profiles). Every inbound event carries ONE frozen
+`RoutingIdentity` (`gateway/session_identity.py`), resolved by
+`resolve_identity()` at the runner's ingress handlers and pinned on the source
+as a wire-invisible attribute: `transport_profile` (the bot that received it —
+credential, allowlist, `authorization_home`), `runtime_profile` (the routed
+profile that executes — `runtime_home`, key `namespace`, `store_path`) and a
+weak `transport` ref to the receiving adapter. `"default"` is spelled out;
+`None` never means default. Under multiplexing a route to an unserved profile
+raises `IdentityUnresolved` and the event is dropped.
+
+Adapters also carry `_owner_profile` (installed at adapter configuration time,
+before any inbound event). Every ingress path canonicalizes the identity FIRST
+— `BasePlatformAdapter._canonicalize` runs at `handle_message`, text/photo/album
+batching, the busy path and every adapter-derived session key; the runner's
+per-profile and default handlers, the auth-check callback and the shared
+`_handle_message` gate do the same — so no lane is keyed before the receiving
+bot is known. Text/media batching, active-session tracking, the busy-session
+guard, `/stop` `/new` `/reset` and clarify replies are all keyed per lane, so
+two bots sharing a chat do not share a session lane and a control command on one
+bot cannot reach the other's run. A route to an unserved profile is dropped with
+one WARNING at the first seam it reaches, never keyed into `agent:main`. Copy a
+source with `session_identity.replace_source`, not `dataclasses.replace`, or the
+copy loses its transport and identity.
+
+## Intake vs delivery: which bot acts on an event
+
+Two runner seams answer the two questions a multiplexed gateway keeps
+conflating (`gateway/authz_mixin.py`):
+
+- `_intake_adapter_for(source)` — the bot that **received** the event. Live
+  provenance only: the transport ref `build_source` pinned, the process-level
+  relay adapter for relay-delivered events, or the adapter currently
+  registered for the identity's `transport_profile` after a reconnect. It
+  gates intake policy (Slack ignored channels, relay fronting, re-dispatch of
+  a queued live event) and returns `None` for a source with no live
+  provenance — nothing may re-admit a restored row on a guessed bot.
+- `_delivery_adapter_for(source)` — the bot that **answers**: sends, edits,
+  typing, progress, pickers, pending-message slots. The receiving bot whenever
+  it is known; otherwise the unique owner of `(platform, runtime_profile)` —
+  a secondary's own adapter, the primary for a shared-bot satellite, and
+  `None` for a secondary whose bot is disconnected (it never borrows the
+  default bot).
+
+| Topology | Runtime (`runtime_profile`, key namespace, home) | Intake | Delivery |
+| --- | --- | --- | --- |
+| Per-credential bot, no route | The bot's own profile | Owner adapter | Owner adapter |
+| Shared credential → satellite via `profile_routes` | Routed profile | Receiving (shared) adapter | Receiving adapter; after a restart the satellite still drains through the primary |
+| Shared bot → a profile that owns its own bot | Routed profile | Receiving adapter | Receiving adapter — the conversation stays with the bot the user wrote to |
+| Secondary-owned bot → `default` (`bot_profile: <secondary>`) | `default` (`agent:main`, default home) | Receiving (secondary) adapter | Receiving adapter |
+| Restored / synthetic source, no live provenance | Stored `source.profile` | **None** (fail closed) | Unique owner of `(platform, runtime)`, else `None` |
+
+Outside multiplexing there is one adapter per platform, so both seams return
+it. `tests/gateway/test_multiplex_transport_matrix.py` asserts every row.
+
+### Restore, relay, callbacks and thread hops
+
+The routing entry persists `transport_profile` next to the key (and the
+`sessions.transport_profile` column in `state.db`), so after a restart a
+revived lane still knows which bot received it: `_restored_source(entry)`
+re-pins a `RoutingIdentity` with no live adapter and `_delivery_adapter_for`
+delivers through that bot's adapter or fails closed — a satellite routed
+through the default bot keeps answering from the default bot, a lane owned by
+a secondary never falls back to the default bot's credential. Entries written
+before the column existed carry `null` and keep the shared-bot heuristics.
+Over the relay, every outbound frame's `metadata.profile` (and `follow_up`'s
+key namespace) tells the connector which profile to stamp on the next
+`passthrough_forward`, so a button press after a routed slash command stays in
+the same profile. Deferred callbacks (`/model` picker) capture the routed home
+at command time and the gateway's executor hops copy the ContextVar scope.
 
 ## Control plane
 
@@ -62709,6 +62800,16 @@ The gateway calls the transport with action dicts. Source of truth:
 
 `get_chat_info(chat_id)` is a separate proxied call returning at least
 `{name, type}`.
+
+**`metadata.profile` (multiplex round-trip).** Every chat-addressed outbound
+frame's `metadata` carries the tenant discriminators the gateway captured from
+the inbound (`scope_id`, `user_id`) and, on a multiplexed gateway, the Hermes
+`profile` the connector routed that chat's inbound to; `follow_up` frames carry
+the profile encoded in their `session_key` namespace. The connector MUST stamp
+the same `profile` on the next `passthrough_forward` / `inbound` for that chat or
+interaction, so a Discord button press after a slash command lands in the same
+profile's session (`gateway/relay/adapter.py::_with_scope`, `send_follow_up`).
+Single-profile gateways never emit the key — frames stay byte-identical.
 
 **`send_media` (Phase 2 media egress).** Media crosses the wire BY REFERENCE:
 `source_url` is either (a) a **connector re-host** the gateway previously
@@ -71771,6 +71872,7 @@ The center of the app. You get:
 - **The same conversation history** as every other Hermes surface — sessions started here resume in the CLI/TUI and vice versa.
 - **Drag-and-drop files** anywhere in the chat area to attach them to your next message.
 - **Independent background drafts** — hidden chat tabs can update their drafts without moving the caret or selection in the visible composer.
+- **Unsent drafts survive a lost session** — a draft you typed into a chat whose session no longer exists (deleted elsewhere, or a stale tab after a profile rename or wiped backend) is carried into the fresh chat the app falls back to, with an inline **Restored your unsent message** strip above the input. **Undo** puts the text back where it was; nothing is sent, navigated, or focused on your behalf, and the strip appears once per lost draft.
 - **Directive chip actions** — hover an actionable reference (such as a URL) to reveal its action pill. A short grace period lets you move from the chip to the pill before it dismisses. The pill stays available while you move within it; after leaving, unrelated pointer movement does not delay dismissal. Clicking its action preserves the draft selection.
 - **A right-hand preview rail** — render web pages, files, and tool outputs side by side while you keep chatting.
 - **Hide vs. Close for stateful panes** — a zone holding a Browser (or HTML preview) or the Terminal pane offers **Hide** instead of Minimize. Hiding collapses the zone to its restore rail but keeps the pane's body mounted: a live page keeps its unsaved form input, timers, scroll position, and the agent's `drive_preview` automation target; a terminal keeps its running shell and scrollback; and **Restore** shows the same content without a reload. The hidden body is inert — it never takes keyboard shortcuts or steals composer focus. **Close** (the tab's ×) is what actually releases the page or shell.
@@ -71920,7 +72022,7 @@ Manage providers, models, tools, and credentials from a real UI instead of editi
 - **xAI Grok OAuth** — Grok is a first-class OAuth provider in the launcher; sign in through the browser flow like the other OAuth providers.
 - **Tool-backend installs from the GUI** — run a tool backend's post-setup install steps directly from the app instead of dropping to a terminal. In the terminal backend picker, selecting a backend marked **Needs setup** asks for confirmation first; declining leaves the current backend selected.
 - **Terminal font picker** — choose an installed font in **Settings → Appearance**. Nerd Fonts such as `MesloLGS NF` render Powerlevel10k separators and icons in both interactive and agent terminals; the setting is saved per profile.
-- **Reasoning Blocks** — **Settings → Chat → Reasoning Blocks** (`display.show_reasoning` in `config.yaml`) shows or hides the model's thinking in the transcript (off shows answers only). Open chats update as soon as the setting saves.
+- **Reasoning Blocks** — **Settings → Chat → Reasoning Blocks** (`display.show_reasoning` in `config.yaml`) shows or hides the model's thinking in the transcript (off shows answers only). Open chats update as soon as the setting saves. Typing `/reasoning hide` or `/reasoning show` in the composer flips the same setting and the open transcript follows immediately.
 - **Reopen Last Chat on Launch** — by default the app picks up where you left off on cold start. Turn it off in **Settings → Appearance** (or set `display.resume_last_session: false` in `config.yaml`) to always begin with a fresh chat. Deep links and explicit destinations are never overridden either way.
 - **Auxiliary-model warning** — if you switch the main model to a new provider while auxiliary tasks (titling, summarization, and similar helpers) are still pinned to another provider, the app warns you so you don't unknowingly split work across two providers.
 - **Per-task reasoning effort** — each row under **Settings → Model → Auxiliary models** has a reasoning selector next to its provider/model pick: a level, **Off**, or **inherit · main model effort** (the default, which removes the task's override). It is saved as `auxiliary.<task>.reasoning_effort` in `config.yaml`, the same key `hermes model` writes, and shows in the row's summary when set. Use it to run frequent helpers such as compression or titling at low or no reasoning while the main agent stays at high.
@@ -71944,42 +72046,12 @@ When you have two or more [profiles](./profiles.md), the config-backed settings 
 
 The app also surfaces the broader Hermes management surface so you don't have to drop to a terminal:
 
-- **Skills** — open **Capabilities → Skills** to manage [skills](./features/skills.md). **Installed** shows the selected profile's actual skills and enable/disable state. **Browse** searches the same full published catalog as the public Skills Hub, with cards by default and an optional list/detail view.
-- **Plugins** — **Capabilities → Plugins** uses the same **Installed / Browse** layout. Installed combines actual app-level desktop plugins with agent plugins from the selected profile; Browse shows the public [Plugin Catalog](./features/plugin-catalog.md). Search stays at the top, and the tab switch and actions share one row on both pages.
+- **Skills** — browse, install, and manage [skills](./features/skills.md). The Skills tab lists your installed skills with enable/disable toggles, and below them the full built-in optional-skills catalog that ships with Hermes — each entry has a one-click **Install** button that flips the row into the installed list once it finishes.
 - **Memory graph (Star Map)** — type `/journey` (aliases `/learning`, `/memory-graph`) in chat to open an interactive constellation of learned skills and memories over time, with a playback scrubber. Nodes can be edited or deleted right from the panel (skills are archived, memories removed). See [Learning Journey](./features/memory.md#learning-journey-journey).
 - **Cron** — view and manage [scheduled jobs](../reference/cli-commands.md#hermes-cron).
 - **Profiles** — switch between [Hermes profiles](./profiles.md) (isolated config/skills/sessions).
 - **Messaging** — set up gateway channels. Telegram has a **Quick setup** card: click **Create with QR**, scan the code (or open the link) in Telegram, and Hermes creates the bot, detects your user ID for the allowlist, saves the credentials, and restarts the gateway for you. Any credential save, clear, or enable toggle keeps a **Restart now** banner on the page until the gateway has actually restarted; if a restart fails, the banner stays so you can retry or restart manually.
 - **Agents** and **Command Center** — orchestration surfaces for multi-agent work.
-
-Use the list and card icons at the right of the Browse filters to change layouts.
-The choice is remembered across Skills and Plugins. Search and filters stay in
-place; click a card to open its details or use its Install button directly.
-
-#### Where Browse gets its data
-
-These are native Desktop views, **not embedded website pages**. Desktop and
-the public website consume the same generated CDN snapshots:
-
-| Catalog | Public docs alias | Desktop fetch URL |
-|---|---|---|
-| Skills | [`/docs/api/skills.json`](https://hermes-agent.nousresearch.com/docs/api/skills.json) | `https://nousresearch.github.io/hermes-agent/docs/api/skills.json` |
-| Plugins | [`/docs/api/plugins.json`](https://hermes-agent.nousresearch.com/docs/api/plugins.json) | `https://nousresearch.github.io/hermes-agent/docs/api/plugins.json` |
-
-The skills snapshot combines `skills/`, `optional-skills/`, and the centralized
-skills index. The plugin snapshot comes from `plugin-catalog/*.yaml` and cached star
-counts; the same publish supplies the installer's removed-entry list. Browsing does not make live
-GitHub API calls or fetch plugin/skill source repositories. **Installed** is
-separate: its state comes from the selected profile's backend and the app's
-desktop-plugin registry, not those public snapshots.
-
-The public hubs' **Install in Hermes** buttons open `hermes://skill/install`
-or `hermes://plugin/install` links and require confirmation in Desktop. Use
-an updated Desktop build for the skill route and plugin catalog parameters;
-the cards retain copyable CLI commands if the app is missing or too old. See
-[skill links](./features/skills.md#install-from-the-website) and
-[plugin links](./features/plugins.md#one-click-install-links-desktop) for the
-parameters and review flow.
 
 ### Bot Mode (built in)
 
@@ -72231,8 +72303,8 @@ hot-reloads every save. Manage installed plugins live in **Capabilities → Plug
 See [Desktop Plugin SDK](../developer-guide/desktop-plugin-sdk.md) for the full
 reference. (This is separate from the [web dashboard plugin system](./features/extending-the-dashboard.md).)
 
-**Capabilities → Plugins → Installed** shows the actual installed state:
-**one list entry per plugin**, with Desktop and Agent controls in its detail pane.
+**Capabilities → Plugins** is the one place for everything that extends
+Hermes: **one row per plugin**, with two switch columns.
 
 - A plugin can extend **this app**, **the agent**, or **both** — the badge on
   each row says which, inferred from what the package contains (`plugin.yaml`
@@ -72259,20 +72331,23 @@ reference. (This is separate from the [web dashboard plugin system](./features/e
   [Accent Picker](https://github.com/NousResearch/hermes-desktop-accent-picker)
   install from their own repos via **Install from Git**.
 
-Switch to **Browse** for the native [Plugin Catalog](./features/plugin-catalog.md).
-Both Browse and **Install from Git** open the review-then-install dialog. For
-an agent-plugin catalog install, the backend resolves the catalog name to its
-reviewed pin; a link's `sha` is display metadata, not an override. This does
-not guarantee a pinned standalone desktop-plugin install. **Install from Git**
-also offers **Pin to commit** for agent-plugin installs (a full 40-character
-SHA, including private repositories); pinned agent plugins show a
-`pinned @ <sha8>` badge. Old `Settings → Plugins` links redirect here.
+Discovery sits underneath: the live [Plugin Catalog](./features/plugin-catalog.md)
+picker installs reviewed entries at their pinned commit into the selected
+profile, and **Install from Git** takes any other repository through the same
+review-then-install dialog; its optional **Pin to commit** field installs one
+exact 40-character commit SHA (private repos included), and pinned plugins
+carry a `pinned @ <sha8>` badge in the list. Old `Settings → Plugins` links
+redirect here.
 
 ## Troubleshooting
 
 ### Reconnect without restarting the app
 
 If a Desktop chat or bot stops responding while the connection still shows **Connected**, select that bot/profile or gateway, open the status bar's gateway menu, and click **Reconnect gateway**. Reconnect stays available for open, connecting, and disconnected transports. It redials the active route without restarting Desktop or deliberately closing other routes' sockets. In-flight requests on the selected socket can be interrupted; this is an explicit recovery action, not a backend or model restart.
+
+### The app vanished after `hermes update`
+
+An earlier update that replaced the checkout without keeping `apps/desktop/release/` leaves no packaged app to launch. As long as `HERMES_HOME/desktop-build-stamp.json` (written only by a successful Desktop build) still exists, the next `hermes update` notices the missing app and rebuilds it. To rebuild by hand: `hermes desktop --build-only --force-build`. On Windows the ZIP fallback also keeps the built app, its renderer bundle and its Electron `node_modules` across the swap.
 
 ### The local backend stopped in the background
 
@@ -72346,7 +72421,7 @@ clearing the entry — the latch resets and the next boot dials fresh.
 
 The build downloads the Electron runtime (~114&nbsp;MB) from `github.com/electron/electron/releases`. If the installer hangs on the **Build desktop app** step with the live output repeating `retrying attempt=…`, GitHub is being blocked or throttled on your network (firewall, proxy, or region).
 
-The installer self-heals this automatically: on a failed build it (1) clears a corrupt cached Electron zip and retries, then (2) if it still fails and you haven't set `ELECTRON_MIRROR`, retries once more through `npmmirror.com`, the de-facto Electron community mirror. `@electron/get` SHASUM-checks the download, but the checksums come from the same mirror — that catches a corrupt or partial download, not a compromised mirror. If you'd rather not trust a third-party host, pin your own `ELECTRON_MIRROR` (below); the build never overrides one you've set.
+The installer self-heals this automatically: on a failed build it (1) clears a corrupt cached Electron zip and retries, then (2) if it still fails, the Electron distributable is still missing, and you haven't set `ELECTRON_MIRROR`, retries once more through `npmmirror.com`, the de-facto Electron community mirror. `@electron/get` SHASUM-checks the download, but the checksums come from the same mirror — that catches a corrupt or partial download, not a compromised mirror. If you'd rather not trust a third-party host, pin your own `ELECTRON_MIRROR` (below); the build never overrides one you've set.
 
 To **choose your own mirror** (e.g. a corporate/trusted one), set `ELECTRON_MIRROR` before installing or rebuild manually — the build honors it and won't override it:
 
@@ -72356,6 +72431,8 @@ ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ \
 ```
 
 **Other native downloads (e.g. the `get-windows` prebuilt on Windows) that need a mirror:** put the npm keys in `$HERMES_HOME/npmrc` (`%LOCALAPPDATA%\hermes\npmrc` on Windows, `~/.hermes/npmrc` elsewhere) — for example `node_get_windows_binary_host_mirror=https://<mirror>/sindresorhus/get-windows/releases/download/`. Every `npm ci`/`npm run` the updater spawns (desktop, web and TUI builds) points `NPM_CONFIG_USERCONFIG` at that file when it exists, so the config survives `hermes update`; the repo-root `.npmrc` is git-tracked and gets autostashed on every update, and `~/.npmrc` may be missed because the desktop hand-off inherits the GUI's environment. An `NPM_CONFIG_USERCONFIG` you set yourself is never overridden.
+
+**If `get-windows` is missing or half-installed:** the build no longer fails — it prints `[stage-native-deps] get-windows not installed ... read_window_below will be unavailable in this build` and ships without the `read_window_below` tool. When the package directory exists but is not loadable (a Windows in-place update interrupted by a running Hermes window, `TAR_ENTRY_ERROR` in the install log), the same warning names the directory, and the next `hermes desktop --force-build` or update removes it before its npm install so the package is re-extracted — close every Hermes window and gateway first so the extract is not interrupted again. A package whose native binding or macOS helper is missing is likewise shipped without window enumeration rather than failing the build.
 
 To clear a corrupt cached zip by hand:
 
@@ -74633,12 +74710,17 @@ The `read_file` tool automatically converts common document formats to readable 
 | Jupyter notebooks | `.ipynb` | Built-in (stdlib) | Always |
 | Word documents | `.docx` | Built-in (stdlib) | Always |
 | Excel workbooks | `.xlsx` | Built-in (stdlib) | Always |
+| SQLite databases | `.db`, `.sqlite`, `.sqlite3` | Built-in (stdlib) | Always |
 | PDF | `.pdf` | Optional `anydoc` converter | Auto-installed on first use* |
 | Legacy Office | `.doc`, `.ppt`, `.xls`, `.pptx`, and variants | Optional `anydoc` converter | Auto-installed on first use* |
 | OpenDocument | `.odt`, `.ods`, `.odp` | Optional `anydoc` converter | Auto-installed on first use* |
 | Rich text / eBooks | `.rtf`, `.epub` | Optional `anydoc` converter | Auto-installed on first use* |
 
 \* The optional converter is the `firecrawl-anydoc` package, installed lazily where installs are permitted (`security.allow_lazy_installs` in `config.yaml`). Without it, the three stdlib formats still work; other formats fall back to the binary-file guard.
+
+SQLite files render as a schema overview rather than a dump: each table's `CREATE` statement, row count and first five rows, plus the list of indexes, views and triggers. The database is opened read-only (`mode=ro&immutable=1`, so a live database another process holds open is still readable without locks); for anything beyond the preview, query it from the terminal with `sqlite3`. A `.db` that is not SQLite (the magic bytes do not match) is refused with the real reason. Hermes's own read denylist applies before extraction, so protected stores under `HERMES_HOME` stay unreadable.
+
+`read_file` also flags unresolved git merge conflicts: when the returned range contains balanced `<<<<<<< ` / `>>>>>>> ` marker lines, the result carries `conflict_blocks: N` and a hint to resolve them before editing around them. A lone marker inside a string or a test fixture is not counted.
 
 Conversion output is Markdown, paginated through `read_file`'s normal `offset`/`limit` window. East Asian phonetic guides (XLSX `rPh`, DOCX ruby text) annotate cell or run text and are not part of the extracted value: a cell holding 東京 with the guide トウキョウ reads as `東京`. Documents over 50 MB are refused to keep tool turns bounded.
 
@@ -76070,6 +76152,7 @@ agent sees a syntax-clean file with semantic problems as
 | YAML | `yaml-language-server` | npm |
 | Lua | `lua-language-server` | manual (GitHub releases) |
 | PHP | `intelephense` | npm |
+| Laravel Blade (`.blade.php`) | `laravel-lsp` | manual (composer) |
 | OCaml | `ocaml-lsp` | manual (opam) |
 | Dockerfile | `dockerfile-language-server-nodejs` | npm |
 | Terraform | `terraform-ls` | manual |
@@ -76113,12 +76196,39 @@ host. Setup:
 bundle is missing you'll see a one-time warning in the logs with the
 download link.
 
+### Laravel Blade
+
+`.blade.php` templates go to [laravel-lsp](https://github.com/laravel/lsp)
+(Blade, Eloquent, Facades) while plain `.php` files stay with
+intelephense. Install it once with Composer and make sure the binary
+is on PATH (or pin it with `lsp.servers.laravel-lsp.command`):
+
+```bash
+composer global require laravel/lsp
+export PATH="$HOME/.config/composer/vendor/bin:$PATH"
+```
+
+Hermes launches it as `laravel-lsp lsp` (stdio). There is no
+auto-install recipe; `hermes lsp status` shows `manual-only` until the
+binary is found.
+
 A few servers are installed alongside a peer dependency that npm
-won't auto-pull. The current case is `typescript-language-server`,
-which requires the `typescript` SDK importable from the same
-`node_modules` tree — Hermes installs both packages together when you
-run `hermes lsp install typescript` or auto-install fires on first
-use.
+won't auto-pull. `typescript-language-server` and `@vue/language-server`
+require the `typescript` SDK importable from the same `node_modules`
+tree — Hermes installs `typescript@6` (the last JavaScript-based line;
+TypeScript 7 is the Go port and ships no `tsserver.js`) together with
+the server when you run `hermes lsp install typescript` /
+`hermes lsp install vue-language-server` or auto-install fires on first use.
+
+Vue is pinned to `@vue/language-server@2`, started with
+`vue.hybridMode: false` so it hosts its own TypeScript service. The 3.x
+line only works behind a client-hosted `tsserver` tunnel (the VS Code /
+Neovim setup) that Hermes's generic client does not run, so it never
+publishes diagnostics. If an earlier Hermes installed 3.x, the log shows a
+one-time `vue-language-server: ... 3.x` warning; delete
+`<HERMES_HOME>/lsp/node_modules/@vue` and `<HERMES_HOME>/lsp/bin/vue-language-server*`,
+then run `hermes lsp install vue-language-server` (the recipe co-installs the
+TypeScript SDK).
 
 ## CLI
 
@@ -76149,8 +76259,9 @@ lsp:
 
   # How long to wait for diagnostics after each write.
   wait_mode: document      # "document" or "full"
-  # Max seconds to wait for the server to re-check the file after an
-  # edit. Only *fresh* diagnostics (produced for the post-edit
+  # Max seconds to wait for the server on each of the two waits an
+  # edit makes: the pre-edit baseline snapshot and the post-edit
+  # re-check. Only *fresh* diagnostics (produced for the post-edit
   # content) are ever reported; if the server doesn't finish within
   # this budget, the edit reports "no LSP data" rather than stale
   # errors from before the edit. Raise this for slow servers on big
@@ -76161,6 +76272,20 @@ lsp:
   #   auto    — install via npm/pip/go install into <HERMES_HOME>/lsp/bin
   #   manual  — only use binaries already on PATH
   install_strategy: auto
+
+  # Node package manager for the npm-based servers: npm (default), pnpm
+  # or yarn. Installs still land in <HERMES_HOME>/lsp/node_modules; a
+  # manager that is configured but not installed — or a value outside
+  # npm|pnpm|yarn — skips the install with a warning instead of silently
+  # using npm, so a pnpm/yarn supply-chain policy (minimumReleaseAge,
+  # allowBuilds, …) is never bypassed. Yarn Berry (2+): its default PnP
+  # linker writes no node_modules/.bin, so set `nodeLinker: node-modules`
+  # in <HERMES_HOME>/lsp/.yarnrc.yml. pnpm 11 blocks git-hosted transitive
+  # deps by default (ERR_PNPM_EXOTIC_SUBDEP); @vue/language-server 2.x pulls
+  # one in, so under pnpm that server is skipped with the pnpm error in the
+  # log — install it once with npm, or relax block-exotic-subdeps in
+  # <HERMES_HOME>/lsp/.npmrc if your policy allows it.
+  package_manager: npm
 
   # How long an unused language-server client stays alive (seconds).
   # Idle servers are shut down automatically and respawned on the next
@@ -76194,6 +76319,32 @@ lsp:
   `initializationOptions` payload sent in the `initialize`
   handshake. Server-specific; consult the language server's docs.
 
+### Custom servers
+
+Any `lsp.servers` key that is **not** a built-in server id declares
+your own language server. It needs `command` and `extensions`; the
+other keys are optional. Custom servers are matched *before* the
+built-ins, so they can also take over an extension Hermes already
+handles.
+
+```yaml
+lsp:
+  servers:
+    panache:
+      command: ["panache-lsp", "--stdio"]   # PATH lookup or an absolute/~ path
+      extensions: [".pnch"]                 # or basenames like "Justfile"
+      root_markers: ["panache.toml"]        # nearest dir with one of these; default: workspace root
+      language_id: "panache"                # didOpen languageId; default: derived from the extension
+      description: "Panache markdown"
+      env: { PANACHE_LOG: "warn" }          # same optional keys as built-ins
+      initialization_options: {}
+```
+
+Custom servers are never auto-installed: put the binary on PATH (or
+give an absolute path) and `hermes lsp status` lists it as
+`installed`. A malformed entry is logged and skipped without
+affecting the other servers.
+
 ## Installation locations
 
 When `install_strategy: auto`, Hermes installs binaries into
@@ -76218,7 +76369,9 @@ The LSP layer adds a few milliseconds to clean writes when no
 diagnostics are emitted. When diagnostics are emitted, the wait
 budget is `wait_timeout` seconds — typically the server responds in
 tens of milliseconds for pyright/tsserver and a few seconds for
-rust-analyzer mid-indexing.
+rust-analyzer mid-indexing. Each edit waits twice (a pre-edit
+baseline snapshot for the delta, then the post-edit re-check), so a
+server that never answers costs at most `2 × wait_timeout` per edit.
 
 Diagnostics are **freshness-gated**: a result only counts when the
 server produced it for the content of the current edit (a
@@ -76234,6 +76387,16 @@ one language-server process per workspace forever. A reaped server is
 respawned automatically on the next relevant file operation. Set
 `idle_timeout: 0` to disable reaping and hold every server's index warm
 for the life of the process.
+
+Servers are also released when their workspace goes away, even if they
+are not idle: removing a Hermes-managed worktree (`hermes -w` session
+end, Kanban task cleanup, a delegated subagent's pruned worktree) shuts
+down that tree's language servers before `git worktree remove` runs, and
+the periodic sweep shuts down any server whose project root no longer
+exists on disk (deleted outside Hermes). The sweep is part of the idle
+reaper, so `idle_timeout: 0` also disables deleted-root reaping; the
+worktree-removal release always runs. A multi-root server only drops the
+vanished folder and keeps serving its sibling roots.
 
 Servers that support multi-root workspaces (currently pyright) run as a
 **single process** per Hermes process: the first Python project spawns
@@ -76550,6 +76713,8 @@ Both internal call types cache normally:
 - **Reference models** receive a trimmed, deterministic view of the conversation (system prompt and tool transcript stripped — see the loop above). Because that view is a stable function of the stable history, a reference model's prompt prefix repeats across iterations and caches normally. References are short advisory calls with no tools.
 - **The aggregator** is the acting model. The reference outputs are appended as their *own* trailing user message of private guidance — never merged into your message. Because that block sits at the tail — below the entire stable prefix (system prompt + your message + prior tool history) — it does not invalidate any cached prefix: every request in a tool loop is a byte-identical extension of the previous one minus its guidance block, so the aggregator gets a cache hit on everything above the injection and only the freshly appended tail is new. That is exactly how every normal turn behaves, where each new user message is also uncached tail tokens. Aggregators on the Anthropic Messages, Bedrock Converse or native Gemini wire merge the two adjacent user turns into one message, but as separate content blocks: your message's block is byte-identical to the one later iterations replay, and the guidance block follows it, so the cached prefix still runs through your message.
 
+  On the OpenAI-compatible wire the request ends `user(your message), user(guidance)` on the first iteration of a turn. A few chat templates that enforce strict user/assistant alternation (llama.cpp and vLLM Jinja templates, some OpenRouter routes) reject that with a 400 such as `Conversation roles must alternate`. Hermes recovers on its own: it retries that one request with the two adjacent user messages merged, remembers that aggregator destination (endpoint + model) for the rest of the session so later turns are merged up front, and leaves every other destination on the split, cache-stable shape. The merge is applied only where a destination demanded it, because merging everywhere would reintroduce the prefix divergence described above.
+
 So MoA does not sacrifice prompt caching on either call type. Its only real cost is the extra reference calls (once per user turn with the default `fanout`) — you pay for multiple model perspectives, not for broken caches. The long-lived conversation prefix shared with the rest of Hermes is fully intact.
 
 ## Notes
@@ -76814,35 +76979,12 @@ hermes plugins install <name>
 Browse it visually at **[/docs/plugins](/plugins)** — entries are shelved by
 category (Memory, Desktop, Platforms, Web & Browser, Tools, Voice, Automation,
 Models), with search, tier filters (Official / Community), capability chips, and
-**Install in Hermes** buttons and copyable CLI commands for every entry.
-
-In Desktop, open **Capabilities → Plugins → Browse** for the native catalog
-view. It is not an embedded website. **Installed** is a separate tab backed
-by the app's desktop-plugin registry and the selected profile's agent-plugin
-state, rather than catalog metadata. Skills uses the same **Installed / Browse**
-layout; search stays at the top and the tab switch and actions share one row.
-Browse defaults to cards. The list and card icons beside the filters switch
-layouts, preserving search and filters and remembering the choice across both
-catalogs.
+copyable install commands for every entry.
 
 The catalog complements — it does not replace — the existing
 [plugin system](plugins.md). Anything you can install from the catalog is a
 normal plugin under the hood; the catalog just adds discovery and a review
 layer on top.
-
-### Published browse data
-
-The website and Desktop read the same generated CDN snapshot:
-[`https://hermes-agent.nousresearch.com/docs/api/plugins.json`](https://hermes-agent.nousresearch.com/docs/api/plugins.json).
-Desktop fetches it through
-`https://nousresearch.github.io/hermes-agent/docs/api/plugins.json`; the public
-docs alias serves the same data. The docs build reads `plugin-catalog/*.yaml`
-and adds cached repository star counts. It also publishes the installer's
-removed-entry list. Neither
-Browse view crawls source repositories or queries the GitHub API live.
-
-This browse snapshot is distinct from the installer's
-[`plugin-catalog.json`](#live-refresh), which resolves catalog names and pins.
 
 ## What's in an entry
 
@@ -76882,6 +77024,12 @@ The catalog is designed so you know exactly what you're installing:
   catalog install checked out at exactly the pinned SHA does not stop to ask
   about `caution` again; `dangerous` still blocks, and anything installed from
   a raw URL or at another revision gets the normal prompt.
+- **Desktop plugins stay inside the SDK.** A plugin's `desktop/plugin.js` runs
+  inside the Desktop app with the app's own authority, so listed ones may only
+  use the plugin SDK: no patching of built-in prototypes, no `eval`, no
+  importing the app's own bundle chunks or remote scripts. Admission refuses
+  these (`desktop surface` check) so a marketplace install cannot quietly
+  rewire the app around you.
 - **Capability declarations.** Entries state up front which tools, hooks, and
   middleware the plugin provides and which environment variables (API keys
   etc.) it needs, so you can judge its blast radius before installing.
@@ -76900,24 +77048,6 @@ repository. Review the code of anything you give credentials to.
 :::
 
 ## Installing from the catalog
-
-On the website, **Install in Hermes** opens a protocol link of this form:
-
-```text
-hermes://plugin/install?repo=owner%2Frepo&catalog_name=example-plugin&sha=0123456789abcdef0123456789abcdef01234567
-```
-
-`repo` is URL-encoded, including any `#subdir`. Desktop asks you to review the
-source, destination and components before confirming; the link does not
-auto-install. For the agent-plugin component, the backend resolves
-`catalog_name` to its reviewed pin. The link's `sha` is **display metadata
-only**, not authority to choose or override a commit, and it is not a pin
-guarantee for a standalone desktop plugin.
-
-Use an updated Desktop build for the catalog parameters (and for the public
-Skills Hub's new `hermes://skill/install?identifier=...` route). Older builds
-may only understand repository-only plugin links. The expanded cards retain
-CLI commands, so you can install by catalog name without Desktop:
 
 ```bash
 # Install a reviewed catalog entry by name (checks out the pinned SHA)
@@ -87391,7 +87521,7 @@ hot-added profile that reuses another profile's token is parked with a
 Multiplexing selects a profile per **credential** (each profile's own bot
 token) or per **URL prefix** (`/p/<profile>/` for HTTP platforms). When several
 communities share **one** bot token — for example one Discord bot serving many
-guilds — you can additionally route specific guilds/channels/threads to
+guilds — you can additionally route specific users/guilds/channels/threads to
 different profiles with `gateway.profile_routes`:
 
 ```yaml
@@ -87422,14 +87552,40 @@ gateway:
       platform: whatsapp
       chat_id: "15551234567"
       profile: owner
+
+    # One Teams user across DMs, groups, and channels (exact sender id)
+    - name: teams-owner
+      platform: teams
+      user_id: "00000000-0000-0000-0000-000000000000"
+      profile: owner
 ```
 
-Routes are matched most-specific-first (`thread_id` > `chat_id` > `guild_id`),
-all declared fields must hold (AND), and a route keyed on a channel also
-matches threads/forum posts whose parent is that channel. Messages that match
-no route stay on the default/active profile. The routed profile gets the full
-per-profile isolation described above (config, skills, memory, credentials,
-session namespace). Routing works on every platform adapter, not just Discord.
+Routes are matched by additive specificity: `user_id` = 16, `thread_id` = 8,
+`chat_id` = 4, and `guild_id` = 2. Thus `user_id + chat_id` (20) outranks
+`user_id` alone (16), which outranks every location-only route (at most 14).
+All declared fields must hold (AND), equal scores keep declaration order, and a
+route keyed on a channel also matches threads/forum posts whose parent is that
+channel. Messages that match no route stay on the default/active profile. The
+routed profile gets the full per-profile isolation described above (config,
+skills, memory, credentials, session namespace). Routing works on every
+platform adapter, not just Discord.
+
+`user_id` is the **sender** of the inbound message, compared for exact equality. It is only
+as trustworthy as the adapter that reports it, so treat it as an authorization input only on
+platforms whose ingress authenticates the sender. Sender ids are also namespaced per tenant
+on some platforms — a Slack user id is workspace-local — so on a gateway serving more than
+one workspace or server, pair `user_id` with the `guild_id` of that scope (Discord guild,
+Slack workspace, Matrix server) rather than relying on the id alone.
+
+Omitting `user_id` keeps the route unconstrained by sender for backward compatibility.
+Setting it to `null`, an empty string, or whitespace invalidates that route instead of
+broadening it to every sender on the platform.
+
+Sender routing selects a profile; it is not deny-by-default authorization. A sender that
+matches no route falls through to the default/active profile, exactly like an unrouted
+channel. To give one person a privileged profile and everyone else a restricted one, declare
+the privileged sender route first, add a platform-wide catch-all route to the restricted
+profile after it, and keep the platform's own ingress allowlist in place.
 
 A route applies only to messages received by the **default profile's bot**
 unless it names another bot with `bot_profile: <profile>`. Telegram DMs use the
@@ -87477,9 +87633,11 @@ only to targets an enabled route with a `chat_id`/`thread_id` maps to that
 profile (a `guild_id + chat_id` route qualifies its channel) — a routed
 profile's job targeting an unrouted chat (or a chat routed to another profile)
 is never sent through the shared bot. Guild-only routes do not qualify a cron
-target; add a `chat_id` route for the delivery channel. The routed profile does
-not need its own `platforms.<platform>` block for this: the shared bot's
-authorization comes from the route, not from the satellite's config.
+target; add a `chat_id` route for the delivery channel. Routes declaring
+`user_id` do not qualify either: cron has no authenticated inbound sender, so
+they need a separate location-only route. The routed profile does not need its
+own `platforms.<platform>` block for this: the shared bot's authorization comes
+from the route, not from the satellite's config.
 
 ## Start, stop, or restart all gateways at once
 
@@ -89587,7 +89745,7 @@ Login auto-start is only ever installed on an explicit answer: `hermes gateway i
 
 ### Why not a Windows Service?
 
-Services require admin rights to install and tie the gateway's lifecycle to machine boot, not user login. The typical Hermes user wants: log in → gateway available, log out → gateway gone. Scheduled Tasks do exactly that without elevation. If you genuinely want a service, use `nssm` or `sc create` manually — but you probably don't.
+Services require admin rights to install and tie the gateway's lifecycle to machine boot, not user login. The typical Hermes user wants: log in → gateway available, log out → gateway gone. Scheduled Tasks do exactly that without elevation. If you genuinely want a service, use `nssm` or `sc create` manually — but you probably don't. If you do, name it `Hermes*` or point its binary path inside the Hermes install (`venv\Scripts\hermes.exe`, the checkout, or `gateway-service\`): `hermes update` stops and restarts only services it can positively identify as Hermes-owned through the Service Control Manager, and pauses a Scheduled-Task-launched gateway by PID (Task Scheduler itself is never touched).
 
 ## Data layout
 
