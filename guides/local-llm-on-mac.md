@@ -5,7 +5,7 @@
 :::tip Desktop users: there's a one-click path
 On the Hermes desktop app, **Settings → Providers → Local Models** installs
 and manages a local llama.cpp server for you — model downloads, memory
-fitting, and context sizing included. See [Local Models](/user-guide/local-models).
+fitting, and context sizing included. See [Local Models](../user-guide/local-models.md).
 This guide is for manual setup: MLX, custom builds, or servers you want to
 run yourself.
 :::
