@@ -74,7 +74,7 @@ Repo: https://github.com/NousResearch/hermes-agent
 - [LSP — Semantic Diagnostics](./user-guide/features/lsp.md): Real language servers (pyright, gopls, rust-analyzer, …) wired into the post-write lint check used by write_file and patch.
 - [Mixture of Agents](./user-guide/features/mixture-of-agents.md): Create named MoA presets that appear as selectable models under the Mixture of Agents provider
 - [Pets (Petdex Mascots)](./user-guide/features/pets.md): Adopt an animated mascot that reacts to agent activity across the CLI, TUI, and desktop app
-- [Plugin Catalog](./user-guide/features/plugin-catalog.md): Browse and install reviewed, SHA-pinned Hermes plugins from the curated catalog
+- [Plugin Catalog](./user-guide/features/plugin-catalog.md): Give Hermes new powers with reviewed plugins you can install in one click
 - [Skins & Themes](./user-guide/features/skins.md): Customize the Hermes CLI with built-in and user-defined skins
 - [Spotify](./user-guide/features/spotify.md)
 - [Subscription Proxy](./user-guide/features/subscription-proxy.md): Use your Nous Portal subscription (or other OAuth provider) as an OpenAI-compatible endpoint for external apps
