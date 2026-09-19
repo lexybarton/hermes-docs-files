@@ -2608,7 +2608,7 @@ Same layout, mounted into the container:
 | `/nix/store` | `/nix/store` | `ro` | Hermes binary + all Nix deps |
 | `/data` | `/var/lib/hermes` | `rw` | All state, config, workspace |
 | `/home/hermes` | `${stateDir}/home` | `rw` | Persistent agent home — `pip install --user`, tool caches |
-| `/usr`, `/usr/local`, `/tmp` | (writable layer) | `rw` | `apt`/`pip`/`npm` installs — persists across restarts, lost on recreation |
+| `/usr`, `/usr/local`, `/tmp` | (writable layer) | `rw` | `apt`/`pip`/`npm` installs — persists across restarts, lost on recreation | <!-- no-tmp: ok — documents the container's own writable layer -->
 
 ---
 
@@ -3837,12 +3837,22 @@ local backend — background-process logs/pid/exit files, code-execution
 sandboxes, and spilled tool results. When it's empty (the default), Hermes
 honors an explicit `TMPDIR`/`TMP`/`TEMP` from the environment and otherwise
 uses a managed directory on real storage at `~/.hermes/cache/terminal`
-instead of `/tmp` — on many distros (Arch-based setups in particular) `/tmp`
+instead of `/tmp` — on many distros (Arch-based setups in particular) `/tmp` <!-- no-tmp: ok — explains why /tmp is avoided -->
 is a small RAM-backed tmpfs that Hermes session artifacts can fill under
 load. The managed directory is auto-pruned: artifacts older than 72 hours are
 swept hourly by gateway housekeeping and once per process on CLI-only
 installs. Set `temp_dir` to an existing absolute path to redirect session
 temp anywhere else; user-set paths are never auto-pruned.
+
+Independently of `terminal.temp_dir`, every Hermes process (CLI, TUI, gateway, Desktop
+backend, cron) and every child it launches gets `TMPDIR`, `TMP` and `TEMP` pointed at
+**`~/.hermes/cache/scratch`** (per profile) at startup, so `tempfile.mkdtemp()`,
+`mktemp`, browser profiles and probe scripts all land on real storage instead of a
+RAM-backed system temp dir. The system prompt names this directory as the scratch
+directory. Hermes only sets these when they are not already set — a `TMPDIR` exported
+by you or by the OS (macOS `/var/folders`, Windows `%TEMP%`) is left alone. Entries
+older than 72 hours are pruned at startup (at most once per hour). `hermes doctor`
+reports the directory and its size.
 
 `desktop.font_family` sets the font for chat and the rest of the Hermes Desktop interface (the terminal pane has its own key above). Give it one installed family name (for example, `OpenDyslexic` or `Atkinson Hyperlegible`) or a CSS font stack; Hermes keeps the active theme's own stack behind it so CJK and emoji glyphs still resolve, and an empty value uses the theme's font. Edit it in **Settings → Appearance → Chat Font**.
 
@@ -4009,7 +4019,7 @@ Parallel subagents spawned via `delegate_task(tasks=[...])` share this one conta
 - `--cap-drop ALL` with only `DAC_OVERRIDE`, `CHOWN`, `FOWNER` added back
 - `--security-opt no-new-privileges`
 - `--pids-limit 256`
-- Size-limited tmpfs for `/tmp` (512MB), `/var/tmp` (256MB), `/run` (64MB)
+- Size-limited tmpfs for `/tmp` (512MB), `/var/tmp` (256MB), `/run` (64MB) <!-- no-tmp: ok — documents the sandbox's own tmpfs -->
 
 **Credential forwarding:** Env vars listed in `docker_forward_env` are resolved from your shell environment first, then `~/.hermes/.env`. Skills can also declare `required_environment_variables` which are merged automatically.
 
@@ -4330,7 +4340,7 @@ hermes config set terminal.persistent_shell false
 ```
 
 **What persists across commands:**
-- Working directory (`cd /tmp` sticks for the next command)
+- Working directory (`cd ~/project` sticks for the next command)
 - Exported environment variables (`export FOO=bar`)
 - Shell variables (`MY_VAR=hello`)
 
@@ -4671,6 +4681,23 @@ Points at a custom OpenAI-compatible endpoint. Uses `OPENAI_API_KEY` for auth.
 | `nous` / `openrouter` / etc. | not set | Force that provider, use its auth |
 | any | set | Use the custom endpoint directly (provider ignored) |
 
+### Stream progress timeout (Responses routes)
+
+When the summary runs over a Responses stream (the `openai-codex` provider, or any route the auxiliary client drives through the Responses API), two timeouts apply, and they are independent:
+
+- `auxiliary.compression.timeout` — the overall request budget (default 120s).
+- `auxiliary.compression.no_progress_timeout` — how long the stream may go without a **substantive** event (a text/reasoning delta or a completed output item) before the attempt aborts with `Codex auxiliary Responses stream stalled: no new output for Ns`. Default **60s** when unset. Keepalive and lifecycle frames (`response.in_progress`, pings) do not count as progress; every substantive event re-arms the window, so a slow but progressing summary is never cut off by it.
+
+Raising `timeout` alone does **not** widen the progress window — a request configured for 600s still aborts after a 60s gap. Set `no_progress_timeout` to change that gap; the effective window is capped at `timeout`, and the host's hard deadline / cancellation still win. The host's own inactivity budget is the outer cap here: in-agent compaction gives up on a silent summariser after `compression.context_timeout_seconds` (default 120s, floored at the effective `auxiliary.compression.timeout`, itself at least 300s) and gateway hygiene after `compression.hygiene_timeout_seconds` (default 30s), so a `no_progress_timeout` larger than the applicable host budget is silently cut short by it. The key is per task (`auxiliary.<task>.no_progress_timeout`), so widening it for compression does not change other auxiliary tasks. A value that is not a positive number is ignored with a warning in the log and the 60s default applies.
+
+```yaml
+auxiliary:
+  compression:
+    provider: openai-codex
+    timeout: 600
+    no_progress_timeout: 180   # tolerate a 3-minute silent gap on a long reasoning summary
+```
+
 :::warning Summary model context length requirement
 The summary model **must** have a context window at least as large as your main agent model's. The compressor sends the full middle section of the conversation to the summary model — if that model's context window is smaller than the main model's, the summarization call will fail with a context length error. When this happens, the middle turns are **dropped without a summary**, losing conversation context silently. If you override the model, verify its context length meets or exceeds your main model's.
 :::
@@ -4851,17 +4878,23 @@ Hermes has separate timeout layers for streaming, plus a stale detector for non-
 | Socket read timeout | 120s | Auto-raised to 1800s | `HERMES_STREAM_READ_TIMEOUT` |
 | Stale stream detection | 180s | Raised to a 900s ceiling (`agent.local_stream_stale_timeout`) | `HERMES_STREAM_STALE_TIMEOUT` |
 | Stale non-stream detection | 90s | Auto-disabled when left implicit | `providers.<id>.stale_timeout_seconds` or `HERMES_API_CALL_STALE_TIMEOUT` |
+| Responses first-event watchdog | 120s | Raised to the 900s ceiling (`agent.local_stream_stale_timeout`) | `HERMES_CODEX_TTFB_TIMEOUT_SECONDS` |
 | API call (non-streaming) | 1800s | Unchanged | `providers.<id>.request_timeout_seconds` / `timeout_seconds` or `HERMES_API_TIMEOUT` |
+| Post-terminal stream drain (Codex/Responses) | 2s | Unchanged | `agent.stream_drain_timeout` |
 
 The **socket read timeout** controls how long httpx waits for the next chunk of data from the provider. Local LLMs can take minutes for prefill on large contexts before producing the first token, so Hermes raises this to 30 minutes when it detects a local endpoint. If you explicitly set `HERMES_STREAM_READ_TIMEOUT`, that value is always used regardless of endpoint detection.
 
 The **stale stream detection** kills connections that receive SSE keep-alive pings but no actual content. For local providers (which don't send keep-alive pings during prefill) the default is raised to a finite 900-second ceiling instead of the 180s base — configurable via `agent.local_stream_stale_timeout` or the `HERMES_LOCAL_STREAM_STALE_TIMEOUT` env var.
 
+The **Responses first-event watchdog** (Codex / `codex_responses` transport, including custom providers declared with the Responses transport) aborts and reconnects a request that accepts the connection but emits no stream event within 120 seconds. A local server prefilling a large context legitimately stays silent longer than that, so on local endpoints the implicit default is raised to the same ceiling as the stale stream detector (`agent.local_stream_stale_timeout` / `HERMES_LOCAL_STREAM_STALE_TIMEOUT`, 900s). An explicit `HERMES_CODEX_TTFB_TIMEOUT_SECONDS` is always used as-is (`0` disables the watchdog).
+
 The **stale non-stream detection** kills non-streaming calls that produce no response for too long. By default Hermes disables this on local endpoints to avoid false positives during long prefills. If you explicitly set `providers.<id>.stale_timeout_seconds`, `providers.<id>.models.<model>.stale_timeout_seconds`, or `HERMES_API_CALL_STALE_TIMEOUT`, that explicit value is honored even on local endpoints.
+
+The **post-terminal stream drain** bounds how long a Codex/Responses stream keeps reading after its terminal `response.completed` frame (a courtesy so the relay finalizer can run). Some relays never close the SSE socket after the terminal frame; without a bound the turn wedged until the stale-stream watchdog fired and discarded the already-billed response, then retried. After `agent.stream_drain_timeout` seconds the stream is closed and the completed response is returned. Endpoints that close the connection normally finish the drain immediately and never wait this long; set `0` to skip the drain entirely.
 
 This budget bounds every non-streaming call. A provider that accepts a request and then goes silent — connection held open, no bytes, no error — is aborted at the stale timeout and retried, rather than hanging until the much longer socket read timeout (or, for an unattended cron run, until something external kills the process).
 
-The periodic provider-wait notice appears only after at least **60 seconds of silence**. The Codex Responses **waiting status** describes silence, not total generation time: active stream events (including reasoning) keep it quiet. If events stop, it reports time without stream events instead of claiming no response has arrived; the notice clears when events resume. When a reconnect starts a fresh first-event watchdog phase, the waiting status follows that phase. This display behavior does not extend the separate wall-clock stale-call budget or change watchdog timeouts. Chat-completion streams likewise clear their silence warning promptly when chunks resume, without replacing a local model-loading status.
+The periodic provider-wait notice appears only after at least **60 seconds of silence**. The Codex Responses **waiting status** describes silence, not total generation time: active stream events (including reasoning) keep it quiet. If events stop, it reports time without stream events instead of claiming no response has arrived; the notice clears when events resume. When a reconnect starts a fresh first-event watchdog phase, the waiting status follows that phase. This display behavior does not extend the separate wall-clock stale-call budget or change watchdog timeouts. The status is shown once per silence (after 60s), in neutral wording that names the wait phase (`waiting for the first provider event` vs `provider stream active; Ns without stream events`) and the watchdog that would reconnect (`TTFB`, `stream idle`, or `wall-clock stale`) with the seconds left before it fires; it is rewritten only when the phase changes or that deadline is near, not on every 30s liveness heartbeat. Chat-completion streams follow the same rule (`waiting for the first stream chunk` / `stream open; Ns without stream output`, `stream stale` watchdog) and likewise clear their silence notice promptly when chunks resume, without replacing a local model-loading status.
 
 Cron jobs and delegated subagents stream too. They run the request inline on their own thread (the interrupt worker other sessions use wedges inside the gateway's nested thread pools), but the wire request is still `stream: true`, so the **stale stream detection** budget above governs them — every token counts as liveness, so a reasoning model that thinks for minutes is not mistaken for a hung provider, and edge proxies that kill silent connections keep seeing bytes.
 
@@ -5090,6 +5123,8 @@ auxiliary:
   # Context compression timeout (separate from compression.* config)
   compression:
     timeout: 120               # seconds — compression summarizes long conversations, needs more time
+    # no_progress_timeout: 60   # Responses-stream routes (openai-codex) only: seconds a summary stream
+    #                           # may go without a substantive event before the attempt fails fast
     # fallback_chain:           # Optional — providers to try on rate-limit / connectivity failure
     #   - provider: nous
     #     model: deepseek/deepseek-chat
@@ -5256,7 +5291,7 @@ These options apply to **auxiliary task configs** (`auxiliary:`, `compression:`)
 | `"auto"` | Best available (default). Vision tries OpenRouter → Nous → Codex. | — |
 | `"openrouter"` | Force OpenRouter — routes to any model (Gemini, GPT-4o, Claude, etc.) | `OPENROUTER_API_KEY` |
 | `"nous"` | Force Nous Portal | `hermes auth` |
-| `"codex"` | Force Codex OAuth (ChatGPT account). Supports vision (gpt-5.3-codex). | `hermes model` → ChatGPT or Codex Subscription |
+| `"codex"` | Force Codex OAuth (ChatGPT account). Set `model` explicitly (e.g. `gpt-5.4`). | `hermes model` → ChatGPT or Codex Subscription |
 | `"minimax-oauth"` | Force MiniMax OAuth (browser login, no API key). Uses MiniMax-M2.7-highspeed for auxiliary tasks. | `hermes model` → MiniMax (OAuth) |
 | `"xai-oauth"` | Force xAI Grok OAuth (browser login for SuperGrok or X Premium+ subscribers, no API key). Same OAuth token covers chat, TTS, image, video, and transcription. | `hermes model` → xAI Grok OAuth (SuperGrok / Premium+) |
 | `"main"` | Use your active custom/main endpoint. This can come from `OPENAI_BASE_URL` + `OPENAI_API_KEY` or from a custom endpoint saved via `hermes model` / `config.yaml`. Works with OpenAI, local models, or any OpenAI-compatible API. **Auxiliary tasks only — not valid for `model.provider`.** | Custom endpoint credentials + base URL |
@@ -5310,7 +5345,7 @@ auxiliary:
 auxiliary:
   vision:
     provider: "codex"     # uses your ChatGPT OAuth token
-    # model defaults to gpt-5.3-codex (supports vision)
+    model: "gpt-5.4"      # no implicit default on the Codex route
 ```
 
 **Using MiniMax OAuth** (browser login, no API key needed):
@@ -5368,6 +5403,17 @@ agent:
 
 When unset (default), reasoning effort defaults to "medium" — a balanced level that works well for most tasks. Setting a value overrides it — higher reasoning effort gives better results on complex tasks at the cost of more tokens and latency.
 
+### Answer length (`text_verbosity`)
+
+Responses-API models (OpenAI GPT-5 family and later, direct OpenAI, ChatGPT Codex and Azure routes) also accept a separate knob for how long the final natural-language answer is, independent of reasoning depth:
+
+```yaml
+agent:
+  text_verbosity: ""   # empty = not sent (provider default). Options: low, medium, high
+```
+
+Hermes sends it as the top-level Responses `text: {verbosity: ...}` field only on Responses-family routes; it is never sent on `chat_completions`, Anthropic or xAI requests, and an empty or unknown value sends nothing. Structured-output (`text.format`) set through `request_overrides` is passed through unchanged.
+
 :::note Adaptive-thinking models (Claude 4.6+, Fable/Mythos-class) over OpenRouter
 These models use *adaptive* thinking and don't accept the usual `reasoning.effort`
 field — OpenRouter ignores it for them. Hermes transparently routes your
@@ -5388,6 +5434,13 @@ at `high`, never a silent escalation). New reasoning-capable vendors work
 automatically without waiting for a Hermes update; when the catalog is
 unreachable or a model isn't listed, Hermes falls back to its built-in
 model-family list and passes your effort through unchanged.
+:::
+
+:::note `ultra` is clamped to the strongest level the route accepts
+`ultra` is a Hermes-internal ladder step: no provider wire accepts it, so every route clamps it
+to its strongest level (`max` on GPT-5.6 Codex and OpenAI-compatible routes, `xhigh` on older
+Codex models). The effort pickers and `/reasoning` status show this as
+`ultra (sends max on this route)` so the level you see is the level that is sent.
 :::
 
 You can also change the reasoning effort at runtime with the `/reasoning` command:
@@ -5423,8 +5476,31 @@ The key matching is **spelling-tolerant** — any reasonable spelling will match
 - A key prefixed with a named custom provider (`ollama-local/qwen3.6:27b-q4_k_m`) also applies when the request carries only the bare model id (`qwen3.6:27b-q4_k_m`), which is what fallback entries and `providers:` routes send
 - Exact matches take precedence over variants
 
+#### Custom reasoning tier names
+
+Some OpenAI-compatible endpoints expose thinking tiers outside the standard ladder (a relay serving `fast`/`thinking` instead of `low`…`max`). A bare string outside the ladder is rejected with `Unknown reasoning_effort '<value>', using default (medium)` so a typo can never reach the wire. To request a provider's own tier name, use the explicit dict form — the `effort` value is sent verbatim as the top-level `reasoning_effort` field:
+
+```yaml
+agent:
+  reasoning_effort:
+    enabled: true
+    effort: thinking            # sent as-is
+  reasoning_overrides:
+    "my-relay/lumo-max":        # dict form works per model too
+      enabled: true
+      effort: fast
+```
+
+`enabled: false` in the dict form turns thinking off, the same as `reasoning_effort: none`.
+
+The dict form is set by editing `config.yaml` directly: the `/reasoning` menus, `hermes model`, and the dashboard's auxiliary-model pickers only offer the standard ladder (the TUI status and setup wizard still show the custom tier name once it is configured).
+
 :::note
 Model ids contain dots (`claude-opus-4.5`, `qwen3.6:27b`), which `hermes config set` treats as nesting separators. Escape them with a backslash to write the literal key — `hermes config set 'agent.reasoning_overrides.ollama-local/qwen3\.6:27b-q4_k_m' low` — or edit the YAML directly. See [Dots inside key names](../reference/cli-commands.md#dots-inside-key-names).
+:::
+
+:::note OpenAI Responses (`openai-api`, `openai-codex`)
+`reasoning_effort: none` is sent explicitly as `reasoning.effort: "none"` on models that accept it (GPT-5.x): omitting the field would leave the model's default effort on (GPT-5.6 defaults to `medium`). An unset effort is the only state that omits the field. Chat-era models on `api.openai.com` (`gpt-4o`, `gpt-4.1`, their `-mini` variants and fine-tunes) reject any `reasoning` parameter, so Hermes sends none for them regardless of the configured effort instead of failing with `400 Unsupported parameter: 'reasoning.effort'`. If a model rejects `none`, Hermes warns, drops the disable for the session and retries with the model's default.
 :::
 
 :::note Local OpenAI-compatible endpoints
@@ -5438,7 +5514,7 @@ A custom `base_url` (`http://localhost:11434/v1`, a vLLM, SGLang or router endpo
 3. Global `agent.reasoning_effort`
 4. Provider default
 
-The override applies automatically everywhere: CLI startup, messaging gateway, Desktop/TUI, cron jobs, `/model` mid-session switches (including a switch issued before the first message), session resume (`--resume`, `/resume`), `/new`, and fallback model activation.
+The override applies automatically everywhere: CLI startup, `hermes -p` one-shots, messaging gateway, Desktop/TUI, ACP sessions, cron jobs, `/model` mid-session switches (including a switch issued before the first message), session resume (`--resume`, `/resume`), `/new`, and fallback model activation.
 
 ## Fast Mode
 
@@ -5460,6 +5536,22 @@ agent:
 `/fast normal|fast|auto|cold` switches the mode for the session; add `--global` to persist to `config.yaml`. `/fast` alone shows the current mode.
 
 **Cost note:** both providers bill fast requests at a multiplier on standard rates (Anthropic: $10 / $50 per MTok in/out on Opus 4.8 and Opus 5), stacking with prompt-cache pricing. `auto`/`cold` bound that premium to the window only. Fast params are only sent to the first-party endpoint that supports them (`api.openai.com` / Codex subscription, `api.anthropic.com`, `api.x.ai`); OpenRouter, Nous Portal, Copilot, Azure, Bedrock, and custom `base_url` routes never receive them in any mode. Only the per-request parameter changes between requests — the system prompt, tools, and messages stay byte-identical, so the prompt cache survives the window boundary.
+
+### Fast tiers behind a gateway or proxy
+
+The first-party-only rule is deliberate: a fast-tier parameter is a billing instruction, and Hermes only sends it to the endpoint whose price list it knows. If you run an OpenAI-compatible gateway, router, or proxy that exposes its own priority tier (its own `service_tier` value, or a differently named field), request it through that provider's `extra_body` instead of `agent.service_tier`. `extra_body` on a [named custom provider](../integrations/providers.md#named-custom-providers) is merged into **every** chat-completions request routed to that endpoint, survives gateway turns and `/fast` changes, and is dropped again when you `/model` away from the provider:
+
+```yaml
+providers:
+  my-gateway:
+    api: https://gateway.example.com/v1
+    key_env: MY_GATEWAY_KEY
+    default_model: fast-lane-model
+    extra_body:
+      service_tier: priority     # whatever tier value your gateway documents
+```
+
+Differences from `agent.service_tier`: the tier is always on for that provider (no `auto`/`cold` window), `/fast` does not toggle it, and Hermes does not validate the value — the gateway decides what it accepts and what it bills.
 
 ## Tool-Use Enforcement
 
@@ -5604,6 +5696,7 @@ tts:
     voice: "alloy"              # alloy, echo, fable, onyx, nova, shimmer
     speed: 1.0                  # Speed multiplier (clamped to 0.25–4.0 by the API)
     base_url: "https://api.openai.com/v1"  # Override for OpenAI-compatible TTS endpoints
+    pcm_sample_rate: 24000      # Streaming PCM rate; overridden by the endpoint's X-Audio-Sample-Rate header
   minimax:
     speed: 1.0                  # Speech speed multiplier
     # base_url: ""              # Optional: override for OpenAI-compatible TTS endpoints
@@ -5810,9 +5903,10 @@ Supported fields:
 | `model` | Bare model id, vendor prefix dropped | `gpt-5.4` |
 | `context_pct` | Last-call context occupancy as a percent | `5%` |
 | `latency` | Wall-clock duration of the turn | `22s`, `1m05s` |
+| `served_model` | The model that actually answered, when it differs from the one you configured: the deployment a routing proxy reported in its `x-litellm-model-id` (or `x-litellm-model-api-base`) response header, or the fallback model Hermes switched to for the turn | `hermes-router → gpt-4o-2024-11-20` |
 | `cwd` | Home-relative working directory | `~` |
 
-The default field set is `["model", "context_pct", "cwd"]`. `latency` is opt-in — add it to `fields` to use it. Fields whose data is unavailable are skipped silently rather than rendering an empty slot.
+The default field set is `["model", "context_pct", "cwd"]`. `latency` and `served_model` are opt-in — add them to `fields` to use them. `served_model` renders nothing when the served model is the configured one (or when the proxy sends no such header), so behind a routing proxy or an active fallback it is the field that makes the switch visible. Fields whose data is unavailable are skipped silently rather than rendering an empty slot.
 
 The `/footer` slash command toggles this at runtime in any session.
 
@@ -5906,10 +6000,14 @@ stt:
   openai:
     model: "whisper-1"         # whisper-1 | gpt-4o-mini-transcribe | gpt-4o-transcribe | gpt-transcribe
     language: ""               # per-provider override of stt.language
+    timeout: 60                # seconds per transcription request; raise for self-hosted model cold starts
+    max_retries: 1             # SDK transport retries (connection errors, 408/409/429/5xx); 0 = single attempt
   # model: "whisper-1"         # Legacy fallback key still respected
 ```
 
 Language resolution is the same for **every** STT provider (local, groq, openai, mistral, xai, elevenlabs, deepinfra, command providers, and plugins): `stt.<provider>.language` → `stt.language` → `HERMES_LOCAL_STT_LANGUAGE` env var → provider auto-detect. **The default is `stt.language: "en"`** — Whisper auto-detection frequently misidentifies short or accented clips, which shows up as voice notes transcribed in the wrong language. Non-English speakers should set `stt.language` to their language code once (e.g. `"es"`, `"zh"`, `"uk"`); set it to `""` to restore auto-detection for multilingual use.
+
+`stt.openai.timeout` and `stt.openai.max_retries` shape the OpenAI-SDK transcription client that the `openai`, `groq` and `deepinfra` providers share (there are no per-provider siblings yet, and the SDK reads no environment variables for these). The defaults are `60` / `1` rather than the previous fixed 30 s / no retries because a self-hosted OpenAI-compatible endpoint can take longer than 30 s to load its model on the first request, which used to lose that voice message outright. The trade-off: an unreachable backend now holds a voice message for up to two attempts × the timeout before Hermes gives up; set `timeout: 30` and `max_retries: 0` for the old shape.
 
 Set `stt.echo_transcripts: false` when the gateway should transcribe voice notes for the agent but must not post the raw transcript back to the chat (for example, customer-facing WhatsApp bots).
 
@@ -6255,11 +6353,13 @@ discord:
   require_mention: true          # Require @mention to respond in server channels
   free_response_channels: ""     # Comma-separated channel IDs where bot responds without @mention
   auto_thread: true              # Auto-create threads on @mention in channels
+  free_response_auto_thread: false  # Free-response channels also auto-thread (default: reply inline)
 ```
 
 - `require_mention` — when `true` (default), the bot only responds in server channels when mentioned with `@BotName`. DMs always work without mention.
 - `free_response_channels` — comma-separated list of channel IDs where the bot responds to every message without requiring a mention.
 - `auto_thread` — when `true` (default), mentions in channels automatically create a thread for the conversation, keeping channels clean (similar to Slack threading).
+- `free_response_auto_thread` — when `true`, channels in `free_response_channels` also auto-create a thread per top-level message. Default `false`: free-response channels reply inline. Requires `auto_thread: true`.
 
 ## Security
 
@@ -6397,6 +6497,7 @@ delegation:
   worktree_isolation: false                 # Give each child its own git worktree branched from HEAD (local backend + git repos only; inspired by Muse Code). See Subagent Delegation → Worktree Isolation.
   max_spawn_depth: 1                        # Delegation tree depth cap (1-3, clamped). 1 = flat (default): parent spawns leaves that cannot delegate. 2 = orchestrator children can spawn leaf grandchildren. 3 = three levels.
   orchestrator_enabled: true                # Global kill switch. When false, role="orchestrator" is ignored and every child is forced to leaf regardless of max_spawn_depth.
+  oneshot_max_children: 2                   # Total subagents a one-shot run (hermes chat -q / --oneshot) may spawn; 0 = unlimited. Interactive and gateway sessions are never capped by this.
 ```
 
 **Subagent provider:model override:** By default, subagents inherit the parent agent's provider and model. Set `delegation.provider` and `delegation.model` to route subagents to a different provider:model pair — e.g., use a cheap/fast model for narrowly-scoped subtasks while your primary agent runs an expensive reasoning model.
@@ -6422,6 +6523,8 @@ delegation:
 The delegation provider uses the same credential resolution as CLI/gateway startup. All configured providers are supported: `openrouter`, `nous`, `copilot`, `zai`, `kimi-coding`, `minimax`, `minimax-cn`. When a provider is set, the system automatically resolves the correct base URL, API key, and API mode — no manual credential wiring needed.
 
 **Precedence:** `delegation.base_url` in config → `delegation.provider` in config → parent provider (inherited). `delegation.model` in config → parent model (inherited). Setting just `model` without `provider` changes only the model name while keeping the parent's credentials (useful for switching models within the same provider like OpenRouter).
+
+**One-shot runs:** a finite `hermes chat -q` / `--oneshot` session has no later turn to consume delegated results and no later session to learn for, so it runs a smaller footprint: `skill_manage` is not offered (skills are still listed and loadable with `skill_view`), the skills prompt asks for domain skills only rather than process skills, and `oneshot_max_children` caps the total subagents the run may spawn (default `2`, `0` = unlimited). Past the cap `delegate_task` returns a tool error telling the agent to finish inline.
 
 **Width and depth:** `max_concurrent_children` caps how many subagents run in parallel per batch (default `3`, floor of 1, no ceiling). Can also be set via the `DELEGATION_MAX_CONCURRENT_CHILDREN` env var. When the model submits a `tasks` array longer than the cap, `delegate_task` returns a tool error explaining the limit rather than silently truncating. `max_spawn_depth` controls the delegation tree depth (clamped to 1-3). At the default `1`, delegation is flat: children cannot spawn grandchildren, and passing `role="orchestrator"` silently degrades to `leaf`. Raise to `2` so orchestrator children can spawn leaf grandchildren; `3` for three-level trees. The agent opts into orchestration per call via `role="orchestrator"`; `orchestrator_enabled: false` forces every child back to leaf regardless. Cost scales multiplicatively — at `max_spawn_depth: 3` with `max_concurrent_children: 3`, the tree can reach 3×3×3 = 27 concurrent leaf agents. See [Subagent Delegation → Depth Limit and Nested Orchestration](features/delegation.md#depth-limit-and-nested-orchestration) for usage patterns.
 
@@ -6739,7 +6842,17 @@ providers:
       CF-Access-Client-Secret: "yyyy"
 ```
 
-Header values routinely carry credentials — Hermes never logs them. `extra_headers` applies to OpenAI-compatible routes; the `anthropic_messages` and `bedrock_converse` API modes do not use it.
+Header values routinely carry credentials — Hermes never logs them. `extra_headers` applies to OpenAI-compatible routes and to `anthropic_messages` routes (the main client, `/model` switches, rebuilds and auxiliary clients alike); `bedrock_converse` does not use it. A relay behind a WAF that rejects the SDK's default `User-Agent` (403 "Your request was blocked" or a browser-challenge page) is the typical reason to set one — Hermes reports such a 403 as a firewall/CDN block rather than an API-key rejection.
+
+**`session_affinity_header`** — the NAME of a header that carries Hermes' conversation id on every request to that provider (main turn on `chat_completions`, `anthropic_messages` and `codex_responses`, plus auxiliary calls such as compression and titles). Off unless set — Hermes never sends a session identifier to an endpoint that did not ask for one. Session-aware proxies fronting a stateful backend (LiteLLM's `x-litellm-session-id`, self-hosted Claude/OpenAI gateways) otherwise have nothing to correlate an agent loop on and treat nearly every request as a new conversation, re-sending the whole history upstream on each turn. The value is opaque, stable across the turns of one conversation (including compaction), and different for every conversation:
+
+```yaml
+providers:
+  my-proxy:
+    api: http://127.0.0.1:4000/v1
+    api_key: sk-...
+    session_affinity_header: x-litellm-session-id
+```
 
 **`discover_models`** — set to `false` (default `true`) to skip querying the endpoint's `/models` listing and use only the `models` you configured on the entry. Handy for gateways whose model listing is slow, unreliable, or noisy:
 
@@ -9110,6 +9223,7 @@ services:
     volumes:
       - ~/.hermes:/opt/data
       - /run/user/${HERMES_UID}/pulse:/run/user/${HERMES_UID}/pulse
+      # no-tmp: ok — path inside the container
       - ~/.config/pulse/cookie:/tmp/pulse-cookie:ro
       - ./asound.conf:/etc/asound.conf:ro
     environment:
@@ -9117,6 +9231,7 @@ services:
       - HERMES_GID=${HERMES_GID}
       - XDG_RUNTIME_DIR=/run/user/${HERMES_UID}
       - PULSE_SERVER=unix:/run/user/${HERMES_UID}/pulse/native
+      # no-tmp: ok — path inside the container
       - PULSE_COOKIE=/tmp/pulse-cookie
 ```
 
@@ -9801,7 +9916,7 @@ In the interactive CLI, dangerous commands show an inline approval prompt:
 
 ```
   ⚠️  DANGEROUS COMMAND: recursive delete
-      rm -rf /tmp/old-project
+      rm -rf ~/old-project
 
       [o]nce  |  [s]ession  |  [a]lways  |  [d]eny
 
@@ -10104,6 +10219,7 @@ _BASE_SECURITY_ARGS = [
     "--cap-add", "FOWNER",                        # Package managers need file ownership
     "--security-opt", "no-new-privileges",         # Block privilege escalation
     "--pids-limit", "256",                         # Limit process count
+    # no-tmp: ok — configures the sandbox's own tmpfs
     "--tmpfs", "/tmp:rw,nosuid,size=512m",         # Size-limited /tmp
     "--tmpfs", "/var/tmp:rw,noexec,nosuid,size=256m",  # No-exec /var/tmp
 ]
@@ -10230,7 +10346,7 @@ auth:
   adopt_external_logins: false   # default: true
 ```
 
-With the switch off Hermes never reads or refreshes those files: the `claude_code` credential-pool row disappears, `hermes auth list` prints one line saying so, and the log carries one INFO line per process. Only automatic adoption is affected — `hermes auth add openai-codex` still asks before importing an existing Codex CLI login. Add your own logins with `hermes auth add anthropic` / `hermes auth add openai-codex`.
+With the switch off Hermes never reads or refreshes those files: the `claude_code` credential-pool row disappears, `hermes auth list` prints one line saying so, and the log carries one INFO line per process. Only automatic adoption is affected — `hermes auth add openai-codex` still asks before importing an existing Codex CLI login. Automatic recovery also only repairs the credential Hermes already holds: a Codex CLI/Desktop login into a different ChatGPT workspace is refused with a warning (re-authenticate with `hermes auth add openai-codex`), and a login you complete while recovery is running is never overwritten. Add your own logins with `hermes auth add anthropic` / `hermes auth add openai-codex`.
 
 ### What Each Sandbox Filters
 
@@ -11197,7 +11313,7 @@ Parsing stops at the first token that isn't an installed skill, so arguments
 that happen to start with `/` (like file paths) are never swallowed:
 
 ```bash
-/ocr-and-documents /tmp/scan.pdf extract the tables   # loads one skill; /tmp/scan.pdf is the argument
+/ocr-and-documents ~/.hermes/cache/scratch/scan.pdf extract the tables   # loads one skill; ~/.hermes/cache/scratch/scan.pdf is the argument
 ```
 
 For combinations you use repeatedly, prefer a [skill bundle](#skill-bundles) —
@@ -13842,6 +13958,7 @@ monorepo/                   (git root, cwd = packages/webapp/)
         └── AGENTS.md      ← Loaded last (most specific, takes precedence)
 ```
 
+<!-- no-tmp: ok — explains why /tmp is never trusted -->
 Outside a git repository, only the working directory itself is checked — parents are never consulted, so an `AGENTS.md` planted in `/tmp` or `$HOME` can't leak into unrelated sessions.
 
 ### Progressive Subdirectory Discovery
@@ -15393,7 +15510,7 @@ Auto-tracks and removes ephemeral files created during sessions — test scripts
 
 | Hook | Behaviour |
 |---|---|
-| `post_tool_call` | When `write_file` / `terminal` / `patch` creates a file matching `test_*`, `tmp_*`, or `*.test.*` inside `HERMES_HOME` or `/tmp/hermes-*`, track it silently as `test` / `temp` / `cron-output`. |
+| `post_tool_call` | When `write_file` / `terminal` / `patch` creates a file matching `test_*`, `tmp_*`, or `*.test.*` inside `HERMES_HOME` or `/tmp/hermes-*`, track it silently as `test` / `temp` / `cron-output`. | <!-- no-tmp: ok — documents the plugin's scope guard -->
 | `on_session_end` | If any test files were auto-tracked during the turn, run the safe `quick` cleanup and log a one-line summary. Stays silent otherwise. |
 
 **Deletion rules:**
@@ -15427,6 +15544,7 @@ Auto-tracks and removes ephemeral files created during sessions — test scripts
 | `tracked.json.bak` | Atomic-write backup of the above |
 | `cleanup.log` | Append-only audit trail of every track / skip / reject / delete |
 
+<!-- no-tmp: ok — documents the plugin's scope guard -->
 **Safety** — cleanup only ever touches paths under `HERMES_HOME` or `/tmp/hermes-*`. Windows mounts (`/mnt/c/...`) are rejected. Well-known top-level state dirs (`logs/`, `memories/`, `sessions/`, `cron/`, `cache/`, `skills/`, `plugins/`, `disk-cleanup/` itself) are never removed even when empty — a fresh install does not get gutted on first session end. User project trees (`workspace/`, `projects/`, `plans/`, `home/`) are never tracked or swept at all: a `test_*.py` or `tmp_*` file inside your project is source code, not scratch. `kanban/` (task attachments and workspaces) is never tracked either, and a tracked *directory* under a protected top level such as `cache/` is never removed — only the files inside it age out.
 
 **Enabling:** `hermes plugins enable disk-cleanup` (or check the box in `hermes plugins`).
@@ -15589,7 +15707,7 @@ Lets the agent **join, transcribe, and participate in Google Meet calls** — ta
 **What it adds:**
 
 - A headless virtual participant that joins a Meet URL using browser automation
-- Live transcription of the meeting audio via the configured STT provider
+- Live transcription derived from Meet's own live captions (the bot never decodes the meeting audio, so no STT billing — and captions are lossy and English-biased)
 - A `meet_join` / `meet_status` / `meet_transcript` / `meet_leave` / `meet_say` toolset the agent invokes to join calls, poll the live transcript, and act on what it heard
 - Post-meeting artifacts (transcript, status) saved under `~/.hermes/workspace/meetings/<meeting_id>/`
 
@@ -15608,6 +15726,8 @@ Usage from chat:
 > "Join meet.google.com/abc-defg-hij and take notes. After the call, send me a summary with action items."
 
 The agent kicks off the meeting join, streams the transcription back into its context as the call proceeds, and produces a structured summary when the meeting ends (or when you tell it to stop).
+
+**Realtime mode (`mode='realtime'`) is speak-only on the audio side.** The bot's replies are synthesized by OpenAI Realtime and played into the call through a virtual microphone; what it *hears* is still the caption stream, not the meeting audio — nothing from the call is sent to the Realtime session. `meet_status` reports `micState` (`unmuted`, `unmuted_clicked` when the bot had to unmute itself after admission, or `unknown` when Meet's toggle was not found) so a silent bot can be diagnosed.
 
 **When to use it:** recurring standups where you want a bot to transcribe + summarize for async attendees; deposition-style interviews where you want structured notes; any case where you'd otherwise need Fireflies / Otter / Grain. When you'd rather not have an AI listening in — don't enable it.
 
@@ -16129,6 +16249,22 @@ cron:
   retry_unreachable: false   # default true; disables the automatic re-runs
 ```
 
+### Holding a job through a closed provider usage window
+
+The mirror case: the provider says exactly how long it will stay closed. When
+the scheduler resolves a subscription provider (currently the OpenAI Codex
+usage probe) and the provider reports its usage limit exhausted with a
+`retry after <N>s` hint (often many hours), and the whole fallback chain is
+unavailable, re-firing a sub-hourly job into that window is guaranteed to fail
+identically on every tick — and to alert every time. A 429 the model API
+returns mid-run is not held this way; it is retried on the normal cadence.
+
+Instead, the scheduler **parks the job**: the one failure alert says the
+window is closed and that the job is held, `next_run_at` moves to the first
+scheduled occurrence after the window (`quota_hold_until` on the job record),
+and nothing fires or alerts until then. Any run that reaches the model clears
+the hold. One-shot jobs are not held.
+
 ### Failure incidents: alert once, remind on a cooldown, acknowledge
 
 A recurring job that keeps failing with the *same* error alerts you **once**,
@@ -16380,7 +16516,8 @@ Only the job's **own conversation** is ever touched:
 
 - the **origin chat** the job was created in;
 - the **home-channel fallback** when `deliver: origin` captured no origin (jobs
-  created by scripts or the API rather than from a live gateway chat) — the
+  created by scripts, or from a session on the request/response `api_server`
+  platform, which cannot receive a delivery) — the
   user's primary conversation standing in for the origin;
 - a job's **single explicit `platform:chat` target**, but only when the job
   itself opts in with `attach_to_session: true` — the job author declares that
@@ -16925,8 +17062,8 @@ cronjob(action="create", name="process-feed",
 ```bash
 #!/bin/bash
 # ~/.hermes/scripts/flag-ready.sh
-if test -f /tmp/new-data-ready; then
-  rm -f /tmp/new-data-ready
+if test -f ~/.hermes/cache/scratch/new-data-ready; then
+  rm -f ~/.hermes/cache/scratch/new-data-ready
   echo '{"wakeAgent": true}'
 else
   echo '{"wakeAgent": false}'
@@ -17555,6 +17692,8 @@ delegate_task(
 - `delegation.orchestrator_enabled: false`: global kill switch that forces every child to `leaf` regardless of the `role` parameter.
 
 **Cost warning:** With `max_spawn_depth: 3` and `max_concurrent_children: 3`, the tree can reach 3×3×3 = 27 concurrent leaf agents. Each extra level multiplies spend — raise `max_spawn_depth` intentionally.
+
+**One-shot runs are capped separately.** `hermes chat -q` / `--oneshot` sessions may spawn at most `delegation.oneshot_max_children` subagents in total (default `2`, `0` = unlimited). A one-shot run has no later turn to receive results, and in benchmark trajectories most of its spawns were "independently review my own work" rather than parallel work — each such child re-pays a cold system prompt and re-reads the repo. Interactive and gateway sessions are unaffected.
 
 ## Lifetime and Durability
 
@@ -19672,31 +19811,31 @@ The judge call is small (~200 output tokens) and runs once per turn, so a cheap 
 ## Example walkthrough
 
 ```
-You: /goal Create four files /tmp/note_{1..4}.txt, one per turn, each containing its number as text
+You: /goal Create four files ~/.hermes/cache/scratch/note_{1..4}.txt, one per turn, each containing its number as text
 
-  ⊙ Goal set (20-turn budget): Create four files /tmp/note_{1..4}.txt, one per turn, each containing its number as text
+  ⊙ Goal set (20-turn budget): Create four files ~/.hermes/cache/scratch/note_{1..4}.txt, one per turn, each containing its number as text
 
-Hermes: Creating /tmp/note_1.txt now.
-  💻 echo "1" > /tmp/note_1.txt   (0.1s)
-  I've created /tmp/note_1.txt with the content "1". I'll continue with the remaining files on the next turn as you specified.
+Hermes: Creating ~/.hermes/cache/scratch/note_1.txt now.
+  💻 echo "1" > ~/.hermes/cache/scratch/note_1.txt   (0.1s)
+  I've created ~/.hermes/cache/scratch/note_1.txt with the content "1". I'll continue with the remaining files on the next turn as you specified.
 
   ↻ Continuing toward goal (1/20): Only 1 of 4 files has been created; 3 files remain.
 
 Hermes: [Continuing toward your standing goal]
-  💻 echo "2" > /tmp/note_2.txt   (0.1s)
-  Created /tmp/note_2.txt. Two more to go.
+  💻 echo "2" > ~/.hermes/cache/scratch/note_2.txt   (0.1s)
+  Created ~/.hermes/cache/scratch/note_2.txt. Two more to go.
 
   ↻ Continuing toward goal (2/20): 2 of 4 files created; 2 remain.
 
 Hermes: [Continuing toward your standing goal]
-  💻 echo "3" > /tmp/note_3.txt   (0.1s)
-  Created /tmp/note_3.txt.
+  💻 echo "3" > ~/.hermes/cache/scratch/note_3.txt   (0.1s)
+  Created ~/.hermes/cache/scratch/note_3.txt.
 
   ↻ Continuing toward goal (3/20): 3 of 4 files created; 1 remains.
 
 Hermes: [Continuing toward your standing goal]
-  💻 echo "4" > /tmp/note_4.txt   (0.1s)
-  All four files have been created: /tmp/note_1.txt through /tmp/note_4.txt, each containing its number.
+  💻 echo "4" > ~/.hermes/cache/scratch/note_4.txt   (0.1s)
+  All four files have been created: ~/.hermes/cache/scratch/note_1.txt through ~/.hermes/cache/scratch/note_4.txt, each containing its number.
 
   ✓ Goal achieved: All four files were created with the specified content, completing the goal.
 
@@ -22760,7 +22899,7 @@ tts:
     voice: "en-US-AriaNeural"      # 322 voices, 74 languages
   elevenlabs:
     voice_id: "pNInz6obpgDQGcFmaJgB"    # Adam
-    model_id: "eleven_multilingual_v2"
+    model_id: "eleven_multilingual_v2"   # or eleven_v3, eleven_flash_v2_5, ... (Desktop Settings → Voice accepts any model id)
   openai:
     model: "gpt-4o-mini-tts"
     voice: "alloy"                 # alloy, echo, fable, onyx, nova, shimmer
@@ -23998,13 +24137,27 @@ When a user attaches an image — from the CLI clipboard, the gateway (Telegram/
 
 You don't configure this — Hermes looks up your current model's capability in the provider metadata and picks the right path automatically. The practical effect: you can switch between vision and non-vision models mid-session and image handling "just works" without changing your workflow. Text-only models get coherent context about the image rather than a broken multimodal payload they'd have to reject.
 
+To override the automatic choice, set `agent.image_input_mode` in `config.yaml`:
+
+| Value | Behavior |
+|-------|----------|
+| `auto` (default) | Native pixels when the model reports vision support, `vision_analyze` description otherwise. Configuring an explicit `auxiliary.vision` backend (a `provider` other than `auto`, or a `model` / `base_url`) also selects the description path, even for a vision-capable main model. |
+| `native` | Always attach pixels, even when the catalog says the model is text-only. |
+| `text` | Always route images through the `vision_analyze` describer, never attach pixels to the main request. |
+
+This is the knob to reach for when a backend accepts text but rejects native image input (for example an `openai-codex` account whose backend answers image requests with `server_error`): keep your main model and point `auxiliary.vision` at a different vision-capable provider and model (with `auxiliary.vision.provider: auto` the describer would auto-detect the same main model again). That alone switches images to the description path in `auto` mode; `agent.image_input_mode: text` makes the same choice explicit.
+
 Which auxiliary model handles the text-description path is configurable under `auxiliary.vision` — see [Auxiliary Models](../configuration.md#auxiliary-models).
 
 ### `vision_analyze` has the same dual behavior
 
-The `vision_analyze` tool itself follows the same routing. When the active main model is vision-capable **and** its provider supports image content inside tool results (currently the Anthropic, OpenAI, Azure-OpenAI, and Gemini 3.x stacks), `vision_analyze` short-circuits the auxiliary describer and returns the raw image pixels as a multimodal tool-result envelope. The main model sees the image natively on its next turn — no aux call, no text-summary information loss, no extra latency.
+The `vision_analyze` tool itself follows the same routing. When the active main model is vision-capable **and** its provider supports image content inside tool results (currently the Anthropic, OpenAI, Azure-OpenAI, and Gemini 3.x stacks), `vision_analyze` short-circuits the auxiliary describer and returns the raw image pixels as a multimodal tool-result envelope. The main model sees the image natively on its next turn — no aux call, no text-summary information loss, no extra latency. One exception: an image that is already attached natively to the current user message is not re-embedded — `vision_analyze` on that same path returns a short text result saying the image is already in context (pass a `region` to zoom into part of it, which does embed the crop).
 
 For text-only main models (or providers whose tool-result channel doesn't carry images), `vision_analyze` falls back to the legacy path: it asks the configured auxiliary vision model to describe the image and returns the description as plain text. Either way the calling tool signature is the same — the tool decides which path to take at runtime based on the active model.
+
+### SVG and other non-raster images on Responses backends
+
+Responses-style backends (for example `openai-codex`) accept only inline JPEG, PNG, GIF and WebP; any other `data:image/*` part makes them reject the **whole** request, and because the part stays in history every later turn fails the same way. Hermes handles this at the send layer: an inline **SVG** is rasterized to PNG when a rasterizer is installed (`cairosvg`, `svglib`+`reportlab`, `rsvg-convert`, or `inkscape` — the same soft dependencies `vision_analyze` uses), so the model still sees the drawing. Without a rasterizer, an SVG — and any other unsupported inline format such as BMP or TIFF — is replaced by a short text placeholder (`[image omitted: image/svg+xml is not a supported image format]`) while the valid images in the same message are still sent.
 
 ### Native embeds ride the session: `vision.embed_target_bytes` and `vision.max_calls_per_image`
 
@@ -24207,6 +24360,64 @@ The **OpenAI (Codex auth)** provider does not offer 2.5. The Codex backend
 accepts any `model` value (including nonexistent ids) and generates with its
 own server-managed engine, so a "selected" Flare or Sunburst tier would be a
 label with no effect. Pick the direct OpenAI API provider or FAL for 2.5.
+
+### Custom OpenAI-compatible image endpoint
+
+The **OpenAI** provider can point at any OpenAI-compatible `/v1/images/generations`
+endpoint (a local gateway, a task-scoped proxy, a third-party API gateway),
+independently of the chat provider, and take its key from a variable of your choice:
+
+```yaml
+image_gen:
+  provider: openai
+  openai:
+    model: gpt-image-2-medium
+    base_url: http://localhost:18081/v1   # → OPENAI_BASE_URL → api.openai.com
+    key_env: IMAGE_GATEWAY_TOKEN          # → OPENAI_API_KEY
+```
+
+Only the variable *name* is stored in `config.yaml`; the secret stays in `.env`
+or the process environment. Availability checks and
+generation use the same resolution, so a configured `key_env` is enough — no
+`OPENAI_API_KEY` is required. Requests go through Hermes' own HTTP client, which
+honours `HTTP(S)_PROXY`/`NO_PROXY` but ignores macOS system proxies (whose
+exception list is invisible to Python), so `localhost` endpoints connect directly.
+The `OpenAI-Project` header is sent blank on image requests: an `OPENAI_PROJECT_ID`
+set for chat otherwise makes the image endpoint return 403 `model_not_found` on
+projects with a model allow-list, while the key itself already carries the project.
+
+**Gateway model names.** Catalog ids are mapped for OpenAI: `gpt-image-2-medium`
+is sent as `model: gpt-image-2` + `quality: medium`. Any other value of
+`image_gen.openai.model` (or `OPENAI_IMAGE_MODEL`) is sent verbatim as `model`
+with **no** `quality` field, so a gateway that serves its own image model names
+(`custom-image-model`, `grok-imagine-image`, ...) receives exactly that id and
+never sees a quality enum it might reject. The shared top-level `image_gen.model`
+is never passed through — it can hold another provider's id (a FAL path, for
+instance) from an earlier selection.
+
+**Reusing a named custom endpoint.** If the gateway is already declared under
+`providers:` for chat, point the image provider at it by *name* instead of
+repeating its URL and key:
+
+```yaml
+providers:
+  my-gateway:
+    name: My Gateway
+    api: https://gateway.example.com/v1
+    key_env: MY_GATEWAY_KEY
+
+image_gen:
+  provider: openai
+  openai:
+    provider: my-gateway        # inherits api + key_env from providers.my-gateway
+    model: grok-imagine-image   # sent verbatim, no quality
+```
+
+Resolution order is `image_gen.openai.base_url` → the named endpoint's URL →
+`OPENAI_BASE_URL`, and the variable named by `image_gen.openai.key_env` → the
+named endpoint's `api_key`/`key_env` → `OPENAI_API_KEY`; an explicit `base_url`
+or `key_env` next to `provider` therefore overrides that part of the endpoint. A
+name that matches no `providers:` entry is logged as a warning and ignored.
 
 ## Usage
 
@@ -24425,8 +24636,12 @@ tts:
     model: "gpt-4o-mini-tts"
     voice: "alloy"              # alloy, echo, fable, onyx, nova, shimmer
     base_url: "https://api.openai.com/v1"  # Override for OpenAI-compatible TTS endpoints
+    pcm_sample_rate: 24000      # Streaming PCM rate expected from the endpoint (auto-overridden by X-Audio-Sample-Rate)
     speed: 1.0                  # 0.25 - 4.0
     # language: "es"            # Sent as lang_code — only for OpenAI-compatible endpoints that support it (e.g. Kokoro)
+    # consent_attestation: "I have the speaker's consent"  # Required by some OpenAI-compatible servers for cloned voices
+  streaming:
+    min_len: 20                 # Streaming TTS: shortest first sentence (chars) spoken on its own; CJK setups use ~6
   minimax:
     region: "global"           # "global" or "cn"; see selection rules below
     model: "speech-02-hd"     # speech-02-hd (default), speech-02-turbo
@@ -24513,7 +24728,11 @@ tts:
 
 The rewrite uses `auxiliary.tts_audio_tags` and defaults to your main chat model. Override that auxiliary task if you want tag insertion handled by a cheaper or faster model.
 
+**Streaming sample rate (OpenAI-compatible endpoints)**: streaming playback receives headerless raw PCM, so Hermes must know its sample rate. The official OpenAI API emits 24 kHz. A compatible server that reports its rate — the `X-Audio-Sample-Rate` response header, or `rate=` in the `Content-Type` (`audio/pcm; rate=44100`) — is honored automatically: the speaker, the temp-WAV player and the gateway audio stream all open at the reported rate once the response arrives. For servers that report nothing, set `tts.openai.pcm_sample_rate` to the endpoint's output rate (e.g. `22050` for Piper-backed servers); otherwise speech plays at the wrong speed and pitch. Invalid values log a warning and fall back to `24000`.
+
 **Language (OpenAI-compatible endpoints)**: `tts.openai.language` is forwarded to the endpoint as a `lang_code` request parameter. It is intended for OpenAI-compatible TTS servers that support `lang_code` — for example [Kokoro-FastAPI](https://github.com/remsky/Kokoro-FastAPI), where `language: "es"` selects the Spanish phonemizer instead of the English default. Leave it unset when using the official OpenAI API, which does not accept this parameter. When unset, nothing extra is sent.
+
+**Cloned-voice consent (OpenAI-compatible endpoints)**: some self-hosted OpenAI-compatible TTS servers reject a cloned voice with `400 consent_required` unless the request carries a `consent_attestation` field. Set `tts.openai.consent_attestation` to the attestation text your server expects; Hermes forwards it verbatim in the request body on every OpenAI-compatible path (whole-file synthesis, streaming, and the desktop's client-direct voice). Leave it unset for the official OpenAI API — when unset, the field is not sent.
 
 
 ### Input length limits
@@ -25764,6 +25983,13 @@ The generated plist lives at `~/Library/LaunchAgents/ai.hermes.gateway.plist`. I
 launchd plists are static — if you install new tools (e.g. a new Node.js version via nvm, or ffmpeg via Homebrew) after setting up the gateway, run `hermes gateway install` again to capture the updated PATH. The gateway will detect the stale plist and reload automatically.
 :::
 
+:::tip Picking up new credentials after `hermes auth add` / `hermes auth reset`
+Agents run as threads inside the one gateway process; the only child processes are tool subprocesses (terminal commands, browsers), which never hold provider credentials. A running gateway also re-reads the `openai-codex` login it seeded from `auth.json` the next time its pool selects that entry after it had gone `exhausted` or `dead` (entries added with `hermes auth add openai-codex` are independent accounts and are not resynced). When you want every session on the fresh login at once, restart the gateway — but prefer the drain-aware path over a bare kill:
+
+- `hermes gateway restart` asks the gateway (SIGUSR1) to refuse new turns, waits up to `agent.restart_after_turn_timeout` (default 1800 s) for in-flight turns to finish, exits, and lets launchd's `KeepAlive` relaunch it; the new process reads `auth.json` from scratch.
+- `launchctl kickstart -k gui/$UID/ai.hermes.gateway` sends SIGTERM instead: the gateway interrupts in-flight chat turns after `agent.restart_drain_timeout` (default `0` — immediately; the user is told and the turn resumes on their next message), gives cron runs `agent.cron_drain_timeout` (default 30 s), kills tool subprocesses and exits, then launchd relaunches it. Nothing from the old process survives, so a session that still fails with `401` after the relaunch is talking to a different gateway process — check `hermes gateway status` (and `launchctl list | grep hermes`) for a second PID, such as a manually started `hermes gateway run`, and stop that one too.
+:::
+
 :::info Multiple installations
 Like the Linux systemd service, each `HERMES_HOME` directory gets its own launchd label. The default `~/.hermes` uses `ai.hermes.gateway`; other installations use `ai.hermes.gateway-<suffix>`.
 :::
@@ -26154,6 +26380,37 @@ Notes:
   A hard crash leaves the last-known status — the inherent limitation of a
   profile-text indicator.
 - Off by default, since it mutates the bot's global profile.
+
+### Cold-boot pending queue (Optional)
+
+By default the adapter drops server-side pending updates on a cold boot
+(`drop_pending_updates=True` on the first `start_polling`). That fits
+always-on servers: a restart means "clean up," and the queue is treated as
+stale. It does not fit hosts that turn off (a desktop shut down overnight):
+messages sent while the gateway is offline sit in Telegram's Bot API queue,
+and the next boot discards them before Hermes ever sees them — silently, no
+log, no retry.
+
+Set `drop_pending_on_cold_boot: false` to receive that backlog in order on
+startup instead:
+
+```yaml
+platforms:
+  telegram:
+    extra:
+      drop_pending_on_cold_boot: false
+```
+
+Notes:
+
+- Default is `true`: existing behavior is unchanged unless you opt in.
+- Watcher reconnects (brief network outages with the process still alive)
+  always preserve the queue regardless of this setting.
+- Conflict recovery still drops pending updates to terminate the competing
+  `getUpdates` session — that path is unrelated to this knob.
+- After a crash, a preserved queue can redeliver an update the crashed
+  instance partially processed. Telegram's offset usually prevents this,
+  but time-sensitive commands sent during a long outage will run on boot.
 
 ### Command menu priority and cap (Optional)
 
@@ -27465,7 +27722,7 @@ Before setup, here's the part most people want to know: how Hermes behaves once 
 |---------|----------|
 | **DMs** | Hermes responds to every message. No `@mention` needed. Each DM has its own session. |
 | **Server channels** | By default, Hermes only responds when you `@mention` it. If you post in a channel without mentioning it, Hermes ignores the message. |
-| **Free-response channels** | You can make specific channels mention-free with `DISCORD_FREE_RESPONSE_CHANNELS`, or disable mentions globally with `DISCORD_REQUIRE_MENTION=false`. Messages in these channels are answered inline — auto-threading is skipped so the channel stays a lightweight chat. |
+| **Free-response channels** | You can make specific channels mention-free with `DISCORD_FREE_RESPONSE_CHANNELS`, or disable mentions globally with `DISCORD_REQUIRE_MENTION=false`. Messages in these channels are answered inline by default — auto-threading is skipped so the channel stays a lightweight chat. Set `discord.free_response_auto_thread: true` to get both mention-free replies and a thread per top-level message. |
 | **Threads** | Hermes replies in the same thread. Mention rules still apply unless that thread or its parent channel is configured as free-response. Threads stay isolated from the parent channel for session history. |
 | **Shared channels with multiple users** | By default, Hermes isolates session history per user inside the channel for safety and clarity. Two people talking in the same channel do not share one transcript unless you explicitly disable that. |
 | **Messages mentioning other users** | When `DISCORD_IGNORE_NO_MENTION` is `true` (the default), Hermes stays silent if a message @mentions other users but does **not** mention the bot. This prevents the bot from jumping into conversations directed at other people. Set to `false` if you want the bot to respond to all messages regardless of who is mentioned. This only applies in server channels, not DMs. |
@@ -27755,6 +28012,7 @@ Discord behavior is controlled through two files: **`~/.hermes/.env`** for crede
 | `DISCORD_FREE_RESPONSE_CHANNELS` | No | — | Comma-separated channel IDs where the bot responds without requiring an `@mention`, even when `DISCORD_REQUIRE_MENTION` is `true`. |
 | `DISCORD_IGNORE_NO_MENTION` | No | `true` | When `true`, the bot stays silent if a message `@mentions` other users but does **not** mention the bot. Prevents the bot from jumping into conversations directed at other people. Only applies in server channels, not DMs. |
 | `DISCORD_AUTO_THREAD` | No | `true` | When `true`, automatically creates a new thread for every `@mention` in a text channel, so each conversation is isolated (similar to Slack behavior). Messages already inside threads or DMs are unaffected. |
+| `DISCORD_FREE_RESPONSE_AUTO_THREAD` | No | `false` | When `true`, free-response channels (listed in `DISCORD_FREE_RESPONSE_CHANNELS`) also auto-create a thread for each top-level message, while staying mention-free. Default `false` preserves the lightweight inline-chat behavior. Requires `DISCORD_AUTO_THREAD=true`; `DISCORD_NO_THREAD_CHANNELS` still wins, and voice-linked channels always ignore it. |
 | `DISCORD_ALLOW_BOTS` | No | `"none"` | Controls how the bot handles messages from other Discord bots. `"none"` — ignore all other bots. `"mentions"` — only accept bot messages that `@mention` Hermes. `"all"` — accept all bot messages. By default, either enabled mode still requires a literal inline mention; see the next setting. |
 | `DISCORD_BOTS_REQUIRE_INLINE_MENTION` | No | `true` | Require a literal `<@BOT_ID>` / `<@!BOT_ID>` token to start a bot handoff. Reply metadata alone does not start one. Brief same-sender/channel continuations are admitted as described below. Set to `false` only for trusted relays needing legacy admission. Human messages are unaffected. |
 | `DISCORD_REACTIONS` | No | `true` | When `true`, the bot adds emoji reactions to messages during processing (👀 when starting, ✅ on success, ❌ on error). Set to `false` to disable reactions entirely. |
@@ -27811,6 +28069,7 @@ discord:
   bots_require_inline_mention: true  # Bot authors must type a literal @mention (default: true)
   free_response_channels: ""      # Comma-separated channel IDs (or YAML list)
   auto_thread: true               # Auto-create threads on @mention
+  free_response_auto_thread: false # If true, free_response_channels also auto-thread (default: inline)
   reactions: true                 # Add emoji reactions during processing
   ignored_channels: []            # Channel IDs where bot never responds
   no_thread_channels: []          # Channel IDs where bot responds without threading
@@ -27876,7 +28135,27 @@ discord:
 
 If a thread's parent channel is in this list, the thread also becomes mention-free.
 
-Free-response channels also **skip auto-threading** — the bot replies inline rather than spinning off a new thread per message. This keeps the channel usable as a lightweight chat surface. If you want threading behavior, don't list the channel as free-response (use normal `@mention` flow instead).
+Free-response channels also **skip auto-threading** by default — the bot replies inline rather than spinning off a new thread per message. This keeps the channel usable as a lightweight chat surface.
+
+To opt in to threading for free-response channels, set `discord.free_response_auto_thread: true` (or `DISCORD_FREE_RESPONSE_AUTO_THREAD=true`). In that mode each new top-level message in a free channel still gets its own thread, but the channel remains @mention-free. Requires `discord.auto_thread: true`.
+
+#### `discord.free_response_auto_thread`
+
+**Type:** boolean — **Default:** `false`
+
+When `true`, channels listed in `discord.free_response_channels` also auto-create a thread for each top-level message, instead of answering inline. The channel stays mention-free; it only changes where the conversation lives.
+
+```yaml
+discord:
+  free_response_channels:
+    - 1234567890
+  auto_thread: true                # required — this flag refines it
+  free_response_auto_thread: true  # thread every top-level message there
+```
+
+Requires `discord.auto_thread: true` (with it off, nothing threads anywhere). [`discord.no_thread_channels`](#discordno_thread_channels) still wins, voice-linked text channels always reply inline, and reply-type messages are never auto-threaded.
+
+`DISCORD_FREE_RESPONSE_AUTO_THREAD` wins over the `config.yaml` key when both are set — the YAML value only seeds the env var when it isn't already set, like every other `discord.*` bridge.
 
 #### `discord.auto_thread`
 
@@ -27884,7 +28163,7 @@ Free-response channels also **skip auto-threading** — the bot replies inline r
 
 When enabled, every `@mention` in a regular text channel automatically creates a new thread for the conversation. This keeps the main channel clean and gives each conversation its own isolated session history. Once a thread is created, subsequent messages in that thread don't require `@mention` — the bot knows it's already participating. Set [`thread_require_mention`](#discordthread_require_mention) to `true` to disable this in-thread shortcut for multi-bot setups.
 
-Messages sent in existing threads or DMs are unaffected by this setting. Channels listed in `discord.free_response_channels` or `discord.no_thread_channels` also bypass auto-threading and get inline replies instead.
+Messages sent in existing threads or DMs are unaffected by this setting. Channels listed in `discord.no_thread_channels`, and channels listed in `discord.free_response_channels` unless [`discord.free_response_auto_thread`](#discordfree_response_auto_thread) is `true`, also bypass auto-threading and get inline replies instead.
 
 #### `discord.reactions`
 
@@ -28775,7 +29054,7 @@ If you maintain your Slack manifest by hand and just want the slash
 command list:
 
 ```bash
-hermes slack manifest --slashes-only > /tmp/slashes.json
+hermes slack manifest --slashes-only > ~/.hermes/cache/scratch/slashes.json
 ```
 
 Paste that array into the `features.slash_commands` key of your
@@ -32890,9 +33169,9 @@ You need at least one way to connect to an LLM. Use `hermes model` to switch pro
 | **LM Studio** | `hermes model` → "LM Studio" (provider: `lmstudio`, optional `LM_API_KEY`) |
 | **Custom Endpoint** | `hermes model` → choose "Custom endpoint" (saved in `config.yaml`) |
 
-Both built-in OpenCode providers send an opaque, per-conversation `x-opencode-session` header on every request (main turns on every transport plus auxiliary calls such as compression, titles, approval checks, skills-hub lookups and `/btw` side questions — including the ones that run in the background after the turn has ended; headless Kanban `specify`/`decompose` and dashboard estimate calls use a per-task key). OpenCode uses it to pin a conversation to one backend so its prompt cache stays warm; the value is derived from the Hermes session id (or the Kanban task id) and carries no personal data.
+Both built-in OpenCode providers send an opaque, per-conversation `x-opencode-session` header on every request (main turns on every transport plus auxiliary calls such as compression, titles, approval checks, skills-hub lookups and `/btw` side questions — including the ones that run in the background after the turn has ended; headless Kanban `specify`/`decompose` and dashboard estimate calls use a per-task key; one-shots with no live session at all, such as Desktop commit-message generation from the review panel, send a fresh ephemeral key). OpenCode uses it to pin a conversation to one backend so its prompt cache stays warm; the value is derived from the Hermes session id (or the Kanban task id) and carries no personal data.
 
-The two built-in OpenCode providers each pin their own relay on `opencode.ai` (`opencode-zen` → `/zen/v1`, `opencode-go` → `/zen/go/v1`). A `model.base_url` left behind by the other relay is healed to the selected provider's relay, and the model you pick (`-m`, `/model`, a fallback entry or a channel override) decides which relay is used — so switching from a Zen model to a Go-only one never sends the request to Zen. A custom provider you define under `providers:` whose name extends a family slug (for example `opencode-go-bridge`) still gets the family's per-model API-mode routing and `/v1` handling, but its `base_url` is taken as declared: name it after the relay it actually points at.
+The two built-in OpenCode providers each pin their own relay on `opencode.ai` (`opencode-zen` → `/zen/v1`, `opencode-go` → `/zen/go/v1`). A `model.base_url` left behind by the other relay is healed to the selected provider's relay, and the model you pick (`-m`, `/model`, a fallback entry or a channel override) decides which relay is used — so switching from a Zen model to a Go-only one never sends the request to Zen. The same per-model routing is re-applied when a session is resumed (`hermes --resume`, `/resume`, the TUI and desktop resume paths): a wire format or relay URL recorded while the session ran a different OpenCode model never carries over to the model the session is reopened on. OpenCode models whose id carries a `-vision` marker (for example `deepseek-v4-flash-vision-exp`) are treated as vision-capable even before models.dev lists them, so `agent.image_input_mode: auto` attaches images natively without a `supports_vision` override. A custom provider you define under `providers:` whose name extends a family slug (for example `opencode-go-bridge`) still gets the family's per-model API-mode routing and `/v1` handling, but its `base_url` is taken as declared: name it after the relay it actually points at. Auxiliary tasks (`auxiliary.compression`, titles, vision, MoA) pointed at an OpenCode provider follow the same per-model table, so a Responses-only model such as `gpt-5.6-luna` or an Anthropic-wire one such as `minimax-m2.5` works there exactly as it does for the main conversation.
 
 For the official API-key path, see the dedicated [Google Gemini guide](../guides/google-gemini.md).
 
@@ -33537,6 +33816,7 @@ model:
   provider: custom
   base_url: http://localhost:8000/v1
   api_key: your-key-or-leave-empty-for-local
+  # key_env: MY_PROVIDER_API_KEY  # env var holding the key (alternative to api_key)
 ```
 
 :::warning Legacy env vars
@@ -33976,6 +34256,8 @@ The model outputs something like `{"name": "web_search", "arguments": {...}}` as
 
 **Fix:** Set context to at least **64,000 tokens** for agent use. See each server's section above for the specific flag.
 
+The startup refusal for a local endpoint (`127.0.0.1`, LAN, Docker service names) says which window the server is serving and names the fix for any OpenAI-compatible server, not just Ollama: raise the server's context (llama.cpp `-c 64000`, vLLM `--max-model-len`, Ollama `OLLAMA_CONTEXT_LENGTH`/Modelfile `num_ctx`) or set `model.ollama_num_ctx` in `config.yaml` to the window the server really serves (at least 64K). `model.ollama_num_ctx` is honoured on every local endpoint; only the automatic detection behind it uses Ollama's `/api/show`.
+
 #### "Context limit: 2048 tokens" at startup
 
 Hermes auto-detects context length from your server's `/v1/models` endpoint. If the server reports a low value (or doesn't report one at all), Hermes uses the model's declared limit which may be wrong.
@@ -34111,7 +34393,7 @@ Set `context_length` when auto-detection gets the window size wrong.
 
 Hermes uses a multi-source resolution chain to detect the correct context window for your model and provider:
 
-1. **Config override** — `model.context_length` in config.yaml (highest priority)
+1. **Config override** — `model.context_length` in config.yaml (highest priority). This is an explicit **pin**: it always wins over provider metadata, so Hermes labels it `(pinned)` wherever the window is shown (welcome banner, `/model`, `/usage`, the status bar) and logs one warning at startup when the pin disagrees with the window the provider is known to advertise. The pin is dropped automatically when you switch model, provider or base URL.
 2. **Custom provider per-model** — `providers.<name>.models.<id>.context_length`
 3. **Persistent cache** — previously discovered values (survives restarts)
 4. **Endpoint `/models`** — queries your server's API (local/custom endpoints)
@@ -34174,7 +34456,7 @@ providers:
     transport: anthropic_messages  # for Anthropic-compatible proxies
 ```
 
-Each entry accepts: `api` (the endpoint base URL — `base_url`/`url` are accepted aliases), `name` (optional display name; defaults to the dict key), `key_env` or inline `api_key` or `key_cmd` (see below), `transport` (`chat_completions` / `anthropic_messages` / `codex_responses`), `default_model`, `models`, `context_length`, `discover_models`, `extra_body`, `extra_headers`, `ssl_ca_cert` / `ssl_verify`, `catalog_provider` (see below), and `enabled: false` to hide an entry without deleting it.
+Each entry accepts: `api` (the endpoint base URL — `base_url`/`url` are accepted aliases), `name` (optional display name; defaults to the dict key), `key_env` or inline `api_key` or `key_cmd` (see below), `transport` (`chat_completions` / `anthropic_messages` / `codex_responses`), `default_model`, `models`, `context_length`, `discover_models`, `extra_body`, `extra_headers`, `session_affinity_header` (name of a header that carries the conversation id, for session-aware proxies; off unless set), `ssl_ca_cert` / `ssl_verify`, `catalog_provider` (see below), and `enabled: false` to hide an entry without deleting it.
 
 #### Command-minted credentials (`key_cmd`)
 
@@ -34506,8 +34788,10 @@ fallback_providers:
   - provider: anthropic
     model: claude-sonnet-4
     # base_url: http://localhost:8000/v1    # optional, for custom endpoints
-    # api_mode: chat_completions           # optional override
+    # api_mode: chat_completions           # optional override (`transport:` is an accepted alias)
 ```
+
+An entry that names a `providers.<name>` block (`provider: my-relay` or `provider: custom:my-relay`) inherits that block's `transport` / `api_mode` when the entry sets none, so a Responses-only or Anthropic-Messages relay keeps its declared wire on fallback. Set `api_mode` on the entry to override it.
 
 The legacy single-pair `fallback_model:` dict is still accepted for back-compat:
 
@@ -34596,15 +34880,15 @@ the chat, and Install writes the same config the CLI would. On the CLI and in
 messaging apps the agent relays the commands below instead.
 
 ```bash
-hermes mcp                # interactive picker (default)
-hermes mcp catalog        # plain-text list, scriptable
-hermes mcp install n8n    # install a catalog entry by name
+hermes mcp                   # interactive picker (default)
+hermes mcp catalog           # plain-text list, scriptable
+hermes mcp install deepwiki  # install a catalog entry by name
 ```
 
 The picker shows each entry with its current status:
 
 ```
-n8n          available              Manage and inspect n8n workflows from Hermes
+deepwiki     available              Ask questions about public GitHub repositories
 linear       enabled                Linear issue/project management (remote OAuth)
 github       installed (disabled)   GitHub repo + PR tools
 ```
@@ -34615,6 +34899,14 @@ enable, disable, or uninstall. Catalog entries are stored under
 Nous approval. There is no community submission tier; entries are added by
 merging a PR.
 
+The third-party n8n bridge is no longer available for catalog installation.
+Existing installations keep their `mcp_servers` configuration, credentials,
+installed files, and selected tools. They continue to load as configured MCP
+servers and appear as custom entries in the picker, where you can still
+configure tools or enable and disable them. Catalog reinstall is no longer
+available. This change does not migrate existing connections to
+[n8n's official MCP server](https://docs.n8n.io/connect/connect-to-n8n-mcp-server/).
+
 Catalog entries can require:
 
 - **API key** — Hermes prompts at install time and writes the value to
@@ -34623,6 +34915,30 @@ Catalog entries can require:
   client opens a browser on first connection.
 - **OAuth** (third-party provider like Google/GitHub) — Hermes points you at
   `hermes auth <provider>` if you haven't authenticated already.
+
+### n8n's official MCP server
+
+The `n8n-official` catalog entry connects directly to your n8n Cloud or
+self-hosted instance over HTTP with browser OAuth. No local bridge or n8n
+API key is required.
+
+1. Ask an owner or admin to enable **Settings > Instance-level MCP** in n8n.
+2. Open **Connect** and copy the full **Server URL** ending in
+   `/mcp-server/http`, not the editor URL. Older versions show the endpoint
+   directly on the MCP settings page.
+3. Run `hermes mcp install n8n-official` and enter that URL when prompted.
+4. Complete browser OAuth. If needed, run `hermes mcp login n8n-official`
+   or use **Authorize** on the configured server in Desktop or the dashboard.
+5. Review tools with `hermes mcp configure n8n-official`, then start a new
+   session or use `/reload-mcp`.
+
+The Hermes backend must be able to reach the URL. n8n controls permissions
+and workflow exposure; some tools modify or run workflows. See
+[n8n's connection guide](https://docs.n8n.io/connect/connect-to-n8n-mcp-server/).
+
+This entry uses the existing catalog setup and storage behavior. It is
+separate from the retired `n8n` bridge, so existing connections, credentials,
+installed files, and tool selections are not replaced.
 
 ### Tool selection at install time
 
@@ -34976,7 +35292,7 @@ Hermes reads MCP config from `~/.hermes/config.yaml` under `mcp_servers`.
 mcp_servers:
   filesystem:
     command: "npx"
-    args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allowed/dir"]
 ```
 
 ### Recycling memory-heavy stdio servers
@@ -36065,6 +36381,13 @@ All SSE streams (Chat Completions, Responses, `/api/sessions/{id}/chat/stream`, 
 - **Chat Completions**: Hermes emits `event: hermes.tool.progress` for tool-start visibility without polluting persisted assistant text.
 - **Responses**: Hermes emits spec-native `function_call` and `function_call_output` output items during the SSE stream, so clients can render structured tool UI in real time.
 
+**Model reasoning** (emitted only when the model actually produces reasoning and the resolved `reasoning` config allows it; the input-side opt-out is `model_options.reasoning.enabled: false`):
+- **Chat Completions**: reasoning deltas arrive as `choices[0].delta.reasoning_content` chunks (the DeepSeek-style field Open WebUI, opencode and the Vercel AI SDK render as a thinking block); answer text stays in `delta.content`.
+- **Responses**: each thinking burst is a spec-native `reasoning` output item — `response.output_item.added` (`item.type: "reasoning"`), `response.reasoning_summary_part.added`, `response.reasoning_summary_text.delta` … `response.reasoning_summary_text.done`, `response.reasoning_summary_part.done`, `response.output_item.done` — closed before the next message or `function_call` item opens, and echoed in the `response.completed` output as `{"id": "rs_…", "type": "reasoning", "status": "completed", "summary": [{"type": "summary_text", "text": "…"}]}`. `sequence_number` stays monotonic across reasoning, text and tool events.
+- **Non-streaming**: `/v1/chat/completions` returns the turn's reasoning on `choices[0].message.reasoning_content`; `/v1/responses` returns the same `reasoning` output item(s) ahead of the message (and of that step's `function_call` items), also on `GET /v1/responses/{id}` replay.
+- Echoing a prior response's `output` list back as the next `input` (what Responses SDK clients do) is fine: `reasoning` items are ignored on input rather than parsed as empty user turns.
+- Support is advertised as `features.reasoning_streaming: true` on `GET /v1/capabilities`.
+
 ### POST /v1/responses
 
 OpenAI Responses API format. Supports server-side conversation state via `previous_response_id` — the server stores full conversation history (including tool calls and results) so multi-turn context is preserved without the client managing it.
@@ -36096,6 +36419,8 @@ OpenAI Responses API format. Supports server-side conversation state via `previo
 ```
 
 Tool calls in the `output` array were already executed server-side by the Hermes agent — they are replayed with `"status": "completed"` for structured tool UI, never as pending calls for the client to execute.
+
+With `"stream": true`, mid-turn assistant commentary (the `openai-codex` backend's `phase="commentary"` progress preambles, or text a model writes alongside its tool calls) arrives as its own completed `message` output item carrying `"phase": "commentary"` (`response.output_item.added` + `response.output_item.done`, also listed in `response.completed`). It is never merged into the final answer item, so clients can render it as live progress and skip it when assembling the reply. Private reasoning never reaches this item. `display.interim_assistant_messages: false` (or the `display.platforms.api_server` override) suppresses it on every API-server surface.
 
 **Inline image input:** `input[].content` can contain `input_text` and `input_image` parts. Both remote URLs and `data:image/...` URLs are supported:
 
@@ -36205,7 +36530,8 @@ Returns a machine-readable description of the API server's stable surface for ex
     "run_submission": true,
     "run_status": true,
     "run_events_sse": true,
-    "run_stop": true
+    "run_stop": true,
+    "reasoning_streaming": true
   }
 }
 ```
@@ -36416,15 +36742,25 @@ Poll the current run state. This is useful for dashboards that need status witho
   "session_id": "space-session",
   "model": "hermes-agent",
   "output": "Done.",
-  "usage": {"input_tokens": 50, "output_tokens": 200, "total_tokens": 250}
+  "usage": {"input_tokens": 50, "output_tokens": 200, "total_tokens": 250, "cache_read_tokens": 40, "cache_write_tokens": 0},
+  "runtime": {"provider": "openai", "model": "gpt-5", "route_source": "global"}
 }
 ```
+
+`model` echoes what the request asked for. On a completed run, `runtime` is the provider/model pair that actually served the turn — after a [fallback provider](fallback-providers.md) switch it names the fallback pair, so a cost-attribution poller books the run to the right provider. `usage.cache_read_tokens` / `usage.cache_write_tokens` are the session's prompt-cache reads and writes, so cached input is not priced as full-price input. `runtime` has the same shape as on `/v1/chat/completions` and `/v1/responses`: `route_source` says how the runtime was chosen (`global`, `raw_request`, `model_routes`), and a request that named a `model`/`provider` also gets `requested: {provider, model}` so the asked-for and served pairs can be compared. The `run.completed` event on the events stream carries the same `usage` and `runtime` fields.
 
 Statuses are retained briefly after terminal states (`completed`, `failed`, `cancelled`, or `interrupted`) for polling and UI reconciliation. When the gateway shuts down while a run is active, the run is persisted as `interrupted` (error `Gateway shutdown interrupted the run.`, terminal event `run.interrupted`) before the agent is asked to stop, so a durable run never survives a restart as `running`; a late result from the interrupted turn cannot overwrite it.
 
 ### GET /v1/runs/\{run_id\}/events
 
 Server-Sent Events stream of the run's tool-call progress, token deltas, and lifecycle events. Designed for dashboards and thick clients that want to attach/detach without losing state.
+
+Mid-turn assistant commentary — the `openai-codex` backend's `phase="commentary"` progress
+preambles, or text a model writes alongside its tool calls — arrives as `message.interim`
+(`text`, `already_streamed`), the same contract the TUI gateway uses. `already_streamed: true`
+means the text also went out as `message.delta`, so clients that render deltas can skip it.
+The final answer still arrives only in `run.completed`; private reasoning never becomes
+`message.interim`. Gate: `display.interim_assistant_messages` (default `true`).
 
 Tool lifecycle events carry `tool.started` (`tool`, `preview` of the arguments) and
 `tool.completed` (`tool`, `duration` in seconds, `error`, and a `preview` of the result). The
@@ -36541,7 +36877,7 @@ External UIs can manage Hermes sessions over REST without standing up the dashbo
 | `GET` | `/api/sessions/{id}/messages` | Message history for a session |
 | `POST` | `/api/sessions/{id}/fork` | Branch the session via `SessionDB` lineage (matches CLI `/branch` semantics) |
 | `POST` | `/api/sessions/{id}/chat` | Run one synchronous agent turn |
-| `POST` | `/api/sessions/{id}/chat/stream` | SSE wrapper over a single turn — emits `assistant.delta`, `tool.started`, `tool.completed`, then a terminal `run.completed` / `run.failed` / `run.cancelled` event that matches how the turn ended (see [Terminal run status](../../developer-guide/programmatic-integration.md#terminal-run-status)) |
+| `POST` | `/api/sessions/{id}/chat/stream` | SSE wrapper over a single turn — emits `assistant.delta`, `assistant.commentary` (mid-turn commentary: `message_id`, `text`, `already_streamed`; never folded into `assistant.completed`), `tool.started`, `tool.completed`, then a terminal `run.completed` / `run.failed` / `run.cancelled` event that matches how the turn ended (see [Terminal run status](../../developer-guide/programmatic-integration.md#terminal-run-status)) |
 
 `/v1/capabilities` advertises the full surface via `session_*` feature flags and `endpoints.session_*` entries so external UIs can detect support and fall back safely. Inline images are supported in `chat` and `chat/stream` payloads (multimodal-aware path).
 
@@ -36661,6 +36997,7 @@ gateway:
     cors_origins: http://localhost:3000
     model_name: my-hermes
     max_concurrent_runs: 10   # concurrent-run cap; 0 disables the limit
+    history_tool_output_max_chars: 0   # cap tool outputs in stored /v1/responses history; 0 = verbatim
 ```
 
 `port`, `key`, `host`, `cors_origins`, and `model_name` are automatically bridged into the platform's `extra` settings, so they behave exactly like their `API_SERVER_*` environment-variable counterparts. Environment variables take precedence over `config.yaml` values. The block is also accepted under `gateway.platforms.api_server:` or a top-level `platforms.api_server:` section.
@@ -36668,6 +37005,10 @@ gateway:
 ### Concurrent-run cap
 
 The API server limits how many agent runs may execute at once across the endpoints that start one directly: the OpenAI-compatible endpoints, the Runs endpoints, and the session-chat endpoints (`POST /api/sessions/{id}/chat` and its `/stream` variant, which carry cross-machine agent DMs). Cron-triggered runs (`POST /api/jobs/{id}/run`, `POST /api/cron/fire`) go through the cron scheduler and are governed by cron's own limits, not this cap. The cap is read from `gateway.api_server.max_concurrent_runs` (default **10**; `0` disables the limit, negative values clamp to 0). When the cap is reached, new run-starting requests are rejected with **HTTP 429** `Too many concurrent runs (max N)` — clients should back off and retry.
+
+### Stored history size for `previous_response_id` chaining
+
+Each stored `/v1/responses` snapshot embeds the full cumulative conversation history (that is what `previous_response_id` and `conversation` chaining replay), including every tool output verbatim. A conversation with a few large tool outputs can therefore make a single `response_store.db` write several hundred KB. Set `gateway.api_server.history_tool_output_max_chars` (default **0** = store verbatim) to cap each tool output and each string tool-call argument in the **stored** history at that many characters; anything longer is cut to the head plus a `...[N more chars]` marker. User and assistant text is never touched, and the `response.completed` payload and incremental SSE events are unaffected. Because the stored history is what the model sees on the next chained turn, enabling the cap also trims what the model is replayed — leave it at 0 if your workflow needs complete tool outputs across turns.
 
 ## Security Headers
 
@@ -36884,6 +37225,8 @@ When pointing Hermes at a self-hosted Honcho server, `hermes honcho setup` (and 
 | `dialecticDynamic` | `true` | When `true`, model can override reasoning level per-call via tool param |
 | `dialecticMaxChars` | `600` | Max chars of dialectic result injected into system prompt |
 | `recallMode` | `'hybrid'` | `hybrid` (auto-inject + tools), `context` (inject only), `tools` (tools only) |
+| `initOnSessionStart` | `false` | `tools` mode only. `true` creates the Honcho session **synchronously at session start** so it is ready before the first tool call; `false` (default) defers it to the first `honcho_*` call. See the startup note below |
+| `timeout` | `null` (SDK default) | Seconds allowed for each Honcho SDK call (`requestTimeout` and the `HONCHO_TIMEOUT` env var are accepted too). Caps how long an unreachable server can hold a call, including the eager init above |
 | `writeFrequency` | `'async'` | When to flush messages: `async` (background thread), `turn` (sync), `session` (batch on end), or integer N |
 | `saveMessages` | `true` | Whether to persist messages to Honcho API |
 | `observationMode` | `'directional'` | `directional` (all on) or `unified` (shared pool). Override with `observation` object for granular control |
@@ -36926,6 +37269,8 @@ Sessions created before title provenance was recorded retain legacy behavior: be
 | `dialecticDynamic` | gates model override | N/A (no tools) | gates model override |
 
 In `tools` mode, the model is fully in control — it calls `honcho_reasoning` when it wants, at whatever `reasoning_level` it picks. Cadence and budget settings only apply to modes with auto-injection (`hybrid` and `context`).
+
+**Startup behaviour and `initOnSessionStart`.** In `hybrid` and `context` mode the session is created in a background thread and startup fails open if Honcho is slow or down. `tools` mode is different by design: with `initOnSessionStart: false` (the default) nothing touches Honcho until the first `honcho_*` tool call, and with `initOnSessionStart: true` the session is created **synchronously during agent construction** so a tool call on turn 1 never races a half-initialized session. That guarantee means startup waits for Honcho: if the server is unreachable, every SDK call in that eager path runs to its connection/`timeout` limit before the agent is ready, which on Desktop shows up as `request timed out: session.resume` / `prompt.submit` (the renderer gives up after 30 s). Keep `initOnSessionStart` at `false` on Desktop and whenever your Honcho is a local service that may not be running, and set `timeout` (seconds) in `honcho.json` to bound each call if you do enable it.
 
 ## Gateway Identity Mapping
 
@@ -37380,7 +37725,7 @@ The fallback activates automatically when the primary model fails with:
 - **Server errors** (HTTP 500, 502, 503) — after exhausting retry attempts
 - **Auth failures** (HTTP 401, 403) — immediately (no point retrying)
 - **Not found** (HTTP 404) — immediately
-- **Invalid responses** — when the API returns malformed or empty responses repeatedly. A streamed refusal (the model declining with an explanation on the refusal channel) is a terminal `content_filter` result, not an empty response, so it is surfaced rather than retried. On the native Anthropic wire a `stop_reason: refusal` arrives with an empty body; Hermes reports the reason from the response's `stop_details` (category and, when present, explanation) in the refusal message and in the log line (`native_stop_reason=… stop_details=…`).
+- **Invalid responses** — when the API returns malformed or empty responses repeatedly. An HTTP-200 body whose only assistant text is a router's `Connect timeout, please try again later.` with zero completion tokens counts as invalid too (streamed or not, in the main loop, the iteration-limit summary and auxiliary calls), so it is retried instead of shown as the answer. A streamed refusal (the model declining with an explanation on the refusal channel) is a terminal `content_filter` result, not an empty response, so it is surfaced rather than retried. On the native Anthropic wire a `stop_reason: refusal` arrives with an empty body; Hermes reports the reason from the response's `stop_details` (category and, when present, explanation) in the refusal message and in the log line (`native_stop_reason=… stop_details=…`).
 
 When triggered, Hermes:
 
@@ -37443,15 +37788,16 @@ fallback_providers:
 ```yaml
 fallback_providers:
   - provider: openai-codex
-    model: gpt-5.3-codex
+    model: gpt-5.4
 ```
 
 ### Where Fallback Works
 
 | Context | Fallback Supported |
 |---------|-------------------|
-| CLI sessions | ✔ |
+| CLI sessions (interactive and `hermes -z` one-shot) | ✔ (at startup when the primary's credentials/quota fail, mid-session, and a chain added or edited while a chat is open applies from its next turn) |
 | Messaging gateway (Telegram, Discord, etc.) | ✔ |
+| Desktop app / TUI chats | ✔ (a chain added or edited while a chat is open applies from its next turn) |
 | Subagent delegation | ✔ (`delegation.fallback_providers` when set; otherwise only unpinned children inherit the parent chain; `[]` disables) |
 | Cron jobs | ✔ (cron agents inherit configured fallback providers) |
 | Auxiliary tasks on `provider: auto` | ✔ (try per-task fallback, then the main fallback chain before built-in aux discovery) |
@@ -37749,6 +38095,13 @@ Your request
   → 401 auth expired?
       → Try refreshing the token (OAuth)
       → Refresh failed → rotate to next pool key
+  → 400 "model is not supported when using Codex with a ChatGPT account"?
+      → Bench this key for that model only, rotate to the next key (other models stay usable)
+      → Every key rejects the model → fallback_model; the model is skipped for the session
+  → HTTP 200 but `response.status: failed` (ChatGPT/Codex reports usage limits this way)?
+      → Same rules as above, keyed on the embedded error code/message:
+        quota/billing/auth → pool rotation first, provider fallback only once the pool is exhausted;
+        content-policy and other failures → no rotation
   → Success → continue normally
 ```
 
@@ -37821,6 +38174,8 @@ anthropic supports both API keys and OAuth login.
 Type [1/2]:
 ```
 
+Each `hermes auth add openai-codex` login becomes its own pool entry, but only **different** OpenAI accounts rotate independently: two logins of the same account share one token family upstream, so OpenAI revokes the older one and the second entry adds no quota. Hermes warns at add time (`warning: this login is the same OpenAI account as openai-codex credential #N`) — log into a different account, or keep just one.
+
 ## CLI Commands
 
 | Command | Description |
@@ -37834,7 +38189,7 @@ Type [1/2]:
 | `hermes auth add <provider> --priority 0` | Add a credential and place it first in the `fill_first` order |
 | `hermes auth priority <provider> <target> <n>` | Move a credential to priority `n` (0 = tried first); the rest are renumbered |
 | `hermes auth remove <provider> <index>` | Remove credential by 1-based index |
-| `hermes auth reset <provider>` | Clear all cooldowns/exhaustion status |
+| `hermes auth reset <provider>` | Clear all cooldowns/exhaustion status (applies to running sessions too: a live gateway or chat picks the reset up on its next request instead of writing its stale cooldown back) |
 | `hermes auth reset <provider> <target>` | Clear the cooldown on one credential by index, id, or label |
 | `hermes auth refresh <provider> [target]` | Refresh one OAuth credential's tokens and return it to rotation (proves the grant is alive; the next request re-checks quota) |
 
@@ -37878,6 +38233,27 @@ credential_pool_strategies:
 | `least_used` | Always pick the key with the lowest request count |
 | `random` | Random selection among healthy keys |
 
+### Demoting a healthy credential {#demoting-a-healthy-credential}
+
+The pool only benches a credential *after* the provider rejects it (429/402/401). To keep a
+credential you are actively using elsewhere — for example a Codex login whose weekly window
+you want to save for interactive work — out of the gateway's first pick *before* it runs dry,
+move it to the back of the `fill_first` order instead of removing it:
+
+```bash
+hermes auth list openai-codex                 # find the index, id or label
+hermes auth priority openai-codex 1 99        # 1-based index, entry id, or exact label; large n = last
+hermes auth priority openai-codex work-seat 0 # ...and back to the front later
+```
+
+`hermes auth priority <provider> <target> <priority>` reorders one credential and renumbers the
+others, then persists the new order to `auth.json`. The demoted entry stays healthy: it is not
+exhausted, so it is never touched by the Codex quota-reset probe and there is nothing for
+`hermes auth reset` to clear; it is not refreshed on a timer, and it is still used once every
+credential ahead of it is benched.
+Sessions that already hold a credential keep it until they rotate; new sessions (and the next
+gateway start) follow the new order.
+
 ## Error Recovery
 
 The pool handles different errors differently:
@@ -37887,6 +38263,7 @@ The pool handles different errors differently:
 | **429 Rate Limit** | Retry same key once (transient). Second consecutive 429 rotates to next key | 1 hour |
 | **402 Billing/Quota** | Immediately rotate to next key | 1 hour |
 | **401 Auth Expired** | Try refreshing the OAuth token first. Rotate only if refresh fails | 5 minutes |
+| **400 Codex model entitlement** (`The '<model>' model is not supported when using Codex with a ChatGPT account.`) | Bench this key for the rejected model only and rotate to the next key; other models keep using the key. Other 400s never rotate | Until `hermes auth reset` (per model; an entitlement is a plan property, not a window) |
 | **All keys exhausted** | Fall through to `fallback_model` if configured | — |
 
 Provider-supplied `reset_at` timestamps override these default cooldowns.
@@ -37913,6 +38290,16 @@ command (`hermes auth add <provider>`), and the credential leaves rotation — m
 when it only mirrored a token file the pool has just cleared — until you sign in again. This applies to Anthropic, Codex, xAI
 and Nous OAuth logins alike. A dead credential never re-enters rotation on a timer, so a lost login
 shows up once in the log instead of failing quietly every hour.
+
+**Every Codex login in an always-on home is dead: sign in again, do not wait for adoption.** Hermes
+imports the Codex CLI's `~/.codex/auth.json` automatically only to *repair a login it already has*
+— when its own refresh of the `openai-codex` entry fails and `auth.adopt_external_logins` is on
+(see [Borrowed CLI logins](../security.md#borrowed-cli-logins)). A pool whose Codex entries are
+all `dead` (or removed) has nothing left to repair, so a headless gateway or cron profile stays
+without a Codex credential until you run `hermes auth add openai-codex` in *that* home
+(`hermes -p <profile> auth add openai-codex` for a named profile), which offers the Codex CLI import
+interactively. Profiles that should share one login can point at the same `HERMES_HOME` instead of
+each holding a copy of a single-use refresh token.
 
 **A cooling-down or dead credential is not a blank install.** When a configured profile starts the
 CLI while its only credential is benched or quarantined, startup prints the failure and, for a bench,
@@ -41625,8 +42012,8 @@ urls = [r["url"] for r in results[:5]]
 content = web_extract(urls)
 
 # Save for the analysis step
-import json
-with open("/tmp/ai-funding-data.json", "w") as f:
+import json, os
+with open(os.path.expanduser("~/.hermes/cache/scratch/ai-funding-data.json"), "w") as f:
     json.dump({"search_results": results, "extracted": content["results"]}, f)
 print(f"Collected {len(results)} results, extracted {len(content['results'])} pages")
 """)
@@ -41634,7 +42021,7 @@ print(f"Collected {len(results)} results, extracted {len(content['results'])} pa
 # Step 2: Reasoning-heavy analysis (delegation is better here)
 delegate_task(
     goal="Analyze AI funding data and write a market report",
-    context="""Raw data at /tmp/ai-funding-data.json contains search results and
+    context="""Raw data at ~/.hermes/cache/scratch/ai-funding-data.json contains search results and
     extracted web pages about AI funding, acquisitions, and IPOs in Q1 2026.
     Write a structured market report: key deals, trends, notable players,
     and outlook. Focus on deals over $100M."""
@@ -42773,6 +43160,7 @@ When the primary model fails (429 rate limit, 5xx server error, 401/403 auth err
 2. Try each fallback in order
 3. On success, continue the conversation with the new provider
 4. On 401/403, attempt credential refresh before failing over
+5. A Codex Responses turn that stalls on reasoning-only output (three consecutive continuations with no visible text or tool call) also fails over to the next fallback with reason `incomplete_response`; if the stall consumed the iteration budget, the fallback gets exactly one bounded grace call
 
 The fallback system also covers auxiliary tasks independently — vision, compression, and web extraction each have their own fallback chain configurable via the `auxiliary.*` config section.
 
@@ -43339,7 +43727,14 @@ A failed or stalled summary attempt arms a per-session **failure cooldown**
 (escalating 60s → 300s → 900s, never shorter than
 `compression.context_timeout_seconds`, persisted in `state.db`). While it is
 armed, ordinary threshold-triggered compaction is deferred so a broken summary
-backend does not re-fire every turn. Three paths run a real attempt anyway:
+backend does not re-fire every turn. Timeouts and stalls escalate on one
+counter; a summary that ends in `finish_reason=length` (output cap hit, the
+transcript is preserved) escalates on its own counter along the same
+60s → 300s → 900s rungs, so a later turn — such as an async delegation
+completion arriving after the cooldown lapsed — cannot re-issue the same
+capped request every 30 seconds (#69637). JSON-decode, closed-stream and
+empty-content failures stay on a flat 30 s cooldown. Three paths run a real
+attempt anyway:
 
 - Manual `/compress` (`force=True`) — clears the cooldown and retries.
 - The same-turn `fallback_chain` retry after a stalled primary route — the
@@ -43361,6 +43756,14 @@ backend does not re-fire every turn. Three paths run a real attempt anyway:
   compaction rebinds the compressor and resets the ladder count, so each
   compaction cycle grants the LLM route one stall before escalating; the
   persisted cooldown row still paces attempts across turns and restarts.
+- **Summary provider overloaded → abort, transcript kept.** When the summary
+  call fails with a provider-overload error (`overloaded`, `at capacity`,
+  HTTP 529) and the one-shot main-model retry also fails, compress() aborts
+  and preserves the transcript unchanged instead of committing the
+  deterministic fallback; the warning names the overload
+  (`failure_class=summary_overload_failure`) and `/compress` retries once
+  capacity recovers. Auth/quota, network and empty-content failures already
+  abort the same way.
 - **Provider-proven overflow** — when the provider itself rejects the request
   with a context-length error, the recovery pass ignores the cooldown for one
   bounded attempt (`max_compression_attempts`) without clearing it. Deferring
@@ -43387,8 +43790,8 @@ compression:
   codex_gpt55_autoraise: true  # gpt-5.5 on Codex OAuth: raise trigger to 85% (default: true)
   codex_gpt55_autoraise_notice: true  # Show the one-time autoraise notice (default: true)
   codex_app_server_auto: native  # native|hermes|off for Codex app-server thread compaction
-  codex_responses_native: false  # gpt-5.6 on direct OpenAI/Codex: server-side compaction (opt-in)
-  codex_responses_compact_threshold: null  # Automatic server compaction trigger
+  codex_responses_native: false  # Opt-in server compaction: gpt-5.6 on OpenAI/Codex; Astra on Codex OAuth
+  codex_responses_compact_threshold: null  # Server compaction trigger; only used when codex_responses_native: true
   in_place: true             # Compact on the same session id, no rotation (default: true)
 
 # Summarization model/provider configured under auxiliary:
@@ -43415,8 +43818,8 @@ auxiliary:
 | `codex_gpt55_autoraise` | `true` | bool | Raise the trigger to 85% for gpt-5.4/5.5/5.6 and gpt-6 Astra on the ChatGPT Codex OAuth route (see below). Set `false` to keep the global `threshold` |
 | `codex_gpt55_autoraise_notice` | `true` | bool | Show the one-time Codex gpt-5.5 autoraise notice. Set `false` to keep the 85% autoraise but suppress the banner |
 | `codex_app_server_auto` | `native` | `native`, `hermes`, `off` | Thread-compaction mode for Codex app-server sessions (see below) |
-| `codex_responses_native` | `false` | bool | Opt in to OpenAI's server-side compaction on the Responses API. Engages only for gpt-5.6-family models on the direct OpenAI API or a ChatGPT Codex subscription (see below) |
-| `codex_responses_compact_threshold` | `null` | `null` or positive integer | `null` follows the resolved local compression trigger with an 8,192 token safety margin. A positive integer remains absolute and only clamps downward when required. Invalid values use automatic behavior. Automatic mode falls back to `200000` when no usable local trigger exists |
+| `codex_responses_native` | `false` | bool | Opt in to OpenAI's server-side compaction on the Responses API. Engages for gpt-5.6-family models on the direct OpenAI API or a ChatGPT Codex subscription, and exact `gpt-6-astra` on official Codex OAuth (see below) |
+| `codex_responses_compact_threshold` | `null` | `null` or positive integer | Server-side compaction trigger, read **only when `codex_responses_native: true`** — it never changes when local compression fires; the local trigger is `threshold` (ratio) capped by `threshold_tokens`. `null` follows the resolved local compression trigger with an 8,192 token safety margin. A positive integer remains absolute and only clamps downward when required. Invalid values use automatic behavior. Automatic mode falls back to `200000` when no usable local trigger exists |
 | `in_place` | `true` | bool | Compact on the same session id instead of rotating to a new one (see below) |
 
 ### In-place compaction (single stable session id)
@@ -43530,7 +43933,10 @@ To use the large window, pick the explicit `-900k` variant in `/model` (e.g.
 `gpt-5.4-900k`). These are Hermes-side aliases: the suffix is stripped before
 the model id is sent to the backend, and pricing/usage accounting treats them
 as the base model. Slugs that genuinely enforce 272K (gpt-5.5, gpt-5.4-mini)
-have no `-900k` variant.
+have no `-900k` variant. When the authenticated Codex catalog publishes a
+`max_context_window` below 900K for the base slug (e.g. 872K), the `-900k`
+variant resolves to that live maximum instead; 900K remains the offline
+fallback and a published maximum above 900K does not raise it.
 
 Compaction thresholds follow the window: base slugs (272K) get the **85%
 autoraise** described above, while `-900k` variants keep your global
@@ -43559,7 +43965,7 @@ Hermes' local transcript is never rewritten on this runtime — state.db records
 the compaction boundary while the visible transcript stays intact. All other
 routes (including Codex OAuth chat sessions) keep Hermes' summary compressor.
 
-### Native Responses compaction (gpt-5.6 on direct OpenAI / Codex subscription)
+### Native Responses compaction (gpt-5.6 and Astra on supported routes)
 
 OpenAI's Responses API supports server-side compaction: when a request includes
 `context_management: [{type: "compaction", compact_threshold: N}]` and the
@@ -43573,12 +43979,18 @@ client-side summary pass, and ZDR-friendly (`store: false`, no
 Opt in with `compression.codex_responses_native: true`. The gate is deliberately
 narrow, re-checked on every request:
 
-- **Models:** the gpt-5.6 family only. Other models fail server-side when the
-  field is present (gpt-5.1/5.2 return HTTP 500 or stall the stream — there is
-  no structured rejection to downgrade on, verified live Aug 2026).
+- **Models:** the gpt-5.6 family, plus exact `gpt-6-astra` on official Codex
+  subscription OAuth. Astra on the direct API, Astra variants and other GPT-6
+  models are excluded. gpt-5.1/5.2 return HTTP 500 or stall the stream when the
+  field is present (no structured rejection to downgrade on, verified live Aug 2026).
 - **Routes:** `api.openai.com` (OpenAI API key) or the ChatGPT Codex backend
   (Codex subscription OAuth) only. xAI, GitHub/Copilot, OpenRouter, relays, and
   local servers never see the field.
+
+For Astra, both the resolved `openai-codex` provider and an official HTTPS
+`chatgpt.com/backend-api/codex` endpoint are required. A trusted proxy override
+does not enable Astra compaction. This uses the existing automatic
+`context_management` path and does not add `configuration_update` history.
 
 Everything else about compression is unchanged: the local compressor stays
 armed as the fallback owner (the native threshold is clamped ~8K tokens below
@@ -43588,8 +44000,11 @@ the request without it. Switching the session to a non-eligible model or route
 simply stops the field from being sent — captured checkpoints are dropped from
 replay by the existing cross-issuer guard when the endpoint changes.
 
-By default, `compression.codex_responses_compact_threshold: null` derives the
-native threshold from the resolved local trigger. For example, a local trigger
+`compression.codex_responses_compact_threshold` is consulted only while
+`codex_responses_native: true` is in effect; with native compaction off (the
+default) it is ignored and local compression triggers on `threshold` /
+`threshold_tokens` alone. By default, `codex_responses_compact_threshold: null`
+derives the native threshold from the resolved local trigger. For example, a local trigger
 of 765,000 selects 756,808. Set a positive integer to preserve an absolute
 threshold such as 200,000. Invalid values select automatic behavior. If no
 usable local trigger exists, automatic mode uses 200,000. The provider minimum
@@ -44402,6 +44817,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id, id);
 Notes:
 - `tool_calls` is stored as a JSON string (serialized list of tool call objects)
 - `reasoning_details`, `codex_reasoning_items`, and `codex_message_items` are stored as JSON strings
+- `reasoning_details` is always kept in history; on the chat-completions wire it is replayed only to OpenRouter and the Nous Portal (every other chat-completions route gets a copy without it, since strict schemas reject the field)
 - Desktop history hydration retains assistant sidecars in both REST and JSON-RPC (`session.resume`, `session.activate`, `session.history`) projections, including rows with reasoning and tool calls. REST may return the SQLite JSON string while RPC returns decoded items; Desktop accepts both. A final Responses reply may live only in `codex_message_items` while `content` is empty. Canonical content still takes precedence, and analysis/commentary items are not promoted to reply text.
 - `reasoning` stores the raw reasoning text for providers that expose it
 - A reasoning-only clean stop (empty `content`, `finish_reason=stop`, reasoning present) is answered with the reasoning text, but the assistant row is never written with that text as `content`: `content` stays empty, the text lives in `reasoning`/`reasoning_content`, and `api_content` carries it so the next request replays the answer byte-identically. History surfaces therefore show it as reasoning, not as a reply.
@@ -44488,7 +44904,7 @@ _CHECKPOINT_EVERY_N_WRITES = 50
 from hermes_state import SessionDB
 
 db = SessionDB()                           # Default: ~/.hermes/state.db
-db = SessionDB(db_path=Path("/tmp/test.db"))  # Custom path
+db = SessionDB(db_path=Path("~/.hermes/cache/scratch/test.db").expanduser())  # Custom path
 ```
 
 ### Create and Manage Sessions
@@ -44851,6 +45267,7 @@ Codex uses a separate Responses API path:
 
 - `api_mode = codex_responses`
 - dedicated credential resolution and auth store support
+- a resumed session whose lingering Codex reasoning items (`encrypted_content`) are rejected — as a 400 `invalid_encrypted_content` or as a 401 `token_expired` — self-heals by stripping the cached items and replaying once, before any credential refresh or pool rotation
 
 ## Auxiliary model routing
 
@@ -47072,7 +47489,9 @@ hermes [global-options] <command> [subcommand/options]
 | `hermes peer` | Register peer Hermes gateways on other machines and DM their agents' canonical Bot Chats (`hermes peer dm <peer>[/<agent>] "…"`). The transport behind cross-machine bot-to-bot messaging. |
 | `hermes secrets` | Manage external secret sources (currently Bitwarden Secrets Manager) for pulling API keys at process startup instead of from `~/.hermes/.env`. |
 | `hermes migrate` | Diagnose and (optionally) rewrite `config.yaml` to replace references to retired models or deprecated settings (e.g. `migrate xai`). |
+| `hermes codex-runtime` | Noninteractive counterpart of `/codex-runtime`: `migrate [--dry-run] [--json]` regenerates the Hermes-managed block in `~/.codex/config.toml` for the selected profile. See [Codex app-server runtime](../user-guide/features/codex-app-server-runtime.md#running-the-migration-from-a-script). |
 | `hermes status` | Show agent, auth, and platform status. |
+| `hermes usage` | Show the configured account's rate-limit windows (the `/usage` block) without a session; `--json` for scripts. |
 | `hermes cron` | Inspect and tick the cron scheduler. |
 | `hermes pause` / `hermes resume` | Global emergency stop: no new cron fires (built-in ticker, managed-cron webhook, misfire catch-up), kanban dispatch or gateway turns start until resumed; in-flight work is never killed. |
 | `hermes kanban` | Multi-profile collaboration board (tasks, links, dispatcher). |
@@ -47133,7 +47552,7 @@ Common options:
 | `--oneshot` | With `-q`/`--query-file`: answer the query and exit (the pre-0.21 single-query behavior) instead of seeding an interactive session. Implied on non-TTY stdio and by `-Q`. |
 | `-m`, `--model <model>` | Override the model for this run. |
 | `-t`, `--toolsets <csv>` | Enable a comma-separated set of toolsets. |
-| `--provider <provider>` | Force a provider: `auto`, `openrouter`, `nous`, `openai-codex`, `copilot-acp`, `copilot`, `anthropic`, `gemini`, `huggingface`, `novita` (aliases `novita-ai`, `novitaai`), `openai-api`, `zai`, `kimi-coding`, `kimi-coding-cn`, `minimax`, `minimax-cn`, `minimax-oauth`, `kilocode`, `xiaomi`, `arcee`, `gmi`, `upstage` (alias `solar`), `alibaba`, `alibaba-cn`, `alibaba-coding-plan` (alias `alibaba_coding`), `alibaba-coding-plan-cn`, `alibaba-token-plan`, `alibaba-token-plan-cn`, `deepseek`, `nvidia`, `ollama-cloud`, `xai` (alias `grok`), `xai-oauth` (alias `grok-oauth`), `qwen-oauth`, `bedrock`, `opencode-zen`, `opencode-go`, `commandcode`, `commandcode-anthropic`, `ai-gateway`, `azure-foundry`, `lmstudio`, `stepfun`, `tencent-tokenhub` (alias `tencent`, `tokenhub`), `router` (aliases `ramp-router`, `ramp`), `nebius-token-factory` (aliases `nebius`, `nebius-tf`, `tokenfactory`), `tencent-tokenplan` (aliases `tokenplan`, `tencent-lkeap`). |
+| `--provider <provider>` | Force a provider: `auto`, `openrouter`, `nous`, `openai-codex` (aliases `chatgpt`, `chatgpt-codex`), `copilot-acp`, `copilot`, `anthropic`, `gemini`, `huggingface`, `novita` (aliases `novita-ai`, `novitaai`), `openai-api`, `zai`, `kimi-coding`, `kimi-coding-cn`, `minimax`, `minimax-cn`, `minimax-oauth`, `kilocode`, `xiaomi`, `arcee`, `gmi`, `upstage` (alias `solar`), `alibaba`, `alibaba-cn`, `alibaba-coding-plan` (alias `alibaba_coding`), `alibaba-coding-plan-cn`, `alibaba-token-plan`, `alibaba-token-plan-cn`, `deepseek`, `nvidia`, `ollama-cloud`, `xai` (alias `grok`), `xai-oauth` (alias `grok-oauth`), `qwen-oauth`, `bedrock`, `opencode-zen`, `opencode-go`, `commandcode`, `commandcode-anthropic`, `ai-gateway`, `azure-foundry`, `lmstudio`, `stepfun`, `tencent-tokenhub` (alias `tencent`, `tokenhub`), `router` (aliases `ramp-router`, `ramp`), `nebius-token-factory` (aliases `nebius`, `nebius-tf`, `tokenfactory`), `tencent-tokenplan` (aliases `tokenplan`, `tencent-lkeap`). |
 | `-s`, `--skills <name>` | Preload one or more skills for the session (can be repeated or comma-separated). |
 | `-v`, `--verbose` | Verbose output. |
 | `-Q`, `--quiet` | Programmatic mode: suppress banner/spinner/tool previews. |
@@ -47267,9 +47686,9 @@ stdout is non-empty.
 `hermes -z "…" --usage-file /path/report.json` writes a machine-readable usage report after the run: `estimated_cost_usd`, `input_tokens` / `output_tokens` / `cache_read_tokens` / `cache_write_tokens` / `reasoning_tokens` / `total_tokens`, `api_calls`, `model`, `provider`, `session_id`, `service_tier`, the `completed` / `failed` / `partial` / `interrupted` flags and `turn_exit_reason` (why `completed` is false, e.g. `max_iterations_reached(3/3)`). Those top-level counters cover the **main agent loop** only. Auxiliary LLM calls made on the same run (title generation, vision, context compression, `web_extract`, background review, …) are reported separately under `auxiliary` — the same totals plus a per-task `by_task` map — and `total_including_auxiliary` (`estimated_cost_usd`, `total_tokens`, `api_calls`) is the grand total to bill on. The report is written **even when the run fails**, so batch pipelines can always account for spend. It has no effect outside `-z`/`--oneshot`, and a broken usage write never masks the run's own outcome.
 
 ```bash
-hermes -z "summarize this repo" --usage-file /tmp/usage.json
-jq .total_including_auxiliary.estimated_cost_usd /tmp/usage.json
-jq .auxiliary.by_task /tmp/usage.json      # what did title generation / vision cost?
+hermes -z "summarize this repo" --usage-file ~/.hermes/cache/scratch/usage.json
+jq .total_including_auxiliary.estimated_cost_usd ~/.hermes/cache/scratch/usage.json
+jq .auxiliary.by_task ~/.hermes/cache/scratch/usage.json      # what did title generation / vision cost?
 ```
 
 ## `hermes model`
@@ -47511,15 +47930,15 @@ If neither a positional `message` argument nor `--file` is provided, `hermes sen
 `--file` is for *text* bodies only. To deliver an image, document, video, or audio file as a native platform attachment, reference it inside the message text with the `MEDIA:<local_path>` directive:
 
 ```bash
-hermes send --to telegram "MEDIA:/tmp/screenshot.png"
-hermes send --to telegram "Build chart for today MEDIA:/tmp/chart.png"   # with caption
-hermes send --to discord:#ops "MEDIA:/tmp/report.pdf"
+hermes send --to telegram "MEDIA:~/.hermes/cache/scratch/screenshot.png"
+hermes send --to telegram "Build chart for today MEDIA:~/.hermes/cache/scratch/chart.png"   # with caption
+hermes send --to discord:#ops "MEDIA:~/.hermes/cache/scratch/report.pdf"
 ```
 
 By default, image files are sent as photos (platforms like Telegram recompress these). Add `[[as_document]]` to the message to deliver them as uncompressed file attachments instead:
 
 ```bash
-hermes send --to telegram "[[as_document]] MEDIA:/tmp/screenshot.png"
+hermes send --to telegram "[[as_document]] MEDIA:~/.hermes/cache/scratch/screenshot.png"
 ```
 
 Examples:
@@ -47527,7 +47946,7 @@ Examples:
 ```bash
 hermes send --to telegram "deploy finished"
 echo "RAM 92%" | hermes send --to telegram:-1001234567890
-hermes send --to discord:#ops --file /tmp/report.md
+hermes send --to discord:#ops --file ~/.hermes/cache/scratch/report.md
 hermes send --to slack:#eng --subject "[CI]" --file build.log
 hermes send --list                  # all platforms
 hermes send --list telegram         # filter by platform
@@ -47619,6 +48038,20 @@ Common flags for migration subcommands:
 > Not to be confused with `hermes claw migrate` (one-shot import of OpenClaw configuration into Hermes) — `hermes migrate` is the top-level config-rewrite command.
 
 
+## `hermes codex-runtime`
+
+```bash
+hermes codex-runtime migrate [--dry-run] [--json]
+```
+
+Runs the `~/.codex/config.toml` migration that `/codex-runtime codex_app_server` triggers, without a chat session: Hermes' `mcp_servers` (plus installed codex plugins and the `default_permissions` default) are projected into the managed block for the selected profile (`hermes -p <name> codex-runtime migrate`). User text outside the block is kept verbatim; a user-owned `[mcp_servers.<name>]` with the same name as a Hermes server is preserved and the Hermes projection for that name skipped (reported as `preserved_user_servers`). The result is validated as TOML before an atomic write; exit code is 1 when the report contains errors.
+
+| Flag | Description |
+|------|-------------|
+| `--dry-run` | Compute and report the migration without writing `config.toml`. |
+| `--json` | Print the full migration report as JSON (`migrated`, `preserved_user_servers`, `skipped_keys_per_server`, `errors`, `target_path`, `written`). |
+
+
 ## `hermes proxy`
 
 ```bash
@@ -47686,6 +48119,49 @@ hermes auth spotify                                      # Authenticate Hermes w
 ```
 
 Subcommands: `add`, `list`, `remove`, `reset`, `priority`, `refresh`, `status`, `logout`, `spotify`. When called with no subcommand, launches the interactive management wizard.
+
+## `hermes usage`
+
+The account-limits block of the `/usage` slash command — Codex 5-hour / weekly windows, plan and banked
+resets; Anthropic OAuth windows; OpenRouter credits — without starting a session, so shell scripts and cron
+jobs can read it.
+
+```bash
+hermes usage                          # configured model provider, human-readable block
+hermes usage --provider openai-codex  # a specific provider
+hermes usage --json                   # one JSON document on stdout
+```
+
+| Option | Description |
+|--------|-------------|
+| `--provider NAME` | Provider to query (default: the configured `model.provider`). Supported: `openai-codex`, `anthropic`, `openrouter`. |
+| `--json` | Print one JSON document instead of the human-readable block. |
+
+Credentials resolve exactly as they do for `/usage` in a session with no live agent (the auth store, then
+the credential pool); the command never adds or refreshes a credential it would not use for chat. Exit code
+`0` on success; `1` with a single stderr line when no credential is configured for the provider, the provider
+has no usage endpoint, or the fetch fails (stdout stays empty).
+
+`--json` schema (keys are stable; new keys may be added):
+
+```json
+{
+  "provider": "openai-codex",
+  "source": "usage_api",
+  "title": "Account limits",
+  "plan": "Plus",
+  "fetched_at": "2026-09-19T07:58:55+00:00",
+  "windows": [
+    {"label": "Session", "used_percent": 37.0, "resets_at": "2026-09-19T21:00:00+00:00", "detail": null},
+    {"label": "Weekly", "used_percent": 12.5, "resets_at": "2026-09-25T09:00:00+00:00", "detail": null}
+  ],
+  "details": ["You have 1 reset banked - use /usage reset to activate"],
+  "unavailable_reason": null
+}
+```
+
+`used_percent` is `null` when the provider did not report the window; `resets_at` is ISO-8601 UTC or `null`
+(some windows carry a free-text `detail` instead); `plan` is `null` when unknown.
 
 ## `hermes status`
 
@@ -48070,7 +48546,7 @@ The backup uses SQLite's `backup()` API for safe copying, so it works correctly 
 
 ```bash
 hermes backup                           # Full backup to ~/hermes-backup-*.zip
-hermes backup -o /tmp/hermes.zip        # Full backup to specific path
+hermes backup -o ~/backups/hermes.zip   # Full backup to specific path
 hermes backup --quick                   # Quick state-only snapshot
 hermes backup --quick --label "pre-upgrade"  # Quick snapshot with label
 ```
@@ -48550,7 +49026,7 @@ Manage MCP (Model Context Protocol) server configurations and run Hermes as an M
 |------------|-------------|
 | *(none)* or `picker` | Interactive catalog picker — browse Nous-approved MCPs and install/enable/disable. |
 | `catalog` | List Nous-approved MCPs (plain text, scriptable). |
-| `install <name>` | Install a catalog entry (e.g. `hermes mcp install n8n`). |
+| `install <name>` | Install a catalog entry (e.g. `hermes mcp install deepwiki`). |
 | `serve [-v\|--verbose]` | Run Hermes as an MCP server — expose conversations to other agents. |
 | `add <name> [--url URL] [--command CMD] [--auth oauth\|header] [--args ...]` | Add a custom MCP server with automatic tool discovery. `--args` passes the remaining argv to the stdio command, so put it last. |
 | `remove <name>` (alias: `rm`) | Remove an MCP server from config. |
@@ -49021,7 +49497,7 @@ Type `/` in the CLI to open the autocomplete menu. Built-in commands are case-in
 |---------|-------------|
 | `/config` | Show current configuration |
 | `/model [model-name]` | Show or change the current model. Supports: `/model claude-sonnet-4`, `/model provider:model` (switch providers), `/model custom:model` (custom endpoint), `/model custom:name:model` (named custom provider), `/model custom` (auto-detect from endpoint), OpenRouter account presets (`/model @preset/<slug>` or `/model <model>@preset/<slug>` — presets are account-scoped, so they skip the public model-listing check), and user-defined aliases (`/model fav`, `/model grok` — see [Custom model aliases](#custom-model-aliases)). Flags: `--global` persists the change to config.yaml; `--session` forces session-only; `--once` applies to the next turn only; `--refresh` re-fetches the provider's model list; `--provider <name>` switches backend (session-only unless `--global`); `--reasoning <level>` sets the reasoning effort (`none`, `minimal` … `ultra`) in the same step and with the same scope as the pick. A plain `/model <name>` is session-only unless `model.persist_switch_by_default: true` is set — except when no `model.default`/`model.provider` is configured yet, in which case the first pick persists so the profile gets a real default. The same rule governs the desktop composer picker. **Interactive picker:** running `/model` with no arguments opens the provider→model picker; on the model list you can **type to fuzzy-filter** the models (e.g. type `grok` to narrow to matching models), Backspace to trim the filter, Esc to clear it (or close the picker). Selection always resolves to one concrete model — the filter only narrows the list, it never guesses. After the model, a third step offers the reasoning effort for that model (or **Keep current effort**); it is skipped when the catalog says the route has no reasoning control. **Note:** `/model` can only switch between already-configured providers. To add a new provider, exit the session and run `hermes model` from your terminal. **Cost note:** switching models mid-conversation resets the prompt cache — the cache key includes the model, so your next turn re-reads the entire conversation at full input price instead of the ~75%-discounted cached rate. Expected and unavoidable, but worth knowing on long sessions. |
-| `/codex-runtime [auto\|codex_app_server\|on\|off]` | Toggle the optional [Codex app-server runtime](../user-guide/features/codex-app-server-runtime) for OpenAI/Codex models. `auto` (default) uses Hermes' standard chat completions; `codex_app_server` hands turns to a `codex app-server` subprocess for native shell, apply_patch, ChatGPT subscription auth, and migrated Codex plugins. Effective on next session. |
+| `/codex-runtime [auto\|codex_app_server\|on\|off]` | Toggle the optional [Codex app-server runtime](../user-guide/features/codex-app-server-runtime) for OpenAI/Codex models and named custom providers that are also defined in `~/.codex/config.toml`. `auto` (default) uses Hermes' standard chat completions; `codex_app_server` hands eligible turns to a `codex app-server` subprocess for native shell, apply_patch, ChatGPT subscription auth, and migrated Codex plugins. Effective on next session. |
 | `/personality` | Set a predefined personality. `/personality none` (or `default` / `neutral`) clears the overlay and returns to base behavior. |
 | `/verbose` | Cycle tool progress display: off → new → all → verbose. Can be [enabled for messaging](#notes) via config. |
 | `/focus [on\|off\|status]` | Toggle **focus view** — a display-only reduced-output mode showing just your prompt and the final response. Composes with `/verbose`: turning it on snaps tool progress to `off` and remembers your previous mode, and `/focus off` restores it. Each turn ends with a dim recovery line (`⋯ 7 tool lines hidden · /focus off to show`) and a persistent `◉ focus` badge sits in the status bar so you always know you're in the reduced view. Nothing is sent differently to the model — detail is hidden, never discarded. |
@@ -49188,7 +49664,7 @@ The messaging gateway supports the following built-in commands inside Telegram, 
 | `/new [name]` (alias: `/reset`) | Start a new session (fresh session ID + history). Optional `[name]` sets the initial session title. Append `now`, `--yes`, or `-y` to skip the confirmation modal — e.g. `/reset now`, `/new --yes my-experiment`. |
 | `/status` | Show session info, followed by a local **Session recap** block (recent turn counts, top tools used, files touched, latest prompt + reply). |
 | `/stop` | Kill all running background processes and interrupt the running agent. |
-| `/model [provider:model]` | Show or change the model. Supports provider switches (`/model zai:glm-5`), custom endpoints (`/model custom:model`), named custom providers (`/model custom:local:qwen`), auto-detect (`/model custom`), OpenRouter account presets (`/model @preset/<slug>` — account-scoped, skips the public model-listing check), and user-defined aliases (`/model fav`, `/model grok` — see [Custom model aliases](#custom-model-aliases)). Use `--global` to persist the change to config.yaml. **Note:** `/model` can only switch between already-configured providers. To add a new provider or set up API keys, use `hermes model` from your terminal (outside the chat session). **Cost note:** a mid-session model switch resets the prompt cache (the cache key includes the model), so the next message re-reads the whole conversation at full input price. |
+| `/model [provider:model]` | Show or change the model. Supports provider switches (`/model zai:glm-5`), custom endpoints (`/model custom:model`), named custom providers (`/model custom:local:qwen`), auto-detect (`/model custom`), OpenRouter account presets (`/model @preset/<slug>` — account-scoped, skips the public model-listing check), and user-defined aliases (`/model fav`, `/model grok` — see [Custom model aliases](#custom-model-aliases)). Use `--global` to persist the change to config.yaml; a successful `--global` pick (typed or picker) also drops this chat's session-only override, so config.yaml alone decides the model after a gateway restart (a chat with a `channel_overrides` model keeps the override, since the channel setting would otherwise outrank config.yaml; the CLI/TUI deliberately keep their per-session pin so resume restores the model that chat used). **Note:** `/model` can only switch between already-configured providers. To add a new provider or set up API keys, use `hermes model` from your terminal (outside the chat session). **Cost note:** a mid-session model switch resets the prompt cache (the cache key includes the model), so the next message re-reads the whole conversation at full input price. |
 | `/codex-runtime [auto\|codex_app_server\|on\|off]` | Toggle the optional [Codex app-server runtime](../user-guide/features/codex-app-server-runtime). Persists to `model.openai_runtime` in config.yaml and evicts the cached agent so the next message picks up the new runtime. Effective on next session. |
 | `/personality [name]` | Set a personality overlay for the session. `/personality none` (or `default` / `neutral`) clears it. |
 | `/fast [normal\|fast\|auto\|cold\|status]` | Fast mode — OpenAI Priority Processing / Anthropic Fast Mode. `auto`/`cold` open a bounded fast window per turn / per session. |
@@ -49887,6 +50363,7 @@ Hermes reads environment variables from the process environment and, for user-ma
 | `AI_GATEWAY_BASE_URL` | Override AI Gateway base URL (default: `https://ai-gateway.vercel.sh/v1`) |
 | `OPENAI_API_KEY` | API key for custom OpenAI-compatible endpoints (used with `OPENAI_BASE_URL`) |
 | `OPENAI_BASE_URL` | Base URL for custom endpoint (VLLM, SGLang, etc.) |
+| `HERMES_CODEX_BASE_URL` | Route the `openai-codex` (ChatGPT subscription) provider through a proxy instead of the default Codex backend. Applies everywhere the credential is used: pool resolution, auxiliary/raw clients, and 401/429 credential rotation. `model.base_url` under `model.provider: openai-codex` is the secondary override when this is unset. |
 | `LM_API_KEY` | API key for LM Studio (`lmstudio` provider). Often a placeholder for local servers |
 | `LM_BASE_URL` | LM Studio base URL (default: `http://localhost:1234/v1`) |
 | `COPILOT_GITHUB_TOKEN` | GitHub token for Copilot API — first priority (OAuth `gho_*` or fine-grained PAT `github_pat_*`; classic PATs `ghp_*` are **not supported**) |
@@ -50212,6 +50689,7 @@ These are set automatically by the Docker terminal backend when `proxy.enabled: 
 | `DISCORD_AUTO_THREAD` | Auto-thread long replies when supported |
 | `DISCORD_ALLOW_ANY_ATTACHMENT` | When `true`, accept attachments of any file type (not just the built-in PDF/text/zip/office allowlist). Unknown types are cached and surfaced to the agent as a local path so it can inspect them via `terminal` / `read_file` / `ffprobe`. Default `false`. |
 | `DISCORD_MAX_ATTACHMENT_BYTES` | Maximum bytes per attachment the gateway will cache. Default `33554432` (32 MiB). Set to `0` for no cap (attachments are held in memory while being written). |
+| `DISCORD_FREE_RESPONSE_AUTO_THREAD` | When `true`, free-response channels (listed in `DISCORD_FREE_RESPONSE_CHANNELS`) also auto-create a thread per top-level message. Default `false` — free-response channels reply inline. Requires `DISCORD_AUTO_THREAD=true`; `DISCORD_NO_THREAD_CHANNELS` still wins. |
 | `DISCORD_REACTIONS` | Enable emoji reactions on messages during processing (default: `true`) |
 | `DISCORD_IGNORED_CHANNELS` | Comma-separated channel IDs where the bot never responds |
 | `DISCORD_NO_THREAD_CHANNELS` | Comma-separated channel IDs where bot responds without auto-threading |
@@ -52967,7 +53445,7 @@ node --version
 npx --version
 
 # Test the server manually
-npx -y @modelcontextprotocol/server-filesystem /tmp
+npx -y @modelcontextprotocol/server-filesystem /path/to/allowed/dir
 ```
 
 Verify your `~/.hermes/config.yaml` MCP configuration:
@@ -56369,8 +56847,8 @@ scripts/run_tests.sh tests/agent/test_iron_proxy.py tests/hermes_cli/test_iron_p
 HERMES_RUN_E2E=1 scripts/run_tests.sh tests/agent/test_iron_proxy_e2e.py
 
 # Live PTY smoke against `hermes egress`
-HERMES_HOME=/tmp/hermes-egress-test python3 -m hermes_cli.main egress --help
-HERMES_HOME=/tmp/hermes-egress-test python3 -m hermes_cli.main egress setup --help
+HERMES_HOME=$HOME/.hermes/cache/scratch/hermes-egress-test python3 -m hermes_cli.main egress --help
+HERMES_HOME=$HOME/.hermes/cache/scratch/hermes-egress-test python3 -m hermes_cli.main egress setup --help
 ```
 
 The CLI uses argparse, so `--help` is a good first probe for "did my new flag register correctly".
@@ -56574,13 +57052,13 @@ spans, logs, and resource attributes remain content-free.
 ```bash
 # terminal 1: capture collector on :4318
 python scripts/observability/otel_capture_collector.py \
-  --host 127.0.0.1 --port 4318 --log /tmp/hermes_otel_capture.jsonl
+  --host 127.0.0.1 --port 4318 --log ~/.hermes/cache/scratch/hermes_otel_capture.jsonl
 
 # terminal 2: drive the real exporter through lifecycle transitions,
 # a fatal platform, and a structured warning event, then flush
 python scripts/observability/gateway_health_export_probe.py \
   --endpoint http://127.0.0.1:4318/v1/traces \
-  --log /tmp/hermes_otel_capture.jsonl --wait 8
+  --log ~/.hermes/cache/scratch/hermes_otel_capture.jsonl --wait 8
 # exit 0 prints: {"requests": 6, "paths": ["/v1/logs", "/v1/metrics", "/v1/traces"]}
 ```
 
@@ -56673,7 +57151,7 @@ values with no error:
 hermes monitoring status                 # posture
 python scripts/observability/gateway_health_export_probe.py \
   --endpoint http://127.0.0.1:4318/v1/traces \
-  --log /tmp/cap.jsonl --wait 8          # drive the real exporter
+  --log ~/.hermes/cache/scratch/cap.jsonl --wait 8          # drive the real exporter
 ```
 
 Decode the captured OTLP payload and assert the new name/attribute is present
@@ -57610,7 +58088,7 @@ Drop a user plugin at `~/.hermes/plugins/image_gen/<name>/` with the same `name`
 ## Testing
 
 ```bash
-export HERMES_HOME=/tmp/hermes-imggen-test
+export HERMES_HOME=$HOME/.hermes/cache/scratch/hermes-imggen-test
 mkdir -p $HERMES_HOME/plugins/image_gen/my-backend
 # …copy __init__.py + plugin.yaml into that dir…
 
@@ -58664,7 +59142,7 @@ For isolated local testing, use one `HERMES_HOME` for plugin enablement and the
 agent run:
 
 ```bash
-export HERMES_HOME=/tmp/hermes-middleware-test
+export HERMES_HOME=$HOME/.hermes/cache/scratch/hermes-middleware-test
 mkdir -p "$HERMES_HOME"
 hermes plugins enable <plugin-name>
 hermes chat --query 'Reply exactly ok'
@@ -58713,6 +59191,9 @@ The effective request is passed to `pre_api_request`, provider execution, and
 This plugin constrains `terminal` calls to a known working directory:
 
 ```python
+from pathlib import Path
+
+
 def register(ctx):
     ctx.register_middleware("tool_request", normalize_terminal_workdir)
 
@@ -58721,7 +59202,7 @@ def normalize_terminal_workdir(**kwargs):
     if kwargs.get("tool_name") != "terminal":
         return None
     args = dict(kwargs["args"])
-    args.setdefault("workdir", "/tmp/hermes-middleware-demo")
+    args.setdefault("workdir", str(Path.home() / ".hermes" / "cache" / "scratch" / "hermes-middleware-demo"))
     return {
         "args": args,
         "source": "middleware-demo",
@@ -59053,7 +59534,7 @@ for p in list_providers():
 Point `HERMES_HOME` at a temp directory so you don't pollute your real config:
 
 ```bash
-export HERMES_HOME=/tmp/hermes-plugin-test
+export HERMES_HOME=$HOME/.hermes/cache/scratch/hermes-plugin-test
 mkdir -p $HERMES_HOME/plugins/model-providers/my-provider
 cat > $HERMES_HOME/plugins/model-providers/my-provider/__init__.py <<'EOF'
 from providers import register_provider
@@ -64025,6 +64506,7 @@ tts:
   provider: gemini
   streaming:
     provider: gemini      # or "auto"
+    min_len: 20           # shortest first sentence (chars) spoken on its own; CJK setups use ~6
   gemini:
     model: gemini-2.5-flash-preview-tts
     voice: Kore
@@ -66553,6 +67035,8 @@ azure-foundry (Microsoft Entra ID):
   Status: configured; live token probe is skipped here
 ```
 
+Auxiliary tasks that follow the main model (`provider: auto` — session titles, context compression, smart approval) reuse the main session's Entra token provider instead of re-authenticating; a `--api-key` string on the CLI still overrides it for one-off testing.
+
 ### Limitations
 
 - **Anthropic-style endpoints use an httpx event hook.** The Anthropic Python SDK does not accept a callable `auth_token` natively (≤ 0.86.0). Hermes installs a request event hook on a custom `httpx.Client` that mints a fresh JWT per outbound request and rewrites `Authorization: Bearer <jwt>`. This is functionally equivalent to the OpenAI SDK's native `Callable[[], str]` contract but adds one indirection layer. If the Anthropic SDK adds first-class callable-auth support in a future release, Hermes will switch to it transparently.
@@ -66593,6 +67077,7 @@ model:
 Important behaviour:
 
 - **GPT-5.x, codex, and o-series auto-route to the Responses API.** Microsoft Foundry deploys GPT-5 / codex / o1 / o3 / o4 models as Responses-API-only — calling `/chat/completions` against them returns `400 "The requested operation is unsupported."`. Hermes detects these model families by name and upgrades `api_mode` to `codex_responses` transparently, even when `config.yaml` still reads `api_mode: chat_completions`. GPT-4, GPT-4o, Llama, Mistral, and other deployments stay on `/chat/completions`.
+- **`api_mode: responses` is accepted as a spelling of `codex_responses`.** The alias works on `model.api_mode`, on `fallback_providers` entries and on per-task `auxiliary.<task>.api_mode` (e.g. an `auxiliary.vision` route to a GPT-5.x deployment), and selects the same Responses adapter.
 - **`max_completion_tokens` is used automatically.** Azure OpenAI (like direct OpenAI) requires `max_completion_tokens` for gpt-4o, o-series, and gpt-5.x models. Hermes sends the right parameter based on the endpoint.
 - **Pre-v1 endpoints that require `api-version`.** If you have a legacy base URL like `https://<resource>.openai.azure.com/openai?api-version=2025-04-01-preview`, Hermes extracts the query string and forwards it via `default_query` on every request (the OpenAI SDK otherwise drops it when joining paths).
 
@@ -66615,6 +67100,7 @@ Important behaviour:
 - **Bearer auth is used instead of `x-api-key`.** Azure's Anthropic-compatible route requires `Authorization: Bearer <key>` rather than Anthropic's native `x-api-key` header. Hermes detects `azure.com` in the base URL and routes the API key through the SDK's `auth_token` field so the right header reaches the upstream.
 - **1M context window beta header is kept.** Azure still gates the 1M-token Claude context (Opus 4.6/4.7, Sonnet 4.6) behind the `anthropic-beta: context-1m-2025-08-07` header. Hermes keeps that beta header on Azure paths (it's stripped from native Anthropic OAuth requests because some subscriptions reject it, but Azure requires it).
 - **OAuth token refresh is disabled.** Azure deployments use static API keys. The `~/.claude/.credentials.json` OAuth token refresh loop that applies to Anthropic Console is explicitly skipped for Azure endpoints to prevent the Claude Code OAuth token from overwriting your Azure key mid-session.
+- **`hermes doctor` probes the same route.** The `/anthropic` route has no `GET /models`, so the connectivity check sends a one-token `POST /v1/messages` with the same Bearer auth and `api-version` query the runtime uses; a 200 (or a 400 from the Messages API) reports the endpoint as healthy, 401/403 as an auth problem.
 
 ## Alternative: `provider: anthropic` + Azure base URL
 
@@ -66638,11 +67124,24 @@ Azure does **not** expose a pure-API-key endpoint to list your *deployed* model 
 
 What Hermes can do:
 
-- Azure OpenAI v1 endpoints (`<resource>.openai.azure.com/openai/v1`) expose `GET /models` with the resource's **available** model catalog. Hermes uses this list to prefill the model picker.
-- Microsoft Foundry `/anthropic` routes: detected via URL path, model name entered manually.
+- Azure OpenAI v1 endpoints (`<resource>.openai.azure.com/openai/v1`) expose `GET /models` with the resource's **available** model catalog. Hermes uses this list to prefill the setup wizard's model picker **and** the in-session `/model azure-foundry` picker (CLI, TUI, Desktop, gateway), so you can switch deployments without re-running `hermes setup`.
+- Microsoft Foundry `/anthropic` routes: detected via URL path, model name entered manually (no `/models` there — the `/model` picker shows only the current selection and any `providers.azure-foundry.models` you declare).
 - Private / firewalled endpoints: manual entry with a friendly "couldn't probe" message.
+- Entra ID (`model.auth_mode: entra_id`, no `AZURE_FOUNDRY_API_KEY`): the `/model` picker lists the provider as soon as `model.base_url` (or `AZURE_FOUNDRY_BASE_URL`) is set — no token is minted just to show the row.
 
 You can always type a deployment name directly — Hermes does not validate against the returned list.
+
+To pin the picker to the deployments you actually use (the catalog can be long), or to list them for an endpoint without `/models`, declare them in `config.yaml`; they are listed first, ahead of the live catalog:
+
+```yaml
+providers:
+  azure-foundry:
+    models:
+      - gpt-5.4
+      - kimi-k2.6
+```
+
+The runtime picker resolves the endpoint from `model.base_url` while Azure Foundry is the active provider; set `AZURE_FOUNDRY_BASE_URL` as well if you want the row to stay populated after switching to another provider.
 
 ## Environment variables
 
@@ -67908,12 +68407,12 @@ By default, Ollama uses a 2048-token context. Hermes requires at least 64,000 to
 
 ```bash
 # Create a Modelfile that extends context
-cat > /tmp/Modelfile << 'EOF'
+cat > ~/.hermes/cache/scratch/Modelfile << 'EOF'
 FROM gemma4:31b
 PARAMETER num_ctx 64000
 EOF
 
-ollama create gemma4-64k -f /tmp/Modelfile
+ollama create gemma4-64k -f ~/.hermes/cache/scratch/Modelfile
 ```
 
 Then update your Hermes config to use `gemma4-64k` as the model name.
@@ -69433,7 +69932,7 @@ hermes send --to telegram "deploy finished"
 echo "RAM 92%" | hermes send --to telegram:-1001234567890
 
 # Send a file
-hermes send --to discord:#ops --file /tmp/report.md
+hermes send --to discord:#ops --file ~/.hermes/cache/scratch/report.md
 
 # Attach a subject/header line
 hermes send --to slack:#eng --subject "[CI] build.log" --file build.log
@@ -71624,7 +72123,7 @@ Bots message each other with attribution, and you can hand work off from any cha
 
 - **@mentions** — type `@researcher have a look at this` in any chat and the composer's `@` autocomplete helps you pick the right Bot; on send, the mention is resolved against the live roster and the active Bot is told exactly who you mean (profile, friendly name, and device for cross-connection Bots). The Bot then composes its own message and sends it with `message_agent` — your text is never forwarded verbatim, and the reply comes back attributed to that agent. An email address or an unknown `@` passes through untouched. Bots on other connected machines are reachable the same way: the Desktop relays the message over that connection's own socket (see *Bots across machines* below).
 - **Renamed Bots keep their tags in sync** — give a Bot a friendly name (the pencil in its chat header, or `hermes profile rename`) and it becomes taggable by that name: a Bot titled *Research Buddy* answers to `@research-buddy` (and `@researchbuddy`), in regular chats and in group rooms alike. The composer's `@` autocomplete offers the renamed tag and also matches when you type the old profile name, which keeps resolving too. This includes the primary Bot: rename it *Maia* and group-turn prompts introduce it as `@maia`, its inter-agent messages sign as `Message from 🤖 Maia (@hermes)`, and teammates can `message_agent(target="maia")` it — `@hermes` stays a working alias.
-- **Direct messages** — every Bot Chat carries the `message_agent` tool: a Bot messages a teammate by calling `message_agent(target="researcher", message="…")`. The target is the teammate's profile name, its friendly name (`hermes profile rename` or the Bot Mode title — `Scribe`, `Dr. Foo`) or the `@`-tag the Desktop inserts for it (`@scribe`, `@dr-foo`, `@drfoo`); `@hermes` always means the primary Bot. A profile name is matched first, so it can never be hijacked by another Bot's friendly name, and a friendly name shared by two Bots is refused with the roster instead of guessing. The tool validates the target against the live roster, prefixes the sender's `Message from 🤖 <friendly name> (@<handle>):` attribution automatically, and delivers into the teammate's canonical Bot Chat. Delivery is **fire-and-forget**: the sender gets a *dispatch* acknowledgement (`status: queued` plus a `delivery_id` — and a `process_id` for the background delivery process — means the message was handed to that process, not that it was delivered), finishes its turn, and that process's completion notification carries the outcome — the reply, or the delivery failure. The message travels as a real parameter (nothing shell-interpreted — quotes, `$(...)`, and backticks arrive verbatim), and the Bot composes its own message rather than forwarding your words. The teammate roster — names **and roles** from each profile's title/description — is part of every Bot Chat's system prompt, so Bots know who does what before choosing a recipient. The tool exists **only** in canonical Bot Chat sessions on Bot-Mode-managed installs; regular chats, group-room member sessions, and CLI sessions never see it.
+- **Direct messages** — every Bot Chat carries the `message_agent` tool: a Bot messages a teammate by calling `message_agent(target="researcher", message="…")`. The target is the teammate's profile name, its friendly name (`hermes profile rename` or the Bot Mode title — `Scribe`, `Dr. Foo`) or the `@`-tag the Desktop inserts for it (`@scribe`, `@dr-foo`, `@drfoo`); `@hermes` always means the primary Bot. A profile name is matched first, so it can never be hijacked by another Bot's friendly name, and a friendly name shared by two Bots is refused with the roster instead of guessing. The tool validates the target against the live roster, prefixes the sender's `Message from 🤖 <friendly name> (@<handle>):` attribution automatically, and delivers into the teammate's canonical Bot Chat. Delivery is **fire-and-forget**: the sender gets a *dispatch* acknowledgement (`status: queued` plus a `delivery_id` — and a `process_id` for the background delivery process — means the message was handed to that process, not that it was delivered), finishes its turn, and that process's completion notification carries the outcome — the reply, or the delivery failure. On surfaces that cannot receive completion notifications (an `api_server` session, one-shot runners) the acknowledgement instead carries `reply_delivery: poll`: the sender retrieves the outcome with `process(action="wait", session_id=…)` before ending its turn, and the outcome is also saved into the sender's session transcript as a delivery row when the process exits, so the reply is never silently lost. The message travels as a real parameter (nothing shell-interpreted — quotes, `$(...)`, and backticks arrive verbatim), and the Bot composes its own message rather than forwarding your words. The teammate roster — names **and roles** from each profile's title/description — is part of every Bot Chat's system prompt, so Bots know who does what before choosing a recipient. The tool exists **only** in canonical Bot Chat sessions on Bot-Mode-managed installs; regular chats, group-room member sessions, and CLI sessions never see it.
 
 Local messages also reach a Bot Chat that stays open in Desktop or the TUI. The receiving backend keeps ownership: it reads durable ingress on its existing notification poller, admits immediately when idle, or waits until the running turn and already queued human prompts finish. A `queued` acknowledgement confirms durable admission, **not** a completed reply. The target profile retains the delivery ID and receipt under `runtime/bot_live_delivery/`; `settled` confirms completion. A crashed or cancelled imported turn is not automatically replayed, and pending work pinned to a departed owner remains inspectable rather than being silently rerun. Do not resend a delivery whose outcome is unknown. Older backends without live-delivery capability retain the existing ownership refusal; restart that backend after upgrading.
 
@@ -71698,9 +72197,9 @@ Bots on one machine can message Bots on **another machine's gateway** without an
 ```bash
 hermes peer add spark --url http://spark.lan:8377 --key <API_SERVER_KEY>
 hermes peer list
-hermes peer dm spark < /tmp/dm.txt        # message body from a file (nothing shell-interpreted)
-hermes peer dm spark/researcher < /tmp/dm.txt   # named profile on a multiplexed peer
-hermes peer run spark --idempotency-key ticket-123 < /tmp/long-task.txt
+hermes peer dm spark < ~/.hermes/cache/scratch/dm.txt        # message body from a file (nothing shell-interpreted)
+hermes peer dm spark/researcher < ~/.hermes/cache/scratch/dm.txt   # named profile on a multiplexed peer
+hermes peer run spark --idempotency-key ticket-123 < ~/.hermes/cache/scratch/long-task.txt
 hermes peer status spark run_abc123
 hermes peer stop spark run_abc123
 ```
@@ -71926,7 +72425,7 @@ With **Group by → Projects**, each project row previews its three most recent 
 
 The model picker lives in the **composer**, just left of the microphone. Click it to switch the model; hover a model row for its options (thinking, effort, fast). Next to it, a **reasoning pill** shows the active model's effort level (`Med`, `High`, …) and opens the same options directly, so you can change effort without finding the model's row. The pill is hidden for models whose catalog reports no reasoning control. When the gateway flags a switch as risky (a large cached context, an expensive model, a data-training tier), the app asks first in a dialog: **Switch anyway** applies it, **Keep current model** (or Esc) leaves everything as it was.
 
-The **microphone** is dictation; hover it and the other voice toggles fan out above it — **Read replies aloud** and the **wake word** ear. A toggle that is on shows as a solid disc. Starting a full voice conversation stays on the primary button to the right. In the HUD and in narrow tiles the same controls fold into one menu behind the mic instead.
+The **microphone** is dictation; hover it and the other voice toggles fan out above it — **Read replies aloud** and the **wake word** ear. A toggle that is on shows as a solid disc. Starting a full voice conversation stays on the primary button to the right. In the HUD and in narrow tiles the same controls fold into one menu behind the mic instead. When dictation talks to the speech-to-text provider directly (client-direct voice), the request honours the same `stt.openai.timeout` budget (default 60 s) as the gateway's own transcription client, so a slow endpoint fails with "Transcription timed out" instead of leaving the mic stuck on transcribing.
 
 - **The composer picker is sticky UI state and never touches your default.** It's remembered locally (per device) and **follows** across new chats and restarts instead of snapping back to the default — pick a model once and the next `Cmd/Ctrl+N` opens on it. With a live chat, switching models scopes the change to that **current chat**; either way the selection rides along when the session is created/switched and is **never** written to the profile default — with one exception: on a fresh profile that has no `model.default`/`model.provider` configured yet, the first pick is persisted so the app has a real default instead of falling through to a stray API-key env var on restart. Persistence follows the same rule as `/model` (`model.persist_switch_by_default`); use **Settings → Model** to change the default deliberately. (Switching [profiles](#sessions--profiles) reseeds to that profile's own default.)
 - **Set the default in Settings → Model.** That "main" model is your **per-profile global default** — it's what new chats, crons, subagents, and auxiliary tasks start from, and it's the only place that writes it. Each [profile](#sessions--profiles) keeps its own default.
@@ -72019,6 +72518,7 @@ Manage providers, models, tools, and credentials from a real UI instead of editi
 
 - **Providers settings pane** — a dedicated place to manage inference providers, with an Accounts / API-keys UX for signing in and storing credentials per provider. Accounts and API keys share the Settings **Applies to** selection: credential reads and edits, OAuth account removal, and sign-in launched here target the selected profile, not the active chat profile. The sign-in flow keeps that target through credential saving and model selection. Changing **Applies to** discards unsaved credential drafts. Closing sign-in cancels polling and ignores late results; a credential write already sent may still finish in its original profile. Externally managed CLI credentials use their own CLI and are not covered by this profile selector. Its **Local Models** view installs and manages an on-device llama.cpp runtime — see [Local Models](./local-models.md).
 - **Every provider and model in the menus** — the GUI surfaces the full provider list and every model that `hermes model` knows about, so you pick from the same catalog the CLI sees rather than a curated subset.
+- **Custom endpoints with an API mode** — **Settings → Providers → Custom Endpoints** has an **API Mode** selector (**Auto-detect**, **Chat Completions**, **Responses API**, **Anthropic Messages**) — the same choice `hermes model` offers for a custom provider. It is saved as `providers.<id>.api_mode` in `config.yaml`, so a Responses-only or Anthropic-compatible host is no longer called on `/chat/completions`. **Test** checks the transport you will actually use, not just `/v1/models`: it sends a one-token request to the pinned mode's route (or to the mode Auto-detect resolves to) and fails with the transport named when the host does not serve it. **Test** also keeps the alias metadata a gateway advertises in `/v1/models` (`canonical_model`, `reasoning_effort`): picking an alias such as `gpt-5.6-sol-high` saves the canonical model and pins its effort under `agent.reasoning_overrides`.
 - **xAI Grok OAuth** — Grok is a first-class OAuth provider in the launcher; sign in through the browser flow like the other OAuth providers.
 - **Tool-backend installs from the GUI** — run a tool backend's post-setup install steps directly from the app instead of dropping to a terminal. In the terminal backend picker, selecting a backend marked **Needs setup** asks for confirmation first; declining leaves the current backend selected.
 - **Terminal font picker** — choose an installed font in **Settings → Appearance**. Nerd Fonts such as `MesloLGS NF` render Powerlevel10k separators and icons in both interactive and agent terminals; the setting is saved per profile.
@@ -72362,8 +72862,15 @@ generic error toast. The card offers recovery actions matched to the failure:
 
 - **Retry** — re-runs the failed turn in place (hidden when retrying would
   deterministically reproduce the failure, e.g. a content-policy rejection).
-- **Switch provider** — jumps to Settings → Models for provider, endpoint,
-  auth, and billing failures.
+  When a rate-limit or usage-limit response names when the limit lifts
+  (`Retry-After` header or a `resets_at` field), the card shows **Limit resets
+  at HH:mm (in 1h 05m)** next to Retry so you know when a retry will work; the
+  CLI/TUI print the same line under the error. The hint is informational — the
+  turn is not retried automatically.
+- **Switch provider** — for provider, endpoint, auth, and billing failures,
+  opens the composer's live model menu so you can move **this chat** to another
+  provider/model right away (Settings → Models only changes the default for new
+  chats). When no chat surface is on screen it falls back to Settings → Models.
 - **Open logs** — opens `HERMES_HOME/logs` in your file manager. On a remote
   or Cloud connection the button reads **Open Desktop logs**: it opens the
   local Desktop-side logs (transport evidence), since the failed turn's
@@ -72455,7 +72962,7 @@ Point the app at a specific checkout, or sandbox it from your real config:
 
 ```bash
 HERMES_DESKTOP_HERMES_ROOT=/path/to/clone npm run dev
-HERMES_HOME=/tmp/throwaway npm run dev
+HERMES_HOME=$HOME/.hermes/cache/scratch/throwaway npm run dev
 npm run dev:fake-boot   # exercise the startup overlay with deterministic delays
 ```
 
@@ -73342,7 +73849,7 @@ docker compose exec gateway \
 
 # Codex App-Server Runtime
 
-Hermes can optionally hand `openai/*` and `openai-codex/*` turns to the [Codex CLI app-server](https://github.com/openai/codex) instead of running its own tool loop. When enabled, terminal commands, file edits, sandboxing, and MCP tool calls all execute inside Codex's runtime — Hermes becomes the shell around it (sessions DB, slash commands, gateway, memory and skill review).
+Hermes can optionally hand `openai/*`, `openai-codex/*` and [named custom provider](#named-custom-providers) turns to the [Codex CLI app-server](https://github.com/openai/codex) instead of running its own tool loop. When enabled, terminal commands, file edits, sandboxing, and MCP tool calls all execute inside Codex's runtime — Hermes becomes the shell around it (sessions DB, slash commands, gateway, memory and skill review).
 
 This is **opt-in only**. Default Hermes behavior is unchanged unless you flip the flag. Hermes never auto-routes you onto this runtime.
 
@@ -73357,6 +73864,7 @@ Not using OpenAI Codex? `hermes setup --portal` configures a non-Codex backend w
 - **Native Codex plugins** — Linear, GitHub, Gmail, Calendar, Canva, etc. — installed via `codex plugin` are auto-migrated and active in your Hermes session.
 - **Hermes' richer tools come along** — web_search, web_extract, browser automation, vision, image generation, skills, and TTS work via an MCP callback. Codex calls back into Hermes for tools it doesn't have built in.
 - **Memory and skill nudges keep working** — Codex's events are projected into Hermes' message shape so the self-improvement loop sees a normal-looking transcript.
+- **Your Hermes persona rides along** — the composed system prompt (SOUL.md, MEMORY.md/USER.md, per-channel `system_prompt` overrides) is sent to the codex thread once as developer instructions when the thread starts, and Codex's built-in personality is disabled so it cannot compete with yours.
 
 ## What tools the model actually has
 
@@ -73451,6 +73959,7 @@ The kanban tools are gated by `HERMES_KANBAN_TASK` env var the dispatcher sets �
 | `web_search`, `web_extract` | yes | yes (via MCP callback) |
 | Browser automation (Camofox/Browserbase) | yes | yes (via MCP callback) |
 | `vision_analyze`, `image_generate` | yes | yes (via MCP callback) |
+| Image attachments in the user turn (screenshots, pasted images, `/image`) | yes (native multimodal) | yes — sent natively as app-server image inputs (data/http URLs) or local-image paths, never flattened to a text marker |
 | `skill_view`, `skills_list` | yes | yes (via MCP callback) |
 | `text_to_speech` | yes | yes (via MCP callback) |
 | Codex `shell` (terminal/read/write/search/find/run) | — | yes (Codex built-in) |
@@ -73462,12 +73971,14 @@ The kanban tools are gated by `HERMES_KANBAN_TASK` env var the dispatcher sets �
 | Native Codex plugins (Linear, GitHub, etc.) | — | yes (auto-migrated) |
 | User MCP servers | yes | yes (auto-migrated to codex) |
 | Memory + skill review (background) | yes | yes (via item projection) |
+| System prompt / SOUL.md / channel `system_prompt` overrides | yes | yes (sent once as developer instructions on thread start) |
 | Multi-turn conversations | yes | yes |
 | `/goal` (Ralph loop) | yes | yes |
 | Kanban worker dispatch | yes | yes (via callback) |
 | Kanban orchestrator tools | yes | yes (via callback) |
 | All gateway platforms | yes | yes |
-| Non-OpenAI providers | yes | n/a — OpenAI/Codex-scoped |
+| Named custom providers (`providers.<name>`) | yes | yes — a matching `[model_providers.<name>]` in `~/.codex/config.toml` is required |
+| Other non-OpenAI providers | yes | n/a — not routed through codex |
 
 ### Live display
 
@@ -73496,6 +74007,35 @@ uses:
    codex login                  # writes tokens to ~/.codex/auth.json
    ```
    Hermes' own `hermes auth add openai-codex` writes to `~/.hermes/auth.json` — that's a separate session. **Run `codex login` separately** if you haven't.
+
+   <a id="named-custom-providers"></a>**Or: a named custom provider.** A `providers.<name>` entry in Hermes config can use this runtime when the **same name** is defined as a Codex provider. Hermes config:
+
+   ```yaml
+   providers:
+     my-gateway:
+       api: https://gateway.example.com/v1
+       key_env: MY_GATEWAY_API_KEY
+       default_model: gpt-5.4
+
+   model:
+     provider: custom:my-gateway
+     default: gpt-5.4
+     openai_runtime: codex_app_server
+   ```
+
+   and the matching table in `~/.codex/config.toml`:
+
+   ```toml
+   [model_providers.my-gateway]
+   name = "My Gateway"
+   base_url = "https://gateway.example.com/v1"
+   env_key = "MY_GATEWAY_API_KEY"
+   wire_api = "responses"
+   ```
+
+   Hermes sends only `model` and `modelProvider = "my-gateway"` on `thread/start`; codex resolves `base_url` and reads the key from `env_key` in its own environment. **Hermes never forwards the API key**, so `MY_GATEWAY_API_KEY` must be present in the process environment Hermes runs in — `~/.hermes/.env` is loaded at startup and provider credentials are inherited by the codex subprocess. Auxiliary calls (titles, compression, memory review) still use Hermes' own `providers.my-gateway` entry.
+
+   Caveats: the name after `custom:` is the `providers:` config key and must match the `[model_providers.<name>]` table name exactly — if it does not exist on the codex side, codex reports an unknown provider rather than silently using the Hermes endpoint. Anonymous `provider: custom` (a bare `base_url`) is not eligible: it has no stable name to hand to codex, so it stays on Hermes' standard runtime.
 
 3. **(Optional) Install the Codex plugins you want.** When you enable the runtime, Hermes auto-migrates whichever curated plugins you've already installed via Codex CLI:
    ```bash
@@ -73533,6 +74073,20 @@ You can also set it manually in `~/.hermes/config.yaml`:
 model:
   openai_runtime: codex_app_server   # default is "auto" (= Hermes runtime)
 ```
+
+If the Hermes process cannot resolve `codex` from `PATH` — typical for gateway services,
+cron and Kanban workers, or a desktop-bundled CLI — and the first turn fails with
+`No such file or directory: 'codex'`, point the runtime at the executable explicitly:
+
+```yaml
+model:
+  openai_runtime: codex_app_server
+  codex_bin: /Applications/Codex.app/Contents/Resources/codex   # default: "codex" from PATH
+```
+
+`model.codex_bin` is used everywhere Hermes spawns codex: the `/codex-runtime` availability
+check, native plugin discovery during migration, and the long-lived app-server subprocess.
+The value is a single executable path, not a shell command — no quoting or extra arguments.
 
 ## Self-improvement loop (memory + skill nudges)
 
@@ -73579,7 +74133,7 @@ Codex requests approval before executing commands or applying patches. These get
 - **Allow for this session** → Codex won't re-prompt for similar commands.
 - **Deny** → command is rejected; Codex continues in read-only mode.
 
-For `apply_patch` (file edit) approvals, Hermes shows a summary of what changed (`1 add, 1 update: /tmp/new.py, /tmp/old.py`) when codex provides the data via the corresponding `fileChange` item.
+For `apply_patch` (file edit) approvals, Hermes shows a summary of what changed (`1 add, 1 update: src/new.py, src/old.py`) when codex provides the data via the corresponding `fileChange` item.
 
 ## Permission profiles
 
@@ -73636,7 +74190,7 @@ default_permissions = ":workspace"
 # end hermes-agent managed section
 ```
 
-Anything **outside** that block is yours. Re-running migration (via `/codex-runtime codex_app_server` or whenever you toggle the runtime on) replaces the managed block in place but preserves user content above and below it verbatim. This means you can:
+Anything **outside** that block is yours. Re-running migration (via `/codex-runtime codex_app_server`, whenever you toggle the runtime on, or `hermes codex-runtime migrate`) replaces the managed block in place but preserves user content above and below it verbatim. This means you can:
 
 - Add your own MCP servers Hermes doesn't know about
 - Override `default_permissions` to `:read-only` if you prefer to be prompted
@@ -73644,6 +74198,19 @@ Anything **outside** that block is yours. Re-running migration (via `/codex-runt
 - Add user-defined permission profiles in `[permissions.<name>]` tables
 
 Anything you add **inside** the managed block will get clobbered on the next migration. If you need a tweak that requires editing the managed block, file an issue and we'll add the knob.
+
+**Same-name servers.** If your own `[mcp_servers.<name>]` table (outside the block) uses the same name as a server in Hermes' `mcp_servers`, your table wins: Hermes skips its projection for that name instead of emitting a second `[mcp_servers.<name>]` header (which is invalid TOML and would stop codex from starting). The migration report lists such names under "Kept N user-owned MCP server(s)". To let Hermes manage the server, delete your table and re-run the migration. The rendered file is parsed as TOML before it replaces `config.toml`; an unparsable result is reported and the existing file is left untouched.
+
+### Running the migration from a script
+
+```bash
+hermes codex-runtime migrate            # rewrite the managed block for the active profile
+hermes codex-runtime migrate --dry-run  # report only, no write
+hermes codex-runtime migrate --json     # machine-readable report (migrated, preserved_user_servers, errors, …)
+hermes -p work codex-runtime migrate    # a named profile's mcp_servers
+```
+
+This is the same migration `/codex-runtime codex_app_server` runs; it is idempotent, writes atomically, and exits non-zero when the report contains errors. It writes `$CODEX_HOME/config.toml` when `CODEX_HOME` is set (see below), otherwise `~/.codex/config.toml`.
 
 ## Multi-profile / multi-tenant setups
 
@@ -73745,6 +74312,8 @@ Known limitations:
 - **Hermes auth and codex auth are separate sessions.** You need both `codex login` AND `hermes auth add openai-codex` for the cleanest UX (the runtime uses codex's session for the LLM call). This is a deliberate design choice in Hermes' `_import_codex_cli_tokens` — Hermes won't share OAuth state with codex CLI to avoid clobbering each other on token refresh.
 - **`delegate_task`, `memory`, `session_search`, `todo` are unavailable on this runtime.** They need the running AIAgent context which a stateless MCP callback can't provide. Use `/codex-runtime auto` when you need these.
 - **No inline patch preview in approval prompts when codex doesn't track the changeset.** Codex's `fileChange` approval params don't always carry the changeset. Hermes caches the data from the corresponding `item/started` notification when possible, but if approval arrives before the item has streamed, the prompt falls back to whatever `reason` codex provides.
+- **`fallback_providers` fail over only on quota and rate-limit failures.** When a codex app-server turn fails with a billing / usage-limit / rate-limit error, Hermes switches to the configured [fallback provider](./fallback-providers.md) and retries the same turn on it; auth failures (`codex login` expired), turn timeouts and unknown-model errors do not fail over on this runtime and surface as the turn's error instead.
+- **Conversation history is not projected into the codex thread.** The codex thread receives Hermes' system prompt when it starts plus each new user message; prior Hermes history (e.g. from a resumed session) is not replayed into it. When the composed prompt changes mid-session (for example `/personality` in the TUI or Desktop), the next turn retires the running thread and starts a new one carrying the updated prompt; that new thread does not inherit the retired thread's history.
 - **Sub-second cancellation isn't guaranteed.** Mid-stream interrupts (Ctrl+C while codex is responding) are sent via `turn/interrupt`, but if codex has already flushed the final message, you get the response anyway.
 
 If you find a bug, [open an issue](https://github.com/NousResearch/hermes-agent/issues) with the output of `hermes logs --since 5m`. Mention `codex-runtime` in the title so it's easy to triage.
@@ -74589,7 +75158,7 @@ Three pieces fit together:
    `text_to_speech` for audio, and so on.
 
 2. **The gateway scans agent responses for file paths.** Any absolute path
-   (`/tmp/...`) or home-relative path (`~/...`) ending in a supported
+   (`~/.hermes/cache/scratch/...`) or home-relative path (`~/...`) ending in a supported
    extension gets extracted. Paths inside code blocks and inline code are
    ignored so code samples are never mutilated.
 
@@ -74632,7 +75201,7 @@ persona in `~/.hermes/SOUL.md`, or as a named preset under
 via `/personality`).
 
 The mechanic the agent has to use is simple: render the file to an
-absolute path (e.g. `/tmp/q3-revenue.png`) and mention that path as
+absolute path (e.g. `~/.hermes/cache/scratch/q3-revenue.png`) and mention that path as
 plain text in the reply. The gateway does the rest. Paths inside
 fenced code blocks or backticks are ignored so code samples are never
 mutilated.
@@ -74646,8 +75215,8 @@ deliverable files to their `kanban_complete` call:
 kanban_complete(
     summary="rendered Q3 revenue chart and report",
     artifacts=[
-        "/tmp/q3-revenue.png",
-        "/tmp/q3-report.pdf",
+        "~/.hermes/cache/scratch/q3-revenue.png",
+        "~/.hermes/cache/scratch/q3-report.pdf",
     ],
 )
 ```
@@ -74748,7 +75317,7 @@ The warning lists the exact page ranges and the recovery paths:
 
 1. **A few pages — render + vision.** Convert the pages to images and read them with the vision tool:
    ```bash
-   pdftoppm -jpeg -r 150 -f 92 -l 94 document.pdf /tmp/page
+   pdftoppm -jpeg -r 150 -f 92 -l 94 document.pdf $TMPDIR/page
    ```
    Then inspect each image with `vision_analyze`. Zero extra dependencies (poppler is required for the detection itself).
 2. **Many pages — OCR.** The `ocr-and-documents` skill covers bulk OCR with marker-pdf (90+ languages, handles equations and tables; ~3-5 GB install).
@@ -80000,8 +80569,9 @@ Both are configured through a single backend selection. Providers are chosen via
 | **Perplexity** | `PERPLEXITY_API_KEY` | ✔ | ✔ (query-relevant snippets) | Paid (per-request Search API pricing) |
 | **Keenable** | `KEENABLE_API_KEY` (optional) | ✔ | ✔ | ✔ Keyless ring member · paid with key |
 | **xAI (Grok)** | `XAI_API_KEY` or `hermes auth add xai-oauth` | ✔ | — | Paid (SuperGrok or per-token) |
+| **OpenAI Native (Codex)** | `hermes auth add openai-codex` | ✔ | — | Requires a ChatGPT/Codex subscription |
 
-Brave Search, DDGS, and xAI are **search-only** — pair any of them with Firecrawl/Tavily/Perplexity/Keenable/Exa/Parallel when you also need `web_extract`. DDGS uses the [`ddgs` Python package](https://pypi.org/project/ddgs/) under the hood; if it isn't already installed, run `pip install ddgs` (or let Hermes lazy-install it on first use). xAI runs Grok's server-side `web_search` tool on the Responses API — results are LLM-generated rather than index-backed, so titles, descriptions, and URL choice are all model output (see the [trust-model caveat](#xai-grok) below).
+Brave Search, DDGS, xAI, and OpenAI Native are **search-only** — pair any of them with Firecrawl/Tavily/Perplexity/Keenable/Exa/Parallel when you also need `web_extract`. DDGS uses the [`ddgs` Python package](https://pypi.org/project/ddgs/) under the hood; if it isn't already installed, run `pip install ddgs` (or let Hermes lazy-install it on first use). xAI runs Grok's server-side `web_search` tool on the Responses API — results are LLM-generated rather than index-backed, so titles, descriptions, and URL choice are all model output (see the [trust-model caveat](#xai-grok) below). OpenAI Native declares the same kind of provider-executed tool on the Codex Responses endpoint (see [below](#openai-native)).
 
 **Per-capability split:** you can use different providers for search and extract independently — for example SearXNG (free) for search and Firecrawl for extract. See [Per-capability configuration](#per-capability-configuration) below.
 
@@ -80346,6 +80916,24 @@ web:
 :::caution Trust model
 Unlike index-backed providers (Brave, Tavily, Exa) which return verbatim search-engine results, xAI is an LLM choosing which URLs to surface and writing the titles and descriptions itself. The *content* of the query influences the output, so a maliciously crafted query (e.g. injected via untrusted upstream input the agent picked up) can in principle steer Grok into emitting attacker-chosen URLs. Treat returned URLs the same way you'd treat any model-generated link — validate before fetching, especially if the query came from untrusted input.
 :::
+
+### OpenAI Native (Codex Responses) {#openai-native}
+
+Declares OpenAI's provider-executed `web_search` tool on the Codex Responses endpoint (ChatGPT/Codex subscriptions). The model drives search server-side and folds the results into its own answer — Hermes never runs a client-side search in this mode.
+
+```yaml
+# ~/.hermes/config.yaml
+web:
+  search_backend: "openai-native"
+```
+
+Requirements and scope:
+
+- **Credentials**: an openai-codex OAuth login (`hermes auth add openai-codex`). This backend has no API key of its own; without a login it is simply unavailable.
+- **Transport**: only the Codex Responses endpoint exposes the built-in. On any other transport — a custom OpenAI-compatible `base_url`, or a non-OpenAI model — the client-side `web_search` function is left untouched, because the endpoint cannot be relied on to host the tool. Point `web.search_backend` at an ordinary provider for those.
+- **Search only**: the built-in covers search, not extraction. Pair it with Firecrawl (or another extract-capable backend) through `web.extract_backend` when you also need `web_extract`.
+
+**One tool either way.** Selecting this backend swaps the client-side `web_search` function for the built-in 1:1 — it is not an additive grant. A session whose toolset has no `web_search` never gets server-side search injected.
 
 ---
 
@@ -80820,7 +81408,10 @@ models** section on the same page searches all of Hugging Face:
 If a llama-server is already running on your machine, Hermes detects it
 and uses it instead of starting its own. Point a custom endpoint at any
 OpenAI-compatible server for full manual control — the managed runtime is
-a default, not a requirement. For manual setups (Ollama, MLX, custom
+a default, not a requirement. You can enter the server root (for example
+`http://127.0.0.1:8080`) or the full `/v1` URL: the endpoint test tries
+both and saves the variant that actually served `/models`, so chat
+requests go to the same prefix the model list came from. For manual setups (Ollama, MLX, custom
 builds, headless CLI machines), see
 [Run Hermes Locally with Ollama](../guides/local-ollama-setup.md) and
 [Run Local LLMs on Mac](../guides/local-llm-on-mac.md).
@@ -84037,6 +84628,7 @@ platforms:
         baseUrl: "https://open.bigmodel.cn/api/coding/paas/v4"
         apiKey: "your-stt-key"
         model: "glm-asr"
+        timeout: 60              # seconds per transcription request (default 60)
 ```
 
 ## Voice Messages (STT)
@@ -87395,7 +87987,7 @@ or allow-all opt-in are read from the owning profile's `.env` — the default
 profile opting into open access never opens a secondary profile's bot, and a
 secondary that opts in only in its own `.env` is honored. The same holds for
 per-bot behaviour written in a profile's `config.yaml` (`require_mention`,
-`mention_patterns`, `allow_bots`, `reactions`, `auto_thread`, `dm_policy`,
+`mention_patterns`, `allow_bots`, `reactions`, `auto_thread`, `free_response_auto_thread`, `dm_policy`,
 `ignored_channels`, Matrix `session_scope`, …): a secondary profile's YAML never
 lands in the shared process environment, so it cannot become the default
 profile's policy, and the default profile's YAML never governs a secondary
@@ -89904,6 +90496,7 @@ A Chinese-language walkthrough of the minimum install path is maintained on this
 
 The native Windows install runs in Windows directly: your Windows terminal (PowerShell, Windows Terminal, etc.), Windows filesystem paths (`C:\Users\…`), and Windows processes.  Hermes uses Git Bash to run shell commands, which is how Claude Code and other agents handle Windows today — it sidesteps the POSIX-vs-Windows gap without a full rewrite.
 
+<!-- no-tmp: ok — lists /tmp as a POSIX feature WSL provides -->
 WSL2 runs a real Linux kernel in a lightweight VM, so Hermes inside it is essentially identical to running on Ubuntu.  That's valuable when you want a real POSIX environment: `fork`, `/tmp`, UNIX sockets, signal semantics, PTY-backed terminals, shells like `bash`/`zsh`, and tools like `rg`, `git`, `ffmpeg` that behave the way they do on Linux.
 
 Practical consequences of WSL2:
