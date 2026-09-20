@@ -5941,7 +5941,7 @@ display:
       tool_progress: 'off'    # quiet in shared Slack workspace
 ```
 
-From the CLI, use the canonical path — `hermes config set display.platforms.telegram.streaming false`. The shorthand `hermes config set platforms.telegram.streaming false` is accepted too: because per-platform *display* settings (`streaming`, `show_reasoning`, `tool_progress`, …) are only ever read from `display.platforms`, `config set`/`get`/`unset` redirect that shorthand to the canonical key and print a note. Connection keys under the top-level `platforms.<name>` block (`token`, `enabled`, `reply_to_mode`, `extra`) are not redirected.
+From the CLI, use the canonical path — `hermes config set display.platforms.telegram.streaming false`. The shorthand `hermes config set platforms.telegram.streaming false` is accepted too: because per-platform *display* settings (`streaming`, `show_reasoning`, `tool_progress`, …) are only ever read from `display.platforms`, `config set`/`get`/`unset` redirect that shorthand to the canonical key and print a note. Connection keys under the top-level `platforms.<name>` block (`token`, `enabled`, `reply_to_mode`, `extra`) are not redirected. Writing them under the nested prefix (`hermes config set gateway.platforms.telegram.enabled true`) is redirected to the top-level `platforms.telegram.enabled` with a note: the gateway reads both blocks, but the top-level one wins on shared keys, so a nested write would be silently shadowed by an existing top-level value.
 
 Platforms without an override fall back to the global `tool_progress` value. Valid platform keys: `telegram`, `discord`, `slack`, `signal`, `whatsapp`, `matrix`, `mattermost`, `email`, `sms`, `homeassistant`, `dingtalk`, `feishu`, `wecom`, `weixin`, `bluebubbles`, `qqbot`. The legacy `display.tool_progress_overrides` key still loads for backward compatibility but is deprecated and migrated into `display.platforms` on first load.
 
@@ -7314,7 +7314,7 @@ What happens:
 1. The CLI validates that `<platform>` is enabled and has a home channel set (run `/sethome` from the destination chat once to configure it).
 2. The CLI marks the session pending and **block-polls the gateway**. It refuses if the agent is mid-turn — wait for the current response to finish first.
 3. The gateway watcher claims the handoff and asks the destination adapter for a fresh thread:
-   - **Telegram** — opens a new forum topic (DM topics if Bot API 9.4+ Topics mode is enabled in the chat, or a forum supergroup topic).
+   - **Telegram** — opens a new forum topic (DM topics if the bot owner has enabled Threaded Mode via BotFather, or a forum supergroup topic).
    - **Discord** — creates a 1440-min auto-archive thread under the home text channel.
    - **Slack** — posts a seed message and uses its `ts` as the thread anchor.
    - **Matrix** — posts a seed message and uses its event id as the thread root (`m.thread` relation).
@@ -15833,11 +15833,11 @@ Cron jobs can:
 All of this is available to Hermes itself through the `cronjob` tool, so you can create, pause, edit, and remove jobs by asking in plain language — no CLI required.
 
 :::tip
-**Which model does a cron job run on?** Resolution at fire time is: per-job pin → `cron.model` in `config.yaml` → the global default from `hermes model`.
+**Which model does a cron job run on?** Resolution at fire time is: per-job pin → `cron.model` in `config.yaml` → the main agent model from `hermes model`.
 
-- **Per-job pin** — set by *you* via the dashboard, `hermes cron create/edit --model … --provider …`, or by editing `~/.hermes/cron/jobs.json`. Once set, it sticks until you change it. The agent's `cronjob` tool cannot set or change per-job models — inference pins are user-owned.
+- **Per-job pin** — a job that carries its own model. Set it to a specific model via the dashboard, `hermes cron create/edit --model … --provider …`, or by editing `~/.hermes/cron/jobs.json`; or **lock in the current main model** with `hermes cron create/edit --pin` (the agent's `cronjob` tool can do this too with `pinned=true`, but only when you ask it to). `--unpin` (`pinned=false`) releases the lock. The agent cannot point a job at a *different* model — inference pins are user-owned.
 - **`cron.model` / `cron.model_provider`** — a cron-fleet default: every unpinned job runs on this model, independent of your chat model. Set it once (`hermes config set cron.model <name>`) and switching your chat model with `hermes model` or `/model` never touches your cron fleet.
-- **Global default** — only when neither of the above is set does a job follow `hermes model`. Hermes **snapshots** the provider and model at creation, and that snapshot is the job's effective pin: if you later switch the global default (`hermes model`, `/model`, `hermes config set model.default …`), the job **keeps running on the model and provider it was created under** and logs one INFO line per run noting the difference. A global model change never stops a scheduled job, and an unattended job never silently inherits a switch to a paid provider/model (#44585). To move a job to the new default, **resnap** it (`hermes cron resnap <job_id>`, or `--all` for every unpinned job) so it adopts the current default while staying unpinned, pin it (`hermes cron edit <job_id> --provider <provider> --model <model>`), or set `cron.model` to move the whole fleet at once. Jobs created before snapshots existed keep following the live global default.
+- **Main agent model** — when neither of the above is set, a job runs on whatever `hermes model` / `/model` is set to **at the moment it fires**. Change your main model and every unpinned job follows on its next run.
 
 Whichever provider a job resolves to, its provider-specific request settings (e.g. `request_overrides` such as `extra_body`/`extra_headers` for custom providers) carry into the scheduled run just like an interactive session.
 
@@ -15929,28 +15929,17 @@ Or: `hermes config set cron.preflight false`
 
 ## Moving unpinned jobs to a new global default
 
-An unpinned job stays on the provider/model it was created under, so changing your chat model
-never changes (or stops) your cron fleet. When you *do* want scheduled jobs to move:
+An unpinned job follows the main agent model, so `hermes model` moves your cron fleet with it.
+When you want a job to *stay* on a model:
 
 ```bash
-hermes cron edit <job_id> --provider <provider> --model <model>   # one job
-hermes config set cron.model <model>                               # every unpinned job
+hermes cron edit <job_id> --pin                                   # lock the current main model onto one job
+hermes cron edit <job_id> --provider <provider> --model <model>   # pin an explicit model
+hermes cron edit <job_id> --unpin                                 # follow the main model again
+hermes config set cron.model <model>                              # every unpinned job, without touching chat
 ```
 
-`hermes config set model.default …` and the Desktop model picker list the unpinned jobs that will
-keep their original model so you can decide deliberately. Stored snapshots are refreshed whenever
-you edit a job's provider, model, or base URL.
-
-Resnapping refreshes an unpinned job's stored snapshot to the current global resolution without
-pinning it, so it keeps tracking future changes:
-
-```bash
-hermes cron resnap <job_id>   # one job
-hermes cron resnap --all      # every unpinned agent job
-```
-
-The agent-facing `cronjob` tool accepts the same action (`action=resnap job_id=<id>` or
-`action=resnap all=true`). Pinned axes and `no_agent` script jobs are left untouched.
+`hermes cron list` and the `cronjob` tool report `pinned` per job.
 
 ## Skill-backed cron jobs
 
@@ -18609,6 +18598,7 @@ hermes dashboard        # "Kanban" tab appears in the nav, after "Skills"
 ### What the plugin gives you
 
 - A **Kanban** tab showing one column per status: `triage`, `todo`, `ready`, `running`, `blocked`, `done` (plus `archived` when the toggle is on).
+  - Queue columns list cards in dispatch order (priority, then oldest first — top card spawns next). The `done` column is history and lists newest-completed first; `hermes kanban list --status done --sort completed-desc` gives the same order on the CLI.
   - `triage` is the parking column for rough ideas. By default (`kanban.auto_decompose: true`), the dispatcher auto-runs the **decomposer** on tasks that land here. The built-in decomposer uses the `auxiliary.kanban_decomposer` model path, reads your profile roster (with descriptions), and fans the task out into a small graph of child tasks routed to the best-fit specialists. The original task stays alive as the parent of every child so its assignee (`kanban.orchestrator_profile`, else the assignee the task already had, else the active default profile) wakes back up to judge completion when everything finishes. Flip the **Orchestration: Auto/Manual** pill at the top of the page (emerald = Auto, muted gray = Manual), or by editing `config.yaml` directly. Both modes coexist with `hermes kanban specify` - that's still available as a single-task spec rewrite when you don't want fan-out.
 - Cards show the task id, title, priority badge, tenant tag, assigned profile, comment/link counts, a **progress pill** (`N/M` children done when the task has dependents), and "created N ago". A per-card checkbox enables multi-select.
 - **Per-profile lanes inside Running** — toolbar checkbox toggles sub-grouping of the Running column by assignee.
@@ -18782,7 +18772,7 @@ hermes kanban create "<title>" [--body ...] [--assignee <profile>]
                                 [--json]
 hermes kanban list [--mine] [--assignee P] [--status S] [--tenant T] [--archived]
         [--workflow-template-id <id>] [--current-step-key <key>]
-        [--sort created|created-desc|priority|priority-desc|status|assignee|title|updated]
+        [--sort completed-desc|created|created-desc|priority|priority-desc|status|assignee|title|updated]
         [--json]
 hermes kanban show <id> [--json]
 hermes kanban assign <id> <profile>                    # or 'none' to unassign
@@ -27052,13 +27042,13 @@ Each topic gets its own conversation session, history, and context — completel
 ### Configuration
 
 :::caution Prerequisites
-Before adding topics to your config, the user must **enable Topics mode** in the DM chat with the bot:
+Before adding topics to your config, the bot owner must **enable Threaded Mode** for the bot in **@BotFather**:
 
-1. Open your private chat with the Hermes bot in Telegram
-2. Tap the bot's name at the top to open chat info
-3. Enable **Topics** (the toggle to turn the chat into a forum)
+1. Open the BotFather **Mini App** (search `botfather` in Telegram, then tap **Open** on the search result — the classic `/mybots` text menu does not expose this setting)
+2. Go to **My bots → your bot → Bot Settings → Threads Settings**
+3. Turn on **Threaded Mode**
 
-Without this, Hermes will log `The chat is not a forum` on startup and skip topic creation. This is a Telegram client-side setting — the bot cannot enable it programmatically.
+There is no "Topics" toggle in the DM chat itself — a bot DM is not a group, so the group-forum toggle described in some older guides does not apply here. Without Threaded Mode, Hermes will log `The chat is not a forum` on startup and skip topic creation. See [Prerequisites](#prerequisites) below for the same steps with more detail.
 :::
 
 Add topics under `platforms.telegram.extra.dm_topics` in `~/.hermes/config.yaml`:
@@ -30063,7 +30053,7 @@ All of this works out of the box in bot (Baileys) mode; no configuration needed.
 
 ### Message Batching (Debounce)
 
-WhatsApp delivers each message individually, so a rapid burst (forwarded batches, paste-splits, multi-line text) would otherwise trigger a separate agent invocation per fragment — wasting tokens and producing several disjointed replies. The adapter buffers successive text messages from the same chat and dispatches them as one combined request after a short quiet period (default **5s**, extended to **10s** for very long fragments). Tune via `config.yaml`:
+WhatsApp delivers each message individually, so a rapid burst (forwarded batches, paste-splits, multi-line text) would otherwise trigger a separate agent invocation per fragment — wasting tokens and producing several disjointed replies. The adapter buffers successive text messages from the same chat and dispatches them as one combined request after a short quiet period (default **0.3s**, extended to **1s** for very long fragments; capped at 2s / 4s). Tune via `config.yaml`:
 
 ```yaml
 # ~/.hermes/config.yaml
@@ -30071,8 +30061,8 @@ gateway:
   platforms:
     whatsapp:
       extra:
-        text_batch_delay_seconds: 5.0         # quiet period before flushing a batch
-        text_batch_split_delay_seconds: 10.0  # extended delay near the split threshold
+        text_batch_delay_seconds: 0.3         # quiet period before flushing a batch (max 2.0)
+        text_batch_split_delay_seconds: 1.0   # extended delay near the split threshold (max 4.0)
 ```
 
 Set `text_batch_delay_seconds: 0` to dispatch each message immediately (disables batching).
@@ -30825,10 +30815,10 @@ Before setup, here's the part most people want to know: how Hermes behaves once 
 
 | Context | Behavior |
 |---------|----------|
-| **DMs** | Hermes responds to every message. No `@mention` needed. Each DM has its own session. Set `MATRIX_DM_MENTION_THREADS=true` to start a thread when the bot is `@mentioned` in a DM. |
-| **Rooms** | By default, Hermes requires an `@mention` to respond. Set `MATRIX_REQUIRE_MENTION=false` or add room IDs to `MATRIX_FREE_RESPONSE_ROOMS` for free-response rooms. Room invites are auto-accepted. |
+| **DMs** | Hermes responds to every message. No `@mention` needed. Each DM has its own session. Set `MATRIX_DM_MENTION_THREADS=true` to start a thread when the bot is `@mentioned` in a DM. Any room with 2 or fewer joined members is treated as a DM this way too, even if it has an explicit name — Matrix clients auto-name 1:1 chats, so name alone isn't a reliable signal. |
+| **Rooms** | By default, Hermes requires an `@mention` to respond. Set `MATRIX_REQUIRE_MENTION=false` or add room IDs to `MATRIX_FREE_RESPONSE_ROOMS` for free-response rooms. Room invites are auto-accepted. A deliberately-created 2-person room is still classified as a DM (see above) and silently bypasses `MATRIX_ALLOWED_ROOMS`, `MATRIX_REQUIRE_MENTION`, and `MATRIX_FREE_RESPONSE_ROOMS` — add a third member if you need it to behave like a regular room. |
 | **Threads** | Hermes supports Matrix threads (MSC3440). If you reply in a thread, Hermes keeps the thread context isolated from the main room timeline. Threads where the bot has already participated do not require a mention. |
-| **Auto-threading** | By default, Hermes auto-creates a thread for each message it responds to in a room. This keeps conversations isolated. Set `MATRIX_AUTO_THREAD=false` to disable. Set `MATRIX_DM_AUTO_THREAD=true` (default false) to also auto-create threads for DM messages — this is distinct from `MATRIX_DM_MENTION_THREADS`, which only starts a thread when the bot is `@mentioned` in a DM. |
+| **Auto-threading** | By default, Hermes auto-creates a thread for each message it responds to in a room. This keeps conversations isolated. Set `MATRIX_AUTO_THREAD=false` to disable. Set `MATRIX_DM_AUTO_THREAD=true` (default false) to also auto-create threads for DM messages — this is distinct from `MATRIX_DM_MENTION_THREADS`, which only starts a thread when the bot is `@mentioned` in a DM. Rooms with 2 or fewer joined members are DM-classified (see above) and follow `MATRIX_DM_AUTO_THREAD`, not `MATRIX_AUTO_THREAD`. |
 | **Commands** | Hermes accepts normal `/commands` when your Matrix client sends them. If your client reserves `/` for local commands, use `!commands` instead; Hermes normalizes known `!command` aliases to `/command`. |
 | **Interactive controls** | Dangerous-command approval and `/model` selection can use Matrix reactions. Approval reactions can be limited to the user who requested the action. |
 | **Thinking and tool activity** | Matrix uses threaded, editable thinking/tool-activity panes when gateway progress is enabled, so updates do not flood the main room timeline. |
@@ -44926,7 +44916,9 @@ Multiple hermes processes (gateway + CLI sessions + worktree agents) share one
 `state.db`. The `SessionDB` class handles write contention with:
 
 - **Short SQLite timeout** (1 second) instead of the default 30s
-- **Application-level retry** with random jitter (20-150ms, up to 15 retries)
+- **Time-budgeted application-level retry** with random jitter (20-150ms for the
+  first 2s, then 250ms-1s): 20s for routine writes, 60s for transcript writes
+  (their failure aborts the turn), 0.5s for observation-only activity writes
 - **BEGIN IMMEDIATE** transactions to surface lock contention at transaction start
 - **Periodic WAL checkpoints** every 50 successful writes (PASSIVE mode)
 
@@ -44934,11 +44926,22 @@ This avoids the "convoy effect" where SQLite's deterministic internal backoff
 causes all competing writers to retry at the same intervals.
 
 ```
-_WRITE_MAX_RETRIES = 15
-_WRITE_RETRY_MIN_S = 0.020   # 20ms
-_WRITE_RETRY_MAX_S = 0.150   # 150ms
+_WRITE_PATIENCE_S, _TRANSCRIPT_WRITE_PATIENCE_S, _ACTIVITY_WRITE_PATIENCE_S = 20.0, 60.0, 0.5
+_WRITE_RETRY_MIN_S, _WRITE_RETRY_MAX_S = 0.020, 0.150
+_WRITE_RETRY_SLOW_MIN_S, _WRITE_RETRY_SLOW_MAX_S = 0.250, 1.000
 _CHECKPOINT_EVERY_N_WRITES = 50
 ```
+
+When a writer exhausts its budget the turn ends with
+`session_persistence_failed:locked` and, on Linux, `hermes_state_lockowners`
+logs a WARNING naming the process that held the lock at that moment
+(`PID 594094 (hermes --worktree --yolo) holds WAL write lock on state.db-shm`),
+read from `/proc/locks` — SQLite's byte-range `fcntl` locks encode the lock kind
+in their offset (`state.db-shm` byte 120 = WAL write, 121 = checkpoint,
+123-127 = read slots; the 1 GiB pending-byte page on `state.db` = rollback-journal
+PENDING/RESERVED/SHARED). The open-descriptor scan cannot make this distinction
+because every Hermes process has the DB open. Look for that line in
+`~/.hermes/logs/errors.log` next to the `database is locked` failure.
 
 
 ## Common Operations
@@ -50907,19 +50910,19 @@ These are set automatically by the Docker terminal backend when `proxy.enabled: 
 | `MATRIX_ALLOW_ALL_USERS` | Allow any Matrix user to trigger the bot (dev only). |
 | `MATRIX_HOME_CHANNEL` | Default room ID for cron / notification delivery. |
 | `MATRIX_HOME_CHANNEL_NAME` | Display name for the Matrix home room. |
-| `MATRIX_ALLOWED_ROOMS` | Comma-separated Matrix room IDs allowed to trigger bot responses |
+| `MATRIX_ALLOWED_ROOMS` | Comma-separated Matrix room IDs allowed to trigger bot responses. Does not apply to rooms auto-classified as DMs (any room with 2 or fewer joined members, regardless of name) — those always respond. |
 | `MATRIX_HOME_ROOM` | Room ID for proactive message delivery (e.g. `!abc123:matrix.org`) |
 | `MATRIX_ENCRYPTION` | Enable end-to-end encryption (`true`/`false`, default: `false`) |
 | `MATRIX_E2EE_MODE` | Matrix E2EE behavior: `off`, `optional`, or `required`. Overrides `MATRIX_ENCRYPTION` when set. |
 | `MATRIX_DEVICE_ID` | Stable Matrix device ID for E2EE persistence across restarts (e.g. `HERMES_BOT`). Without this, E2EE keys rotate every startup and historic-room decrypt breaks. |
 | `MATRIX_REACTIONS` | Enable processing-lifecycle emoji reactions on inbound messages (default: `true`). Set to `false` to disable. |
-| `MATRIX_REQUIRE_MENTION` | Require `@mention` in rooms (default: `true`). Set to `false` to respond to all messages. |
-| `MATRIX_FREE_RESPONSE_ROOMS` | Comma-separated room IDs where bot responds without `@mention` |
+| `MATRIX_REQUIRE_MENTION` | Require `@mention` in rooms (default: `true`). Set to `false` to respond to all messages. A room with 2 or fewer joined members is auto-classified as a DM and never requires a mention, regardless of this setting — add a third member if you need a deliberately-2-person room to behave like a regular room. |
+| `MATRIX_FREE_RESPONSE_ROOMS` | Comma-separated room IDs where bot responds without `@mention`. Rooms auto-classified as DMs (2 or fewer joined members) already respond without a mention and ignore this list. |
 | `MATRIX_IGNORE_USER_PATTERNS` | Comma-separated regular expressions for Matrix bridge/appservice ghost user IDs to ignore |
 | `MATRIX_PROCESS_NOTICES` | Process inbound Matrix `m.notice` events (default: `false`) |
 | `MATRIX_SESSION_SCOPE` | Matrix session scope for project rooms: `auto`, `room`, or `thread` (default: `auto`) |
 | `MATRIX_ALLOW_ROOM_MENTIONS` | Allow outbound `@room` mentions to notify all room members (default: `false`) |
-| `MATRIX_AUTO_THREAD` | Auto-create threads for room messages (default: `true`) |
+| `MATRIX_AUTO_THREAD` | Auto-create threads for room messages (default: `true`). Does not apply to rooms auto-classified as DMs (2 or fewer joined members) — those follow `MATRIX_DM_AUTO_THREAD` instead. |
 | `MATRIX_DM_AUTO_THREAD` | Auto-create threads for DM messages in Matrix (default: `false`) |
 | `MATRIX_DM_MENTION_THREADS` | Create a thread when bot is `@mentioned` in a DM (default: `false`) |
 | `MATRIX_APPROVAL_REQUIRE_SENDER` | Require approval/model-picker reactions to come from the original requester when known (default: `true`) |
@@ -50959,6 +50962,7 @@ Three dashboard-auth providers ship in the box. For a remote Hermes Desktop conn
 | `HERMES_DASHBOARD_BASIC_AUTH_SECRET` | HMAC key (32+ bytes, base64/hex/raw) signing the basic provider's stateless session tokens. Set explicitly so sessions survive restarts / span multiple workers; blank → random per-process (you'll be logged out on every restart). Overrides `dashboard.basic_auth.secret`. |
 | `HERMES_DASHBOARD_BASIC_AUTH_TTL_SECONDS` | Access-token lifetime for the basic provider (default 12h). Overrides `dashboard.basic_auth.session_ttl_seconds`. |
 | `HERMES_DASHBOARD_OAUTH_CLIENT_ID` | OAuth client id (`agent:{instance_id}`) for the gated/public dashboard, activating the Nous (`plugins/dashboard_auth/nous`) provider. Overrides `dashboard.oauth.client_id`. Provision it with `hermes dashboard register`. |
+| `HERMES_DASHBOARD_SESSION_TOKEN` | Per-process session token for the dashboard's sensitive `/api` routes, minted by the launcher that spawns `hermes dashboard` (Desktop shell, link-style integrations). A value injected by the parent process is kept as-is: a `HERMES_DASHBOARD_SESSION_TOKEN` line in `~/.hermes/.env` does not replace it. Unset, the server mints a fresh token per start. |
 | `HERMES_DASHBOARD_PUBLIC_URL` | Complete public URL the dashboard is reached at behind a reverse proxy. It controls OAuth callback construction, adds its exact hostname to the HTTP Host/WebSocket Origin guard, and requires the auth gate for non-loopback public hosts even when the backend binds to loopback. Overrides `dashboard.public_url`. |
 | `HERMES_DASHBOARD_OIDC_ISSUER` | OIDC issuer URL for the bundled self-hosted OIDC provider (`plugins/dashboard_auth/self_hosted`). Required to activate it. Overrides `dashboard.oauth.self_hosted.issuer`. |
 | `HERMES_DASHBOARD_OIDC_CLIENT_ID` | Public OIDC client id (authorization-code + PKCE) for the self-hosted OIDC provider. Required to activate it. Overrides `dashboard.oauth.self_hosted.client_id`. |
@@ -59425,6 +59429,7 @@ That's it. After dropping these two files, the following **auto-wire** with no o
 |---|---|---|
 | Credential resolution | `hermes_cli/auth.py` | `PROVIDER_REGISTRY["acme-inference"]` populated from profile |
 | `--provider` CLI flag | `hermes_cli/main.py` | Accepts `acme-inference` |
+| `/model --provider`, model picker switch | `hermes_cli/providers.py::resolve_provider_full` | Resolves `acme-inference` and every alias to the profile (switch lands on `name`, so `acme` persists as `acme-inference`); user `providers:` / `custom_providers:` blocks keep precedence. A profile with an empty `base_url` (endpoint minted at runtime) resolves too, on the last rung |
 | `hermes model` picker | `hermes_cli/models.py` | Appears in `CANONICAL_PROVIDERS`, model list fetched from `{base_url}/models` |
 | `hermes doctor` | `hermes_cli/doctor.py` | Health check for `ACME_API_KEY` + `{base_url}/models` probe |
 | `hermes setup` | `hermes_cli/config.py` | `ACME_API_KEY` appears in `OPTIONAL_ENV_VARS` and the setup wizard |
@@ -59652,9 +59657,19 @@ register_provider(ProviderProfile(
 
 In a fresh Hermes process, `get_provider_profile("gmi").base_url` returns the staging URL. No repo patch, no rebuild. Because user plugins are discovered after bundled ones, the user `register_provider()` call wins.
 
+The override also reaches the runtime. Built-in providers have a row in `hermes_cli.auth.PROVIDER_REGISTRY` (the table `resolve_runtime_provider()` reads its endpoint and env vars from); a `$HERMES_HOME` plugin re-registering that name rewrites the row's profile-derived fields, so inference goes to the staging URL, not the bundled one:
+
+| Profile field | Registry row field | When |
+|---|---|---|
+| `base_url` | `inference_base_url` | profile sets a non-empty `base_url` |
+| `env_vars` (non-URL entries) | `api_key_env_vars` | api-key row and profile sets `env_vars` |
+| `env_vars` (final `*_BASE_URL` / `*_URL` entry) | `base_url_env_var` | profile declares one; otherwise the built-in env var (e.g. `GMI_BASE_URL`) stays |
+
+Only a **user** plugin (`$HERMES_HOME/plugins/model-providers/` or an installed `kind: model-provider` plugin) triggers this; a bundled profile never rewrites a built-in row, and `copilot`, `kimi-coding`, `kimi-coding-cn` and `zai` keep their bespoke credential resolution. A field the profile leaves empty keeps the built-in value. A `*_BASE_URL` env var still wins over both.
+
 ## api_mode selection
 
-Four values are recognized. Hermes picks one based on:
+Four built-in values are recognized (`chat_completions`, `codex_responses`, `anthropic_messages`, `bedrock_converse`), plus any mode a plugin registers itself. Hermes picks one based on:
 
 1. User explicit override (`config.yaml` `model.api_mode` when set)
 2. OpenCode's per-model dispatch (`opencode_model_api_mode` for Zen and Go)
@@ -59663,6 +59678,24 @@ Four values are recognized. Hermes picks one based on:
 5. Default `chat_completions`
 
 Set `profile.api_mode` to match the default your provider ships — it acts as a hint. User URL overrides still win.
+
+### Shipping your own wire dialect
+
+A plugin that speaks a protocol none of the built-in transports cover registers one and names it in the profile:
+
+```python
+from agent.transports import register_transport
+from agent.transports.chat_completions import ChatCompletionsTransport
+
+class MyDialectTransport(ChatCompletionsTransport):
+    api_mode = "mydialect"
+    # override convert_messages / build_kwargs / normalize_response as needed
+
+register_transport("mydialect", MyDialectTransport)
+register_provider(ProviderProfile(name="myprovider", api_mode="mydialect", ...))
+```
+
+Every `api_mode` gate (`determine_api_mode`, runtime resolution, agent construction, delegation) accepts a mode iff the transport registry knows it; a profile naming a mode nobody registered still degrades to `chat_completions`.
 
 ## Auth types
 
@@ -68226,16 +68259,28 @@ another host is treated as an OpenAI-compatible endpoint, so configure it with i
 
 ### Vertex AI Express Mode Keys
 
-Google issues two Gemini key families. AI Studio keys start with `AIza…`; **Vertex AI
-express-mode** keys start with `AQ.…` and only authenticate against
-`aiplatform.googleapis.com` (they get 403 on the AI Studio host). Hermes detects the
-`AQ.` prefix and routes those keys to
-`https://aiplatform.googleapis.com/v1beta1/publishers/google` automatically — set
-`GEMINI_API_KEY` to the express key and leave `GEMINI_BASE_URL` unset. If you set
-`GEMINI_BASE_URL` to `https://aiplatform.googleapis.com` (with or without `/v1beta1`)
-Hermes completes it to the `publishers/google` form; a base URL on any other host (a
-proxy) is never rewritten. Express keys are separate from the OAuth-based
+Google now issues `AQ.…`-prefixed keys for **both** Google AI Studio and Vertex AI
+express mode (the legacy `AIza…` Studio format is being phased out), so a key's
+prefix no longer identifies its surface. Hermes never reroutes by key shape: the
+configured base URL decides the surface. Set `GEMINI_API_KEY` and leave
+`GEMINI_BASE_URL` unset for the default AI Studio host; set `GEMINI_BASE_URL` to
+`https://aiplatform.googleapis.com` (with or without `/v1beta1`) for a Vertex AI
+express-mode key, and Hermes completes it to the `publishers/google` form. Each
+surface only accepts its own keys — a `403 PERMISSION_DENIED` usually means the
+key/host pairing is crossed, and Hermes appends guidance naming the other surface.
+A base URL on any other host (a proxy) is never rewritten. Express keys are
+separate from the OAuth-based
 [Vertex AI provider](./google-vertex.md), which needs no API key.
+
+:::warning Upgrade note for existing express-key users
+Earlier Hermes releases detected the `AQ.` prefix and rerouted such keys to
+`aiplatform.googleapis.com` automatically, so the documented setup was "set
+`GEMINI_API_KEY` to the express key and leave `GEMINI_BASE_URL` unset". That
+automatic reroute is gone: with `GEMINI_BASE_URL` unset, every request — chat,
+`hermes doctor`, TTS — now goes to the AI Studio host and a Vertex express key
+gets `403 PERMISSION_DENIED` there. Add `GEMINI_BASE_URL=https://aiplatform.googleapis.com`
+to `~/.hermes/.env` (or set `base_url` on the provider) once and restart.
+:::
 
 ## Available Models
 
@@ -72326,14 +72371,14 @@ An **Advanced** disclosure opens the full capabilities surface:
 
 - **Clone from an existing profile** — start from another Bot's config, skills, SOUL, and memory, or pick **Fresh profile** for a clean start.
 - **Create empty** — skip the bundled skills entirely for a minimal profile.
-- **Model & provider pin** — give the Bot its own model. Any provider/model pair Hermes knows about works, and different Bots can run on different models side by side. Leave it unset to inherit from the launch profile.
+- **Model & provider pin** — give the Bot its own model. Any provider/model pair Hermes knows about works, and different Bots can run on different models side by side. Leave it unset to inherit from the launch profile. Picking a model from the Bot Chat's composer sticks to that chat (it survives reopening the app) until you change the Bot's profile model, which takes over again.
 - **Custom SOUL.md** — the Bot's persona and standing instructions.
 - **Per-skill, per-toolset, and per-MCP-server enablement** — tick exactly the capabilities this specialist needs.
 - **Copy API keys from the main profile** — on by default. Each Bot gets its own credential store: static API keys are copied in, while single-use OAuth logins (Anthropic, OpenAI Codex, xAI) are not copied — sign the Bot in itself with `hermes -p <name> auth add <provider>`. See [Every profile owns its credentials](./profiles.md#every-profile-owns-its-credentials).
 
 ### Choosing which machine it lives on ("Create on")
 
-With more than one connection registered in [Settings → Connections](./multi-connection-desktop.md), the New Agent dialog grows a **Create on** picker. Pick a device and the profile is created on **that** machine's backend — your window never switches gateways. The new Bot then appears in the roster as a Connections Bot (with an `@name-device` handle when the name exists on several machines), and chatting with it routes to its own machine.
+With more than one connection registered in [Settings → Connections](./multi-connection-desktop.md), the New Agent dialog grows a **Create on** picker. Pick a device and the profile is created on **that** machine's backend — your window never switches gateways. The new Bot then appears in the roster as a Connections Bot (with an `@name-device` handle when the name exists on several machines), and chatting with it routes to its own machine. **Clone from profile** then offers what exists on the target machine — its own `default`, or **Fresh profile** — rather than this window's roster; you never have to switch gateways to create a fresh Bot elsewhere.
 
 With a single connection (the common case) the picker is hidden and the Bot is created on the machine you're connected to — exactly the old behavior.
 
@@ -72358,6 +72403,10 @@ Every Bot gets a face:
 - **A pixel pet** — a companion from the [petdex gallery](./features/pets.md) that bounces beside the avatar while the Bot is busy. Run `hermes pets` in a terminal to explore the gallery.
 
 A Bot's look, title, and description are stored in the profile's metadata on the backend, so the same Bot appears the same way on every desktop connected to that backend.
+
+## Voices
+
+A Bot speaks with its **own profile's** TTS settings (`tts.*` in that profile's `config.yaml`) on its **own gateway**. Read Aloud, auto-speak and voice conversation in a Bot chat — in a split tile or opened in the main pane — all synthesize through the Bot's (connection, profile), so two Bots with different voices sound different and two Bots with the same profile name on different gateways never share a voice. A Bot profile with no `tts.*` of its own uses that profile's server defaults; only a chat with no known owner (a plain session) uses the active profile's voice. Speech-to-text in a Bot chat still uses the active profile's STT settings.
 
 ## Routines
 
@@ -72396,6 +72445,7 @@ A group's identity is editable, at creation and after:
 
 - **New Group Chat** lets you set an optional **room picture** alongside the name — upload one from your device or generate one (when an image backend is configured), using the same pipeline as Bot avatars. The picture appears in the roster row (in place of the default group glyph) and leads the title in the room header.
 - The room header's **gear** button opens **Group settings**, where you can **rename** the group or set, replace, or remove its picture any time. A rename carries everything with it — the room log, each member's room session, memberships, and the picture — so no history is lost. Renaming to a name that's already taken is rejected rather than silently suffixed.
+- **Group settings** also lists every member with a **Compress history** button. Each member keeps a hidden per-room session that grows with every turn; when it gets large enough the member starts answering with empty replies (`The model returned no response after processing tool results`). **Compress history** runs the same context compression as `/compress` against that hidden session — it is not reachable from the sidebar or the room composer — and reports how many messages were folded. Compress one member at a time; the room log itself is untouched.
 
 Groups are standalone rows in the same activity-ordered roster as Bot DMs. A Bot keeps one DM row even when it belongs to several groups, while every group gets its own room row with member count, latest-message preview, timestamp, and needs-you state.
 
@@ -72427,7 +72477,7 @@ Bots message each other with attribution, and you can hand work off from any cha
 
 - **@mentions** — type `@researcher have a look at this` in any chat and the composer's `@` autocomplete helps you pick the right Bot; on send, the mention is resolved against the live roster and the active Bot is told exactly who you mean (profile, friendly name, and device for cross-connection Bots). The Bot then composes its own message and sends it with `message_agent` — your text is never forwarded verbatim, and the reply comes back attributed to that agent. An email address or an unknown `@` passes through untouched. Bots on other connected machines are reachable the same way: the Desktop relays the message over that connection's own socket (see *Bots across machines* below).
 - **Renamed Bots keep their tags in sync** — give a Bot a friendly name (the pencil in its chat header, or `hermes profile rename`) and it becomes taggable by that name: a Bot titled *Research Buddy* answers to `@research-buddy` (and `@researchbuddy`), in regular chats and in group rooms alike. The composer's `@` autocomplete offers the renamed tag and also matches when you type the old profile name, which keeps resolving too. This includes the primary Bot: rename it *Maia* and group-turn prompts introduce it as `@maia`, its inter-agent messages sign as `Message from 🤖 Maia (@hermes)`, and teammates can `message_agent(target="maia")` it — `@hermes` stays a working alias.
-- **Direct messages** — every Bot Chat carries the `message_agent` tool: a Bot messages a teammate by calling `message_agent(target="researcher", message="…")`. The target is the teammate's profile name, its friendly name (`hermes profile rename` or the Bot Mode title — `Scribe`, `Dr. Foo`) or the `@`-tag the Desktop inserts for it (`@scribe`, `@dr-foo`, `@drfoo`); `@hermes` always means the primary Bot. A profile name is matched first, so it can never be hijacked by another Bot's friendly name, and a friendly name shared by two Bots is refused with the roster instead of guessing. The tool validates the target against the live roster, prefixes the sender's `Message from 🤖 <friendly name> (@<handle>):` attribution automatically, and delivers into the teammate's canonical Bot Chat. Delivery is **fire-and-forget**: the sender gets a *dispatch* acknowledgement (`status: queued` plus a `delivery_id` — and a `process_id` for the background delivery process — means the message was handed to that process, not that it was delivered), finishes its turn, and that process's completion notification carries the outcome — the reply, or the delivery failure. On surfaces that cannot receive completion notifications (an `api_server` session, one-shot runners) the acknowledgement instead carries `reply_delivery: poll`: the sender retrieves the outcome with `process(action="wait", session_id=…)` before ending its turn, and the outcome is also saved into the sender's session transcript as a delivery row when the process exits, so the reply is never silently lost. The message travels as a real parameter (nothing shell-interpreted — quotes, `$(...)`, and backticks arrive verbatim), and the Bot composes its own message rather than forwarding your words. The teammate roster — names **and roles** from each profile's title/description — is part of every Bot Chat's system prompt, so Bots know who does what before choosing a recipient. The tool exists **only** in canonical Bot Chat sessions on Bot-Mode-managed installs; regular chats, group-room member sessions, and CLI sessions never see it.
+- **Direct messages** — every Bot Chat carries the `message_agent` tool: a Bot messages a teammate by calling `message_agent(target="researcher", message="…")`. The target is the teammate's profile name, its friendly name (`hermes profile rename` or the Bot Mode title — `Scribe`, `Dr. Foo`) or the `@`-tag the Desktop inserts for it (`@scribe`, `@dr-foo`, `@drfoo`); `@hermes` always means the primary Bot. A profile name is matched first, so it can never be hijacked by another Bot's friendly name, and a friendly name shared by two Bots is refused with the roster instead of guessing. The tool validates the target against the live roster, prefixes the sender's `Message from 🤖 <friendly name> (@<handle>):` attribution automatically, and delivers into the teammate's canonical Bot Chat. Delivery is **fire-and-forget**: the sender gets a *dispatch* acknowledgement (`status: queued` plus a `delivery_id` — and a `process_id` for the background delivery process — means the message was handed to that process, not that it was delivered), finishes its turn, and that process's completion notification carries the outcome — the reply, or the delivery failure. On surfaces that cannot receive completion notifications (an `api_server` session, one-shot runners) the acknowledgement instead carries `reply_delivery: poll`: the sender retrieves the outcome with `process(action="wait", session_id=…)` before ending its turn, and the outcome is also saved into the sender's session transcript as a delivery row when the process exits, so the reply is never silently lost. The notification carries the reply whole up to the message size limit (16,000 characters); a longer one arrives as its tail and says how much was cut (`process(action="log", session_id=…)` has the rest). The message travels as a real parameter (nothing shell-interpreted — quotes, `$(...)`, and backticks arrive verbatim), and the Bot composes its own message rather than forwarding your words. The teammate roster — names **and roles** from each profile's title/description — is part of every Bot Chat's system prompt, so Bots know who does what before choosing a recipient. The tool exists **only** in canonical Bot Chat sessions on Bot-Mode-managed installs; regular chats, group-room member sessions, and CLI sessions never see it.
 
 Local messages also reach a Bot Chat that stays open in Desktop or the TUI. The receiving backend keeps ownership: it reads durable ingress on its existing notification poller, admits immediately when idle, or waits until the running turn and already queued human prompts finish. A `queued` acknowledgement confirms durable admission, **not** a completed reply. The target profile retains the delivery ID and receipt under `runtime/bot_live_delivery/`; `settled` confirms completion. A crashed or cancelled imported turn is not automatically replayed, and pending work pinned to a departed owner remains inspectable rather than being silently rerun. Do not resend a delivery whose outcome is unknown. Older backends without live-delivery capability retain the existing ownership refusal; restart that backend after upgrading.
 
@@ -72493,6 +72543,7 @@ Every gateway you register in **Settings → Connections** — local, remote URL
 - **Rosters propagate on their own.** While the Desktop runs, it periodically tells each connected gateway which agents live on the *other* connections. Every Bot Chat's teammate roster then lists them ("Teammates on OTHER connected machines"), with names, roles, and which machine they're on — and the roster refreshes when agents appear, disappear, or get renamed (capability epoch).
 - **`message_agent` reaches them directly.** A Bot on your laptop messages the cloud agent with `message_agent(target="moxie", …)` exactly like a local teammate. If the same handle exists on several machines, disambiguate with `target="moxie@<connection>"` (the tool's error tells the Bot the exact forms). Delivery rides the Desktop: the sending gateway queues the message, the Desktop relays it to the target connection's own gateway, the target Bot runs a turn in its canonical Bot Chat, and the reply comes back to the sender as the same background completion notification local DMs use (the process that waits for it is a Hermes entrypoint, so it starts under `approvals.single_query_mode: deny` — the default for a Bot's one-shot reply turn — too). Messages to different Bots are delivered side by side, so one Bot's long turn never delays another Bot's mail (or ages it past `bot_mode.envelope_ttl_seconds`); messages to the *same* Bot are delivered in order, one turn at a time.
 - **The Desktop is the courier.** Cross-connection delivery works while a Desktop that knows both connections is running (it holds the sockets and the credentials — gateways never see each other's auth). If the Desktop is closed mid-delivery, the sender's Bot is told the reply didn't arrive rather than left hanging. For always-on machine-to-machine messaging with no Desktop in the loop, register a peer (`hermes peer`, below) — the two routes coexist.
+- **A remote `default` goes by its title.** Every machine's `default` is `@hermes`, so a remote one is offered — and reachable — under its Bot Mode title instead (a remote `default` titled *CoS Bot* is `@cos-bot`; with no title, `hermes@<connection>`), and a DM it sends arrives signed with that same reply-safe form rather than a bare `@hermes` that would point back at your own default.
 
 ### Bot-initiated DMs across machines (`hermes peer`)
 
@@ -72511,7 +72562,10 @@ hermes peer stop spark run_abc123
 `hermes peer dm` delivers into the remote agent's canonical Bot Chat over the peer's existing API server, runs one agent turn there, and prints the reply on stdout — the exact cross-machine twin of the local `hermes -p <bot> chat` command.
 
 Use `peer dm` only for short queries and receipts because it holds one HTTP
-connection until the turn finishes. For a long turn, `peer run` returns a
+connection until the turn finishes. If the peer takes the message but the turn outlasts that
+connection, the message is already in the peer's Bot Chat and the turn keeps running there, so the
+command says exactly that instead of reporting the peer unreachable — resending would run the turn
+twice. A timeout while connecting still reports the peer unreachable. For a long turn, `peer run` returns a
 `run_id` immediately; poll it with `peer status`. The run inherits the
 canonical Bot Chat transcript, and a stable `--idempotency-key` makes a retry
 return the original run instead of starting duplicate work. Use `peer stop`
@@ -72741,6 +72795,8 @@ The **microphone** is dictation; hover it and the other voice toggles fan out ab
 Explore and preview the working directory without leaving the app — useful for following along as the agent reads, writes, and edits files. Set the initial project directory with `hermes desktop --cwd <path>` (or the `HERMES_DESKTOP_CWD` environment variable).
 
 ### Artifacts
+
+Preview links above the composer are session suggestions, not a task-completion checklist. Dismissing one keeps historical tool rows from bringing it back after navigation or reload. A new successful tool completion can offer the file again. Read-only file inspection and failed writes do not create suggestions. Files with the same name show enough directory context to distinguish them; dismissing a suggestion does not delete its file or transcript. Changing a `/goal` does not erase a conversation's artifacts.
 
 When connected to a remote gateway, opening a file artifact downloads it through that gateway, using the artifact’s originating profile and session. Relative paths resolve against the session’s saved working directory; home-relative paths use the gateway’s home, never the Desktop machine’s home. Windows-style relative paths are recognized alongside forward-slash paths, and file URIs retain drive and network-share information for the gateway to interpret. Missing sessions or working directories produce an error rather than selecting a different local file.
 
@@ -81754,7 +81810,26 @@ local_runtime:
   backend: auto      # auto | cuda | metal | vulkan | hip | cpu
   tag: b10362        # pinned llama.cpp release; Hermes updates it with
                      # each release after re-validation
+  detect_ports: [8081]  # extra ports to probe for a llama-server you run
+                        # yourself (the default probe is :8080 only)
 ```
+
+Running `llama-server` yourself on a fixed port works with the same
+`model.provider: llamacpp` selection — either list the port in
+`local_runtime.detect_ports`, or define the endpoint explicitly under
+`providers:` (an explicit entry wins over server detection):
+
+```yaml
+providers:
+  llamacpp:
+    base_url: http://127.0.0.1:8081/v1
+    model: my-model
+```
+
+The `/model` → **Local** picker row and `provider: llamacpp` resolve to that
+server; with no server reachable the error names the local runtime ("the local
+model server isn't running") instead of an unknown-provider or missing-API-key
+message.
 
 Models and runtime builds live under the Hermes home directory
 (`models/` and `runtimes/llamacpp/`). Selecting a local model as your
@@ -82165,6 +82240,33 @@ hermes gateway run
 
 Hermes will connect to your BlueBubbles server, register a webhook, and start listening for iMessage messages.
 
+### 6. Verify the Setup
+
+The setup wizard saves your credentials to `~/.hermes/.env` — it does **not** write `platforms.bluebubbles.enabled` into `~/.hermes/config.yaml`. With no explicit setting, present credentials are enough for the adapter to start; but an explicit `enabled: false` always wins over credentials, so if you previously disabled the adapter (for example, while using another iMessage bridge), the wizard will report success and the adapter will still never start.
+
+Check the stored setting:
+
+```bash
+hermes config get platforms.bluebubbles.enabled
+```
+
+- `true` — explicitly enabled
+- `Config key not set` — no explicit setting; the `.env` credentials drive enablement
+- `false` — explicitly disabled; re-running setup will not flip this — set it to `true` yourself
+
+Then check the gateway log for the two lines that prove the connection and the webhook registration:
+
+```bash
+hermes logs gateway
+```
+
+```text
+[bluebubbles] connected to http://192.168.1.10:1234 (private_api=False, helper=False)
+[bluebubbles] webhook registered with server: http://localhost:8645/bluebubbles-webhook?password=***
+```
+
+Finally, send yourself a test message from another device: a reply (or the pairing code for a new DM) is the end-to-end proof that inbound delivery works.
+
 ## How It Works
 
 ```
@@ -82175,6 +82277,22 @@ Hermes → BlueBubbles REST API → Messages.app → iMessage
 - **Inbound:** BlueBubbles sends webhook events to a local listener when new messages arrive. No polling — instant delivery.
 - **Outbound:** Hermes sends messages via the BlueBubbles REST API.
 - **Media:** Images, voice messages, videos, and documents are supported in both directions. Inbound attachments are downloaded and cached locally for the agent to process.
+
+### Two URLs, opposite directions
+
+The setup uses two URLs that point in opposite directions — don't confuse them:
+
+- `BLUEBUBBLES_SERVER_URL` (e.g. `http://192.168.1.10:1234`) — Hermes **calls** your BlueBubbles server's API. This is the Server URL shown in BlueBubbles Server → Settings → API.
+- The webhook (default `http://localhost:8645/bluebubbles-webhook`) — BlueBubbles **POSTs** new-message events to Hermes. Its host/port/path come from `BLUEBUBBLES_WEBHOOK_HOST` / `BLUEBUBBLES_WEBHOOK_PORT` / `BLUEBUBBLES_WEBHOOK_PATH`.
+
+### How the webhook is registered
+
+You do **not** need to create a webhook in the BlueBubbles UI. When the gateway connects, Hermes registers the webhook itself via the BlueBubbles REST API (`/api/v1/webhook`) for the `new-message` and `updated-message` events, and removes the registration again on clean shutdown.
+
+Two details worth knowing:
+
+- The registered URL carries the server password as a query parameter (`?password=…`) because the BlueBubbles webhook API does not support custom headers — this is how inbound events are authenticated.
+- The webhook listener binds to `127.0.0.1` by default. That is fine when Hermes and BlueBubbles run on the same machine; if they are on different machines, set `BLUEBUBBLES_WEBHOOK_HOST` to an address the Mac running BlueBubbles can reach.
 
 ## Environment Variables
 
@@ -82226,6 +82344,8 @@ Some features require the BlueBubbles [Private API helper](https://docs.bluebubb
 
 Without the Private API, basic text messaging and media still work.
 
+One caveat: "basic messaging works without Private API" assumes BlueBubbles can drive Messages.app in the foreground of a logged-in macOS user. If the Mac running BlueBubbles stays at the login screen or the server user is switched away from (Fast User Switching), AppleScript-based sending fails — see [BlueBubbles: multiple users on the same Mac](https://docs.bluebubbles.app/server/basic-guides/multiple-users-on-the-same-mac). In that setup the Private API is required for reliable sending, not just for the extras above.
+
 ## Troubleshooting
 
 ### "Cannot reach server"
@@ -82234,9 +82354,29 @@ Without the Private API, basic text messaging and media still work.
 - Ensure network connectivity (firewall, port forwarding)
 
 ### Messages not arriving
-- Check that the webhook is registered in BlueBubbles Server → Settings → API → Webhooks
-- Verify the webhook URL is reachable from the Mac
 - Check `hermes logs gateway` for webhook errors (or `hermes logs -f` to follow in real-time)
+- Hermes registers the webhook itself on connect — only inspect BlueBubbles Server → Settings → API → Webhooks if the log shows a registration failure
+- A webhook row in the BlueBubbles UI is not proof of delivery; the end-to-end proof is Hermes logging the message and replying
+- If Hermes and BlueBubbles run on different machines, the default webhook bind address `127.0.0.1` is unreachable from the Mac — set `BLUEBUBBLES_WEBHOOK_HOST` to a reachable address and restart the gateway
+
+### Setup succeeded, but the adapter never starts
+- `hermes gateway setup` saves credentials to `~/.hermes/.env`; it does not set `platforms.bluebubbles.enabled: true`
+- An explicit `enabled: false` in `~/.hermes/config.yaml` wins over credentials being present — check with `hermes config get platforms.bluebubbles.enabled`
+- This commonly bites after switching iMessage bridges: if you used another iMessage bridge and disabled BlueBubbles at the time, re-running setup will not re-enable it. Set `enabled: true` (and disable the bridge you no longer use — two iMessage bridges will double-handle messages)
+
+### Two BlueBubbles servers on one Mac (wrong Apple ID)
+- Hermes uses `BLUEBUBBLES_SERVER_URL` from `~/.hermes/.env`, not the Server URL shown in the BlueBubbles UI (which can be stale after a DHCP change)
+- Two macOS users on one Mac each run their own BlueBubbles server with its own API port and Apple ID — verify which one Hermes reaches: `curl "http://<server-url>/api/v1/server/info?password=<password>"` and compare the `computer_id`
+- For the multi-user setup itself, follow [BlueBubbles: multiple users on the same Mac](https://docs.bluebubbles.app/server/basic-guides/multiple-users-on-the-same-mac) — one port per user, and don't log out the user running the server
+
+### Duplicate replies
+- Known issue: session handling can split one correspondent into two sessions (raw-GUID form vs. phone/email form) — tracked in [#30708](https://github.com/NousResearch/hermes-agent/issues/30708) and [#34372](https://github.com/NousResearch/hermes-agent/issues/34372)
+- Not a documentation or configuration problem — follow those issues for fixes
+
+### "♻️ Recovered reply" repeats, or sends hang for minutes
+- If a `BLUEBUBBLES_HOME_CHANNEL` (or `platforms.bluebubbles.home_channel`) is configured, gateway restarts and platform reconnects notify the home channel and may re-deliver pending replies as "♻️ Recovered reply"
+- If sends on the BlueBubbles side silently fail — typically AppleScript errors like `Not authorized to send Apple events to Messages. (-1743)` with long timeouts on a background macOS user — the retries pile up and can crowd out webhook delivery
+- Leave the home channel empty until sending is proven reliable, and enable the Private API helper for background-user setups (see [Private API](#private-api))
 
 ### "Private API helper not connected"
 - Install the Private API helper: [docs.bluebubbles.app](https://docs.bluebubbles.app/helper-bundle/installation)
@@ -86579,8 +86719,8 @@ Set these in `config.yaml` under `platforms.weixin.extra`:
 | `allow_from` | `[]` | User IDs allowed for DMs (when dm_policy=allowlist) |
 | `group_allow_from` | `[]` | Group IDs allowed (when group_policy=allowlist) |
 | `split_multiline_messages` | `false` | When `true`, split multi-line replies into multiple chat messages (legacy behavior). When `false`, keep multi-line replies as one message unless they exceed the length limit. |
-| `text_batch_delay_seconds` | `3.0` | Quiet period (seconds) before a buffered burst of rapid text messages is flushed as one combined request. iLink delivers messages individually, so this debounce avoids one agent invocation per fragment. Set `0` to dispatch each message immediately. |
-| `text_batch_split_delay_seconds` | `5.0` | Extended flush delay used when the latest fragment is near the split threshold (long messages iLink may have chunked). |
+| `text_batch_delay_seconds` | `0.3` | Quiet period (seconds, max `2.0`) before a buffered burst of rapid text messages is flushed as one combined request. iLink delivers messages individually, so this debounce avoids one agent invocation per fragment. Set `0` to dispatch each message immediately. |
+| `text_batch_split_delay_seconds` | `1.0` | Extended flush delay (max `4.0`; never below `text_batch_delay_seconds`) used when the latest fragment is near the split threshold (long messages iLink may have chunked). |
 
 ## Access Policies
 
