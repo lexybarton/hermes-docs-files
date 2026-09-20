@@ -902,7 +902,7 @@ The same inventory is embedded in every real update's receipt (`~/.hermes/logs/u
 
 Every `hermes update` run writes a machine-readable receipt to `~/.hermes/logs/update_receipts/` (last 20 kept, `latest.json` always points at the most recent): the pre-update fleet plan, each step taken, anything skipped and why, the gateway restart outcome, and the final fleet version matrix. The SQLite runtime repair is one of those steps (`sqlite_runtime_repair`): a failed repair records the actual reason (for example the `uv sync` error) and the SQLite version pair, a deferred or not-applicable repair lands in the skips with its reason. After the restart phase the updater compares each live gateway's running code against the freshly updated checkout and prints a per-profile matrix — a gateway still serving pre-update code is reported loudly with the exact restart command, and the update exits non-zero so automation never treats a mixed-version fleet as healthy. Both `--plan` and the fleet check ask each running gateway directly over its local control socket (`gateway.sock` in the profile's data directory, a named pipe on Windows) when available, so version and supervisor information comes from the gateway itself; gateways from older versions are still discovered through their state files as before.
 
-A multiplexed default gateway is one process serving several profiles, so it appears once in the matrix and vouches for every profile in its `served_profiles` record. The same coverage clears the "A previous `hermes update` pulled new code but did not restart running gateways" hint: once that gateway (or, after a manual `git pull`, every gateway an update restarted) runs the current code, `hermes gateway restart` is enough — the hint no longer waits for the next `hermes update` to write a fresh receipt.
+A multiplexed default gateway is one process serving several profiles, so it appears once in the matrix and vouches for every profile in its `served_profiles` record. The same coverage clears the "A previous `hermes update` pulled new code but did not restart running gateways" hint: once that gateway (or, after a manual `git pull`, every gateway an update restarted) runs the current code, `hermes gateway restart` is enough — the hint no longer waits for the next `hermes update` to write a fresh receipt. The same is true of a `fleet_restart_pending` breadcrumb left by an update that died before recording which gateways it owed (or by an older updater that never recorded them): once every live gateway runs the current checkout, the breadcrumb is retired and the hint stops. An update whose pre-update plan found no gateway at all owes nothing and leaves no breadcrumb. A backend supervised by Desktop, systemd or launchd is restarted by its supervisor and never blocks this settlement; only a manual backend whose reminder could not be saved keeps the obligation open.
 
 ### Manual backend restart reminders
 
@@ -3760,7 +3760,7 @@ For AI provider setup (OpenRouter, Anthropic, Copilot, custom endpoints, self-ho
 
 You can set `providers.<id>.request_timeout_seconds` for a provider-wide request timeout, plus `providers.<id>.models.<model>.timeout_seconds` for a model-specific override. Applies to the primary turn client on every transport (OpenAI-wire, native Anthropic, Anthropic-compatible), the fallback chain, rebuilds after credential rotation, and (for OpenAI-wire) the per-request timeout kwarg — so the configured value wins over the legacy `HERMES_API_TIMEOUT` env var.
 
-You can also set `providers.<id>.stale_timeout_seconds` for the non-streaming stale-call detector, plus `providers.<id>.models.<model>.stale_timeout_seconds` for a model-specific override. This wins over the legacy `HERMES_API_CALL_STALE_TIMEOUT` env var.
+You can also set `providers.<id>.stale_timeout_seconds` for the non-streaming stale-call detector, plus `providers.<id>.models.<model>.stale_timeout_seconds` for a model-specific override. This wins over the legacy `HERMES_API_CALL_STALE_TIMEOUT` env var. The same key is the streaming stale-stream deadline: an explicit value is used as-is — the implicit context-size tiers (240s above 50k tokens, 300s above 100k) and the reasoning-model floors apply only to the 180s default, so an explicit value can shorten how long a hung stream is tolerated.
 
 Leaving these unset keeps the legacy defaults (`HERMES_API_TIMEOUT=1800`s, `HERMES_API_CALL_STALE_TIMEOUT=90`s, native Anthropic 900s). The non-streaming stale detector is auto-disabled for local endpoints when left implicit and can scale upward for very large contexts. Not currently wired for AWS Bedrock (both `bedrock_converse` and AnthropicBedrock SDK paths use boto3 with its own timeout configuration). See the commented example in [`cli-config.yaml.example`](https://github.com/NousResearch/hermes-agent/blob/main/cli-config.yaml.example).
 
@@ -8049,6 +8049,7 @@ Key tables in `state.db`:
 - Gateway conversations persist across inactivity; use `/new` or `/reset` for an explicit boundary
 - Before reset, the agent saves memories and skills from the expiring session
 - Auto-pruning (**on by default** since #54189): when `sessions.auto_prune` is `true`, ended sessions inactive for `sessions.retention_days` (default 90) are pruned at CLI/gateway/cron startup
+- `sessions.retention_days` must be a whole number of days `>= 0`. A negative value (or a missing one) is rejected: startup maintenance logs a warning naming the allowed range and skips the sweep instead of treating the future cutoff as "everything" — `sessions.auto_prune: false` is the switch that disables pruning
 - After a prune that actually removed rows, `state.db` is `VACUUM`ed to reclaim disk space only when **both** gates pass: at least `sessions.min_vacuum_interval_days` (default 30) have elapsed since the last successful `VACUUM`, **and** more than 25% of the file's pages are reclaimable (`PRAGMA freelist_count / page_count`). A dense database never pays for a full rewrite to reclaim a few MB (SQLite does not shrink the file on plain DELETE)
 - Pruning runs at most once per `sessions.min_interval_hours` (default 24); the last-run timestamp is tracked inside `state.db` itself so it's shared across every Hermes process in the same `HERMES_HOME`
 
@@ -16684,6 +16685,18 @@ cron:
 A timed-out delivery is recorded in `last_delivery_error`; the bot's turn may still complete on its own.
 
 The cap bounds the bot's **turn** only. When that turn messages a teammate (`message_agent`), the delivery process stays alive afterwards — bounded by `terminal.oneshot_completion_wait_seconds` — so the teammate's reply can land in the Bot Chat; that wait is not part of the delivery and is never counted against, or cut short by, this cap.
+
+## Standalone send timeout
+
+When the live gateway adapter cannot deliver (or no gateway is running), a target is sent through the platform's standalone sender. That send is bounded by a wall-clock timeout — 60 seconds by default — so a transport that is mid-reconnect cannot pin the job run (and a pending restart drain behind it) indefinitely:
+
+```yaml
+# ~/.hermes/config.yaml
+cron:
+  standalone_send_timeout_seconds: 120
+```
+
+A timed-out send is recorded in `last_delivery_error` as `standalone send to <target> timed out after Ns`; the message may still land if the adapter had already accepted it.
 
 ## No-agent mode (script-only jobs)
 
@@ -25951,6 +25964,16 @@ Use the user service on laptops and dev boxes. Use the system service on VPS or 
 The unit Hermes installs already shuts the gateway down cleanly with `KillMode=mixed` + `KillSignal=SIGTERM`, and uses `Restart=always` with `RestartForceExitStatus` so updates and `/restart` respawn correctly. Do **not** add a systemd drop-in such as `ExecStopPost=/bin/kill -9 $MAINPID` — `ExecStopPost` fires on *every* stop, including clean restarts, so it `SIGKILL`s the freshly spawned instance before it stabilizes and `Restart=always` immediately respawns it. The result is an infinite restart loop (and, on Telegram, a flood of restart messages). If you've added such a drop-in, remove it: `systemctl --user edit hermes-gateway` (or `sudo systemctl edit hermes-gateway` for a system service) and delete the `ExecStopPost` line, then `systemctl --user daemon-reload`.
 :::
 
+### Direct `systemctl restart` / `stop` exits cleanly
+
+The installed unit declares `ExecStop=` to record a planned-stop marker for `$MAINPID` before `SIGTERM` is delivered, so stopping or restarting the service directly is classified as intentional: the gateway drains, persists `gateway_state=stopped`, and exits `0` — the journal shows a clean stop/start with no `Failed with result exit-code` line.
+
+```bash
+systemctl --user restart hermes-gateway   # or: sudo systemctl restart hermes-gateway
+```
+
+Prefer `hermes gateway restart` when in-flight agent turns matter: it asks the gateway to drain first (`SIGUSR1`, honoring the restart wait budget) and waits for the replacement, while a raw `systemctl restart` stops the current process on systemd's schedule. After updating Hermes, run `hermes gateway restart` once so the running service picks up the regenerated unit that contains the `ExecStop=` line (`hermes gateway status` warns while the installed unit is outdated).
+
 :::tip Headless VMs: user service + linger avoids root prompts
 A system service needs root for every restart — including the automatic gateway restart at the end of `hermes update`. When `hermes update` runs as a non-root user, it tries passwordless `sudo systemctl`; if that's unavailable, it skips the restart and prints the manual `sudo systemctl restart hermes-gateway` command (it never blocks on an interactive password prompt).
 
@@ -35182,6 +35205,8 @@ On first connect, Hermes prints an authorize URL, opens your browser when possib
 Refresh tokens are bound to the authorization server that granted them: Hermes records the discovered issuer alongside the cached tokens and, if a server's advertised authorization server ever changes (server migration, metadata edit, or hijack), the stored refresh token is dropped instead of being sent to the new issuer. The current access token keeps working until it expires, then a normal re-authorization runs against the new issuer.
 
 The redirect back from the authorization server is checked against RFC 9207: when the server's metadata advertises `authorization_response_iss_parameter_supported`, a redirect without a matching `iss` is rejected. Figma's authorization server (`https://api.figma.com`) advertises that support and then omits `iss`; Hermes fills the missing value from the discovered issuer for that one issuer and logs a warning, so `hermes mcp login figma` completes. A present-but-different `iss` is still rejected, and no other server gets the exemption.
+
+The authorization server's metadata document must name the server the resource advertised (RFC 8414 §3.3); a document for a different server is rejected before any registration or login. One shape is accepted without an exact match: a server advertised with a path (`https://host/path`) whose document, fetched from `https://host/.well-known/oauth-authorization-server/path`, names the origin `https://host` as its issuer — Strava's MCP connector publishes exactly that pair. Only the origin's operator controls that well-known location, so the document is treated as the advertised server's own; a document naming another origin or another path, or one reached only through a redirect or a fallback location, still fails with `Authorization server metadata issuer mismatch`.
 
 **Remote / headless hosts.** When Hermes runs on a different machine than your browser, the loopback callback can't reach your laptop. Ways to complete the flow:
 
@@ -50591,6 +50616,7 @@ Environment variables for the bundled [`observability/langfuse`](../user-guide/f
 | `HERMES_LANGFUSE_RELEASE` | Release/version tag on traces |
 | `HERMES_LANGFUSE_SAMPLE_RATE` | SDK sampling rate 0.0–1.0 (default: `1.0`) |
 | `HERMES_LANGFUSE_MAX_CHARS` | Per-field truncation for serialized payloads (default: `12000`) |
+| `HERMES_LANGFUSE_MAX_DEPTH` | Nesting depth kept in captured tool inputs/outputs before values become `<max-depth>` (default: `4`; invalid values warn and keep the default) |
 | `HERMES_LANGFUSE_DEBUG` | `true` enables verbose plugin logging to `agent.log` |
 | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` / `LANGFUSE_BASE_URL` | Standard Langfuse SDK names. Accepted as fallbacks when the `HERMES_LANGFUSE_*` equivalents are unset. |
 
@@ -52246,7 +52272,9 @@ on denial or expiry. No browser is launched and no callback listener is needed.
 When the server's protected-resource metadata lists several authorization servers, device
 login scans them in order and uses the first one whose metadata issuer matches its advertised
 URL and that offers the `device_code` grant (a browser-only server listed first is skipped);
-issuer validation is never relaxed.
+the only accepted difference is the path-scoped shape described under "OAuth-authenticated HTTP servers"
+in the MCP feature guide (a server advertised as `https://host/path` whose document at
+`/.well-known/oauth-authorization-server/path` names `https://host`).
 
 Set `oauth.flow: device` on the server to make `hermes mcp login` and `hermes mcp reauth`
 (including `reauth --all`) use device authorization. `login --flow browser` overrides that
@@ -52306,7 +52334,7 @@ mcp_servers:
 
 `client_metadata_url` must be an HTTPS URL with a path (no bare origin, no fragment, no userinfo, no `.`/`..` segments) that returns `200` and `Content-Type: application/json` with **no redirect** — authorization servers are forbidden from following redirects when fetching it. Hermes still pins its callback to the same `27890`–`27894` range, so a self-hosted document must declare all ten loopback URIs (`http://127.0.0.1:<port>/callback` and `http://localhost:<port>/callback` for each port), and its `client_id` must be its own URL.
 
-`user_agent` replaces the HTTP library's default `User-Agent` on **token-endpoint requests only** (authorization-code exchange and refresh) — some authorization servers and WAFs reject the default `python-httpx/...` value there. It never applies to MCP traffic, and no other token-request headers are configurable. Empty or null values are ignored.
+`user_agent` replaces the default `User-Agent` on **token-endpoint requests only** (authorization-code exchange, refresh and the device-flow token poll). Without it Hermes sends `Hermes-Agent/<version>` — never a header-less request, which WAF-fronted authorization servers answer with `403`. It never applies to MCP traffic, and no other token-request headers are configurable. Empty or null values are ignored. A failed exchange reports the status plus a short, redacted excerpt of the error body (a WAF's "Request blocked" page vs the issuer's `invalid_grant`), so the cause is visible without packet captures. `hermes mcp login` clears the stale grant and client registration before re-authorizing but keeps the cached authorization-server metadata, so the announced authorize URL stays the discovered one even when the metadata document cannot be re-fetched.
 
 OAuth discovery and dynamic-client-registration requests (the `/.well-known/...` metadata documents and the `registration_endpoint` POST) always carry `User-Agent: Hermes-Agent/<version>`. The MCP SDK builds those requests without any client default headers, and WAF-fronted authorization servers answer a header-less request with `403` — the metadata document then looks unreadable, registration falls back to a guessed `/register` on the MCP host, and the login fails with `Registration failed: 404`. When every metadata fetch does fail, the error now leads with those statuses (`Could not read authorization-server metadata (403 from https://…/.well-known/oauth-authorization-server; …)`) before the registration fallback's own error.
 
@@ -59338,7 +59366,7 @@ Model provider plugins are the third kind of **provider plugin**. The others are
 `providers/__init__.py._discover_providers()` runs lazily the first time any code calls `get_provider_profile()` or `list_providers()`. Discovery order:
 
 1. **Bundled plugins** — `<repo>/plugins/model-providers/<name>/` — ship with Hermes
-2. **User plugins** — `$HERMES_HOME/plugins/model-providers/<name>/` — drop in any directory; no restart required for subsequent sessions
+2. **User plugins** — `$HERMES_HOME/plugins/model-providers/<name>/` — drop in a directory; restart an already-running Hermes process to discover it
 3. **Installed plugins** — `$HERMES_HOME/plugins/<name>/` (where `hermes plugins install owner/repo` clones) — imported only when `plugin.yaml` declares `kind: model-provider`; every other kind there belongs to the general PluginManager
 4. **Legacy single-file** — `<repo>/providers/<name>.py` — back-compat for out-of-tree editable installs
 
@@ -59421,12 +59449,61 @@ Full definition in `providers/base.py`. The most useful ones:
 | `base_url` | str | Default inference endpoint |
 | `models_url` | str | Explicit catalog URL (falls back to `{base_url}/models`) |
 | `auth_type` | str | `api_key` \| `oauth_device_code` \| `oauth_external` \| `copilot` \| `aws_sdk` \| `external_process` |
-| `fallback_models` | `tuple[str, ...]` | Curated list shown when live catalog fetch fails |
-| `default_headers` | `dict[str, str]` | Sent on every request (e.g. Copilot's `Editor-Version`) |
+| `auth_handler` | `Callable \| None` | Provider-owned `hermes auth add/status/logout/refresh <name>` — see [Provider-owned auth](#provider-owned-auth-auth_handler-refresh_credential) |
+| `refresh_credential` | `Callable \| None` | Provider-owned rotation of a pooled OAuth row — same section |
+| `classify_api_error` | `Callable \| None` | Provider-scoped error-classification override — see [Recovery and error classification](#recovery-and-error-classification) |
+| `fallback_models` | `tuple[str, ...]` | Curated list shown when live catalog fetch fails — in the `/model` picker AND the first-time `hermes setup` / `hermes model` API-key flow, which resolve the catalog the same way (`fetch_models()` merged curated-first with `fallback_models`; `fallback_models` alone when the fetch returns `None` or raises) |
+| `supports_vision` | bool | Declares the provider's API accepts image content inside **tool-result** messages (a provider-wide wire capability). Per-model user-image routing comes from `model_capabilities` / models.dev, not from this flag |
+| `model_capabilities` | `dict[str, dict[str, Any]]` | Per-model capability declarations in the `model_overrides` schema — see [Declaring model capabilities](#declaring-model-capabilities) |
+| `default_headers` | `dict[str, str]` | Sent on every request (e.g. Copilot's `Editor-Version`); also forwarded by the default `fetch_models()` catalog request |
 | `fixed_temperature` | Any | `None` = use caller's value; `OMIT_TEMPERATURE` sentinel = don't send temperature at all (Kimi) |
 | `default_max_tokens` | `int \| None` | Provider-level max_tokens cap (Nvidia: 16384) |
 | `unsupported_response_formats` | `tuple` | `response_format` types the API rejects outright; auxiliary requests omit them instead of paying a guaranteed 400 (DeepSeek: `("json_schema",)`) |
 | `default_aux_model` | str | Cheap model for auxiliary tasks (compression, vision, summarization) |
+
+## Declaring model capabilities
+
+Hermes resolves per-model capabilities (`supports_reasoning`, `supports_vision`,
+`supports_tools`, `context_window`) from the models.dev catalog, which does not
+know an out-of-tree provider's models. Declare them once on the profile:
+
+```python
+register_provider(ProviderProfile(
+    name="acme",
+    auth_type="api_key",
+    env_vars=("ACME_API_KEY",),
+    base_url="https://api.acme.example/v1",
+    fallback_models=("acme-large-high", "acme-small"),
+    model_capabilities={
+        "acme-large-high": {
+            "supports_reasoning": False,   # reasoning tier is fixed by the model id
+            "supports_vision": True,
+            "supports_tools": True,
+            "context_window": 64000,
+            "model_family": "acme",
+        },
+    },
+))
+```
+
+Keys are exact model IDs. Values use the `model_overrides` schema from
+`config.yaml` — the three capability booleans, a positive `context_window`, an
+optional `model_family` — and omitted fields stay unknown (not `False`), so a
+partial entry patches catalog metadata without erasing it.
+
+One declaration feeds every consumer that reads the catalog through
+`agent.models_dev`: the `/model` picker's `reasoning` badge, image routing
+(`decide_image_input_mode` goes `native` for a `supports_vision: True` model
+even when the profile-wide `supports_vision` is unset), context-window lookup,
+and the dashboard's `/api/model/info`. Precedence: explicit user
+`model_overrides.<provider>.<model>` → plugin declaration → catalog → fill-gap
+`_default`. Models the plugin does not declare keep the catalog/heuristic path.
+
+Not covered: the picker's `fast` badge (a model-name heuristic in
+`hermes_cli/models.py::model_supports_fast_mode`), reasoning-effort vocabulary
+(`agent/reasoning_effort.py`), and transport request fields. Declarations do not
+add models to a picker — use `fallback_models` / `fetch_models` for that. The
+registry is discovered once per process: restart Hermes after editing them.
 
 ## Overridable hooks
 
@@ -59465,6 +59542,14 @@ class AcmeProfile(ProviderProfile):
         (Bedrock → None), or public/unauthenticated catalogs (OpenRouter)."""
         return super().fetch_models(api_key=api_key, base_url=base_url, timeout=timeout)
 
+    def fetch_account_usage(self, *, api_key=None, base_url=None):
+        """Return AccountUsageSnapshot for /usage, or None when unavailable.
+
+        The hook runs only when the provider has no built-in usage fetcher.
+        It may raise: core catches failures and keeps /usage empty for that turn.
+        """
+        return None
+
     def create_client(self, **client_kwargs):
         """Supply your own client object instead of the shared openai.OpenAI.
         Default returns None (= use the standard client). Override when the
@@ -59474,6 +59559,37 @@ class AcmeProfile(ProviderProfile):
         and pick what you need. A raise is logged and falls back to the
         standard client."""
         return None
+```
+
+## Account usage
+
+Model-provider plugins can provide account or plan usage to `/usage` by
+overriding `ProviderProfile.fetch_account_usage`. Import and return the shared
+`agent.account_usage.AccountUsageSnapshot` (with any `AccountUsageWindow`
+entries); do not format output in the plugin. Returning `None`, or raising an
+exception, leaves `/usage` empty just as it does for providers without usage
+data. Built-in usage fetchers always take precedence, so this hook cannot
+replace the account-usage behavior for a built-in provider. The hook runs under a shared
+10 s deadline (`agent.account_usage.PLUGIN_USAGE_HOOK_DEADLINE_S`) on every surface; overrunning it
+renders nothing for that turn rather than stalling `/usage`, so give your own HTTP calls a shorter
+timeout.
+
+The bundled `plugins/model-providers/opencode-zen/` profile implements this hook for the
+OpenCode Go plan windows; every `/usage` surface (CLI `hermes usage` and `/usage`, the messaging
+gateway, the TUI/Desktop usage feed) renders the snapshot through the same core formatter.
+
+```python
+from datetime import datetime, timezone
+
+from agent.account_usage import AccountUsageSnapshot, AccountUsageWindow
+
+def fetch_account_usage(self, *, api_key=None, base_url=None):
+    return AccountUsageSnapshot(
+        provider=self.name,
+        source="my_provider_api",
+        fetched_at=datetime.now(timezone.utc),
+        windows=(AccountUsageWindow(label="Monthly", used_percent=25),),
+    )
 ```
 
 ## External-process (ACP) providers
@@ -59488,6 +59604,19 @@ An agent CLI driven over stdio is not an HTTP endpoint. Set `auth_type="external
 | `process_args_env_var` | Env var that overrides argv (shlex-split) |
 
 The client your `create_client` returns receives `command` and `args` in `client_kwargs`. If it is already complete and async-safe, declare `HERMES_SKIP_TRANSPORT_WRAP = True` / `HERMES_SKIP_ASYNC_WRAP = True` as class attributes so the auxiliary client does not re-dispatch it through an HTTP wire adapter.
+
+### Picker rows for non-api-key plugins
+
+Every registered profile joins `CANONICAL_PROVIDERS` by slug (a plugin re-declaring a built-in slug such as `bedrock` is deduped, never doubled), so external-process and OAuth plugins appear in `hermes model`, `/model` and the Desktop model selector alongside `copilot-acp`. Visibility is gated by credentials, not by `auth_type`:
+
+| `auth_type` | Row is listed / `authenticated` when | Model list |
+|---|---|---|
+| `external_process` | the binary resolves (`process_command` or one of `process_command_env_vars` is on `PATH`), or `base_url` is `acp+tcp://…` — the same structural gate `hermes auth status` reports. A resolving binary is also the sign-in evidence (`auth_verified`) the Desktop model selector's explicit-only filter uses, so the row shows there like the bundled ACP provider does | `fetch_models()` (your subprocess probe), else `fallback_models` |
+| `oauth_external` / `oauth_device_code` | the credential pool holds a row for the slug with a live (non-expired) token — `hermes auth status <name>` and `list_available_providers().authenticated` both read the pool; an expired row with `refresh_token` and a `refresh_credential` hook reports `needs_refresh` | `fetch_models()` with the pooled token, else `fallback_models` (declare at least one) |
+
+The catalog cache is keyed on the profile's `process_command_env_vars` / `process_args_env_var` values, so pointing `HERMES_<X>_COMMAND` at a different binary re-discovers models. Executable discovery is not a login check: an unauthenticated CLI still lists, and the subprocess reports the failure at first use.
+
+Selecting the row in `hermes model` (and the setup wizard) runs one generic flow keyed by the profile's `auth_type`: external-process profiles are launch-checked (`resolve_external_process_provider_credentials`), OAuth profiles need a live pool row (otherwise the flow prints `hermes auth add <name>` and stops), then the merged catalog is offered and `config.model` is persisted with the profile's `base_url`/`api_mode`. No `_model_flow_*` entry in core is needed.
 
 ## Hook reference examples
 
@@ -59521,7 +59650,7 @@ register_provider(ProviderProfile(
 ))
 ```
 
-Next session, `get_provider_profile("gmi").base_url` returns the staging URL. No repo patch, no rebuild. Because user plugins are discovered after bundled ones, the user `register_provider()` call wins.
+In a fresh Hermes process, `get_provider_profile("gmi").base_url` returns the staging URL. No repo patch, no rebuild. Because user plugins are discovered after bundled ones, the user `register_provider()` call wins.
 
 ## api_mode selection
 
@@ -59540,13 +59669,145 @@ Set `profile.api_mode` to match the default your provider ships — it acts as a
 | `auth_type` | Meaning | Who uses it |
 |---|---|---|
 | `api_key` | Single env var carries a static API key | Most providers |
-| `oauth_device_code` | Device-code OAuth flow | — |
+| `oauth_device_code` | Device-code OAuth flow | Nous Portal; out-of-tree plugins via `auth_handler` |
 | `oauth_external` | User signs in elsewhere, tokens land in `auth.json` | Anthropic OAuth, MiniMax OAuth, Qwen Portal, Nous Portal |
 | `copilot` | GitHub Copilot token refresh cycle | `copilot` plugin only |
 | `aws_sdk` | AWS SDK credential chain (IAM role, profile, env) | `bedrock` plugin only |
 | `external_process` | Auth handled by a subprocess the agent spawns (see [External-process providers](#external-process-acp-providers)) | `copilot-acp` plugin, out-of-tree ACP plugins |
 
-`auth_type` gates which codepaths treat your provider as a "simple api-key provider" — if it's not `api_key`, the PluginManager still records the manifest but Hermes' CLI-level automation (doctor checks, `--provider` flag, setup wizard delegation) may skip over it.
+Every profile is mirrored into Hermes' auth registry under the `auth_type` it declares (two exclusions: an `api_key` profile with empty `env_vars`, and the aggregator/user-supplied slugs `openrouter`/`custom` plus the bespoke-refresh built-ins `copilot`/`kimi-coding`/`zai`), so `hermes auth`,
+`--provider <name>` and runtime resolution accept it whatever its shape. What differs is who performs the
+login: `api_key` profiles get the built-in key prompt / env-var resolution; every other `auth_type` is
+**provider-owned** — the plugin ships the two hooks below, and a non-api-key profile without an
+`auth_handler` makes `hermes auth add <name>` fail with a clear "ships no auth_handler" error instead of
+silently doing nothing.
+
+## Provider-owned auth (`auth_handler`, `refresh_credential`)
+
+`auth_type` describes *what kind* of credential a provider needs; `auth_handler` is how the plugin
+**acquires** it — its own device-code / OIDC / IdC flow inside the existing `hermes auth` command family
+(model-provider manifests are skipped by the generic command-plugin loader, so `register(ctx)` is not the
+way to add commands). `refresh_credential` is how the credential pool **rotates** a pooled token the plugin
+stored.
+
+```python
+import uuid
+from providers import register_provider
+from providers.base import ProviderProfile
+
+
+def example_auth(action: str, args) -> bool:
+    """action: "add" | "status" | "logout" | "refresh"; args: parsed CLI namespace."""
+    if action == "add":
+        from agent.credential_pool import AUTH_TYPE_OAUTH, PooledCredential, load_pool
+        tokens = run_device_code_flow()                      # provider-specific
+        load_pool("example-oauth").add_entry(PooledCredential(
+            provider="example-oauth", id=uuid.uuid4().hex[:6], label=tokens["account"],
+            auth_type=AUTH_TYPE_OAUTH, priority=0, source="manual:example_device",
+            access_token=tokens["access_token"], refresh_token=tokens["refresh_token"],
+            extra={"tenant": tokens["tenant"]}))             # any extra keys round-trip through auth.json
+        print("Signed in to Example.")
+        return True
+    if action == "status":
+        print("example-oauth: " + ("logged in" if load_pool("example-oauth").entries() else "logged out"))
+        return True
+    return False   # decline → this action stays with the built-in credential-pool handling
+
+
+def example_refresh(entry):
+    """Called by the credential pool with the pooled row; return the rotated values, None, or raise."""
+    tokens = post_refresh(entry.refresh_token)          # the raw token-endpoint response is fine as-is
+    return {"access_token": tokens["access_token"], "refresh_token": tokens["refresh_token"],
+            "expires_at_ms": tokens["expires_at_ms"], "expires_in": tokens["expires_in"]}
+
+
+register_provider(ProviderProfile(
+    name="example-oauth", auth_type="oauth_external", base_url="https://api.example.com/v1",
+    auth_handler=example_auth, refresh_credential=example_refresh))
+```
+
+| Contract | |
+|---|---|
+| `auth_handler(action, args)` | `args` is the parsed `hermes auth` namespace for CLI actions; the interactive setup picker passes a minimal namespace carrying only `provider`, so read options with `getattr(args, name, None)`. Truthy = handled (Hermes prints nothing more, exit 0); falsy = fall back to the built-in path **for that action**. An exception becomes `SystemExit("<provider> auth handler failed for `&lt;action&gt;`: …")`. |
+| `refresh_credential(entry)` | Receives the `PooledCredential`; returns a mapping of rotated values or `None`. Keys that are `PooledCredential` fields (`access_token`, `refresh_token`, `expires_at_ms`, …) replace the row's fields; every other key (`expires_in`, `token_type`, `scope` — the raw token-endpoint shape) lands in `entry.extra` and round-trips through `auth.json`. Returning `None`/an empty mapping means the plugin could not rotate: the row is benched exactly like a failed refresh request (never reported as refreshed, so a dead bearer is not replayed). Its presence is what makes the provider *refreshable* — `hermes auth refresh <name>` and the main-loop 401 recovery call it through the pool with no core name list involved; the auxiliary client's 401 recovery reaches it only for pooled rows it already treats as recoverable (api-key rows and the built-in OAuth routes). |
+| Refresh failures | Raise `hermes_cli.auth_constants.AuthError(..., relogin_required=True)` (or with `code` `invalid_grant` / `invalid_token` / `refresh_token_reused`) when the grant is dead: the row goes **DEAD**, leaves rotation and Hermes logs a WARNING naming `hermes auth add <name>`. Any other exception (network, 429, 5xx) is transient — the row is benched for one cooldown and retried. |
+| Concurrency | The hook runs under the shared `auth.json` lock. Before calling it the pool re-reads the row; if another Hermes process (gateway + CLI, two profiles) already rotated the pair, that pair is adopted and your hook is **not** called — safe for single-use refresh tokens. After the hook returns, the rotated row is written through to `auth.json`. |
+| No hooks | `api_key` profiles behave exactly as before. Any other `auth_type` without `auth_handler` fails loud on `hermes auth add`. |
+
+`hermes auth add|status|logout|refresh <provider>` consults the handler **first** — before the built-in
+credential-pool flow. Registering the same name twice is last-writer-wins, so a user plugin can replace a
+bundled provider's flow.
+
+Hermes passes the parsed namespace, not provider-declared flags: ask for provider-specific values
+interactively (or read your own config/env). Rows the plugin stores in the pool are its own — extra keys
+survive `load → save → load`, and Hermes passes no secrets beyond that pooled row to `refresh_credential`.
+
+### Declarative OAuth (PKCE) for plugins
+
+A provider whose IdP speaks standard OAuth 2.0 Authorization Code + PKCE does not need to write the
+hooks above by hand: declare the endpoints in `OAuthPKCEConfig` and let the two factories build them.
+
+```python
+from hermes_cli.auth_oauth_pkce_plugin import OAuthPKCEConfig, pkce_auth_handler, pkce_refresh_credential
+from providers import register_provider
+from providers.base import ProviderProfile
+
+cfg = OAuthPKCEConfig(
+    client_id="hermes-public-client",                       # public client — no secret, PKCE is the proof
+    authorize_url="https://auth.example.com/oauth/authorize",
+    token_url="https://auth.example.com/oauth/token",
+    scopes=("inference", "offline_access"),
+    redirect_port=0,                                        # 0 = OS-assigned; pin it if the IdP allowlists the URI
+)
+
+register_provider(ProviderProfile(
+    name="example-pkce", auth_type="oauth_external", base_url="https://api.example.com/v1",
+    auth_handler=pkce_auth_handler(cfg), refresh_credential=pkce_refresh_credential(cfg)))
+```
+
+Hermes then owns the whole lifecycle: `hermes auth add example-pkce [--no-browser]` opens the browser (or
+prints the URL, with the SSH-tunnel hint on a remote box), listens on `http://127.0.0.1:<port>/callback`,
+checks the CSRF `state`, exchanges the code with S256 PKCE and stores the grant as a pooled `oauth`
+credential (`source: manual:loopback_pkce`, `expires_at_ms`, `refresh_token`); `auth status` reports
+logged in / expired; `auth logout` removes the rows; `auth refresh` and the 401 recovery paths rotate via
+the `refresh_token` grant, re-reading `auth.json` under the auth lock first so a peer's rotation is adopted
+instead of spending a single-use refresh token twice.
+
+Security boundary (enforced before any request, on login and refresh alike): both endpoints must be
+`https://` (plain `http://` is accepted only for a loopback-literal host — a local development IdP);
+the `token_url` host must be the `authorize_url` host or a subdomain of it (or listed in `allowed_hosts`);
+the listener binds the literal `127.0.0.1`; tokens, `state` and the PKCE verifier are never logged.
+Optional fields: `audience`, `extra_authorize_params`, `extra_token_params`, `redirect_path`,
+`timeout_seconds`, `label`.
+
+## Recovery and error classification
+
+A `kind: model-provider` plugin is loaded by provider discovery, **not** by the generic plugin manager, so
+the `transform_api_error_classification` plugin hook is not reachable from it without shipping a second
+plugin component. The profile carries the equivalent seam instead:
+
+```python
+def classify(error, *, status_code, error_code, message, body, model):
+    # A vendor-specific 403 that is a spent plan, not a bad credential.
+    if status_code == 403 and error_code == "quota_exhausted":
+        return {"reason": "billing", "retryable": False, "should_rotate_credential": True, "should_fallback": True}
+    return None  # decline → built-in classification
+
+
+register_provider(ProviderProfile(name="example-oauth", auth_type="oauth_external",
+                                  base_url="https://api.example.com/v1",
+                                  refresh_credential=example_refresh, classify_api_error=classify))
+```
+
+| Contract | |
+|---|---|
+| `classify_api_error(error, *, status_code, error_code, message, body, model)` | Consulted by `agent.error_classifier.classify_api_error` for failures of **this provider only**, after any generic `transform_api_error_classification` hooks and before the built-in pipeline. `message` is the lower-cased error text, `body` the parsed JSON body (may be empty). Return `{"reason": <FailoverReason name>}` plus optional `retryable` / `should_compress` / `should_rotate_credential` / `should_fallback` / `error_context` to override (for terminal reasons — billing, auth, model_not_found … — `should_fallback: True` implies `retryable: False` unless you set it, because the fallback chain only runs for non-retryable verdicts; rate-limit reasons keep the built-in retry-then-fallback shape); `None` (or an unknown reason) leaves the built-in verdict. Exceptions are swallowed and logged at DEBUG. The verdict drives the same recovery as for built-ins — e.g. `billing` benches the credential for the billing TTL instead of the transient 403 cooldown. |
+| 401 on a plugin credential | Handled by the credential pool, no core edit: the failing pooled row is refreshed through `refresh_credential` once per attempt (capped at two refreshes per row per session), the client is rebuilt with the rotated token and the request retried. A `None`/empty return or an exception benches the row — the request then rotates or falls to the generic "sign in again: `hermes auth add <name>`" copy, never to a built-in provider's guidance. |
+| Auxiliary calls | Auxiliary-client 401s take the same pool refresh (`try_refresh_current` → `refresh_credential`). |
+
+Recovery that remains name-keyed in core is behaviour with no safe generic shape (a provider-specific
+token store to re-sync, a plan-tier entitlement wall, a single-use refresh-token quarantine). A plugin
+that needs one of those owns it inside `refresh_credential` / `classify_api_error`.
 
 ## Discovery timing
 
@@ -72230,7 +72491,7 @@ A failed bot turn or relay delivery carries a machine-readable `reason` code alo
 Every gateway you register in **Settings → Connections** — local, remote URL, SSH, Hermes Cloud, docker — is a persistent line the Desktop holds open, and Bot Mode uses those lines for messaging automatically. No extra setup:
 
 - **Rosters propagate on their own.** While the Desktop runs, it periodically tells each connected gateway which agents live on the *other* connections. Every Bot Chat's teammate roster then lists them ("Teammates on OTHER connected machines"), with names, roles, and which machine they're on — and the roster refreshes when agents appear, disappear, or get renamed (capability epoch).
-- **`message_agent` reaches them directly.** A Bot on your laptop messages the cloud agent with `message_agent(target="moxie", …)` exactly like a local teammate. If the same handle exists on several machines, disambiguate with `target="moxie@<connection>"` (the tool's error tells the Bot the exact forms). Delivery rides the Desktop: the sending gateway queues the message, the Desktop relays it to the target connection's own gateway, the target Bot runs a turn in its canonical Bot Chat, and the reply comes back to the sender as the same background completion notification local DMs use. Messages to different Bots are delivered side by side, so one Bot's long turn never delays another Bot's mail (or ages it past `bot_mode.envelope_ttl_seconds`); messages to the *same* Bot are delivered in order, one turn at a time.
+- **`message_agent` reaches them directly.** A Bot on your laptop messages the cloud agent with `message_agent(target="moxie", …)` exactly like a local teammate. If the same handle exists on several machines, disambiguate with `target="moxie@<connection>"` (the tool's error tells the Bot the exact forms). Delivery rides the Desktop: the sending gateway queues the message, the Desktop relays it to the target connection's own gateway, the target Bot runs a turn in its canonical Bot Chat, and the reply comes back to the sender as the same background completion notification local DMs use (the process that waits for it is a Hermes entrypoint, so it starts under `approvals.single_query_mode: deny` — the default for a Bot's one-shot reply turn — too). Messages to different Bots are delivered side by side, so one Bot's long turn never delays another Bot's mail (or ages it past `bot_mode.envelope_ttl_seconds`); messages to the *same* Bot are delivered in order, one turn at a time.
 - **The Desktop is the courier.** Cross-connection delivery works while a Desktop that knows both connections is running (it holds the sockets and the credentials — gateways never see each other's auth). If the Desktop is closed mid-delivery, the sender's Bot is told the reply didn't arrive rather than left hanging. For always-on machine-to-machine messaging with no Desktop in the loop, register a peer (`hermes peer`, below) — the two routes coexist.
 
 ### Bot-initiated DMs across machines (`hermes peer`)
@@ -74360,8 +74621,8 @@ Known limitations:
 - **`delegate_task`, `memory`, `session_search`, `todo` are unavailable on this runtime.** They need the running AIAgent context which a stateless MCP callback can't provide. Use `/codex-runtime auto` when you need these.
 - **No inline patch preview in approval prompts when codex doesn't track the changeset.** Codex's `fileChange` approval params don't always carry the changeset. Hermes caches the data from the corresponding `item/started` notification when possible, but if approval arrives before the item has streamed, the prompt falls back to whatever `reason` codex provides.
 - **`fallback_providers` fail over only on quota and rate-limit failures.** When a codex app-server turn fails with a billing / usage-limit / rate-limit error, Hermes switches to the configured [fallback provider](./fallback-providers.md) and retries the same turn on it; auth failures (`codex login` expired), turn timeouts and unknown-model errors do not fail over on this runtime and surface as the turn's error instead.
-- **Conversation history is not projected into the codex thread.** The codex thread receives Hermes' system prompt when it starts plus each new user message; prior Hermes history (e.g. from a resumed session) is not replayed into it. When the composed prompt changes mid-session (for example `/personality` in the TUI or Desktop), the next turn retires the running thread and starts a new one carrying the updated prompt; that new thread does not inherit the retired thread's history.
-- **The codex thread itself does survive a restart.** After each committed turn Hermes stores the codex thread id on the session row (`codex_thread_id` in the session's `model_config`, `hermes sessions` / `state.db`). The next agent built for that same Hermes session — a later `/api/sessions/{id}/chat` request, or the first turn after the API server or gateway restarts — issues `thread/resume` for the stored id before `turn/start`, so the model keeps its own memory of the earlier turns even though Hermes never replays its transcript. When codex cannot hand the thread back (its rollout was deleted, `CODEX_HOME` changed, the previous app-server was killed while still writing it), Hermes fails closed: it drops the stored id, starts a fresh thread and shows one line — `Codex thread could not be resumed; starting a new one.` — on the status rail of the surface you are on (CLI, TUI/Desktop, messaging gateway). A `/new` session never resumes an older thread.
+- **Prior Hermes history is seeded only into a thread codex starts from scratch.** A codex thread that codex hands back via `thread/resume` already holds the conversation. When no resumable thread exists — the session ran on another provider before `/model` switched to openai-codex, codex could not resume the stored thread, or the running thread was retired — the new thread's `developerInstructions` carry Hermes' system prompt followed by the session's prior turns (user and assistant text, tool names, tool-result previews; the most recent ~32K characters). When the composed prompt changes mid-session (for example `/personality` in the TUI or Desktop), the next turn retires the running thread and starts a new one carrying the updated prompt plus that same history seed.
+- **The codex thread itself does survive a restart.** After each committed turn Hermes stores the codex thread id on the session row (`codex_thread_id` in the session's `model_config`, `hermes sessions` / `state.db`). The next agent built for that same Hermes session — a later `/api/sessions/{id}/chat` request, or the first turn after the API server or gateway restarts — issues `thread/resume` for the stored id before `turn/start`, so the model keeps its own memory of the earlier turns (that is why no history seed is sent on resume). When codex cannot hand the thread back (its rollout was deleted, `CODEX_HOME` changed, the previous app-server was killed while still writing it), Hermes fails closed: it drops the stored id, starts a fresh thread and shows one line — `Codex thread could not be resumed; starting a new one.` — on the status rail of the surface you are on (CLI, TUI/Desktop, messaging gateway). A `/new` session never resumes an older thread.
 - **Sub-second cancellation isn't guaranteed.** Mid-stream interrupts (Ctrl+C while codex is responding) are sent via `turn/interrupt`, but if codex has already flushed the final message, you get the response anyway.
 
 If you find a bug, [open an issue](https://github.com/NousResearch/hermes-agent/issues) with the output of `hermes logs --since 5m`. Mention `codex-runtime` in the title so it's easy to triage.
@@ -78770,13 +79031,16 @@ problem. When activated, MCP and plugin tools are replaced in the
 model-visible tools array by three bridge tools, and the model loads each
 specific tool's schema on demand.
 
-:::info Built-in Hermes tools never defer
-The tools that make up Hermes' core capability set (`terminal`,
-`read_file`, `write_file`, `patch`, `search_files`, `todo`, `memory`,
-`browser_*`, `web_search`, `web_extract`, `clarify`, `execute_code`,
-`delegate_task`, `session_search`, and the rest of
-`_HERMES_CORE_TOOLS`) are *always* loaded directly. Only MCP tools and
-non-core plugin tools are eligible for deferral.
+:::info Built-in tools and explicit deferral
+Hermes keeps its working-set core tools (`terminal`, `read_file`, `write_file`,
+`patch`, `search_files`, `todo`, `memory`, `browser_*`, `web_search`,
+`web_extract`, `clarify`, `execute_code`, `delegate_task`, and the rest of
+`_HERMES_CORE_TOOLS`) loaded directly by default. Cold, event-triggered built-ins
+may be deferred when they are named in `tools.tool_search.defer`; the shipped
+curated list covers tools such as `computer_use`, `session_search`, and selected
+desktop helpers. MCP and non-core plugin tools remain eligible automatically.
+An explicit `defer` list replaces the curated list, and `defer: []` keeps every
+tool eager.
 :::
 
 ## How it works
@@ -78832,13 +79096,14 @@ see the underlying tool, not the bridge.
 
 ## When does it activate?
 
-Tool Search uses **tiered disclosure**: the presence of *any* deferrable
-(MCP/plugin) tool activates the bridge; what scales with catalog size is
-how much of the catalog stays visible, not whether schemas defer.
+Tool Search uses **tiered disclosure**: the presence of *any* deferred
+tool (MCP/plugin or explicitly named built-in) activates the bridge; what
+scales with catalog size is how much of the catalog stays visible, not whether
+schemas defer.
 
 | Tier | Condition | What the model sees |
 | --- | --- | --- |
-| **0** | No MCP/plugin tools | Every tool eager, no bridge. Pass-through. |
+| **0** | No deferred tools | Every tool eager, no bridge. Pass-through. |
 | **1** | Deferred catalog's listing fits the budget | Bridge + a skills-style manifest of every deferred tool (name + short description, degrading to names-only when over budget). Degradation is **per server**: when one oversized server (Cloudflare) is attached alongside small ones (Linear), the small servers keep their per-tool listings and only the oversized server collapses to a summary line. |
 | **2** | Per-tool listing exceeds the budget even names-only for every server (e.g. Cloudflare's flat API surface alone: ~3,300 tools whose names are ~32K tokens) | Bare bridge + a one-line-per-server summary (server name + tool count), so the model knows which domains are reachable; individual tools are discoverable only through `tool_search`. |
 
@@ -78858,16 +79123,28 @@ tools:
     max_search_limit: 25
     listing: auto       # embed a grouped name+description catalog manifest
     listing_max_tokens: 4000
+    defer:              # replace the curated default; [] keeps every tool eager
+      - computer_use
+      - session_search
+      - image_generate
+      - todo_list
+      - process_manage
+      - cronjob_manage
 ```
+
+The default `defer` list also includes the selected desktop GUI helpers listed
+in `hermes_cli/config_defaults.py`. It is the single source of truth for the
+shipped curated set; the runtime fallback uses the same value.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `enabled` | `auto` | `auto`/`on` activate whenever at least one deferrable tool exists; `off` disables entirely (everything stays eager). `auto` is currently an alias of `on` — it is reserved for a future mode that inlines schemas when they fit the context and defers only when they don't. Pin `on` or `off` if you want today's behavior guaranteed across upgrades. |
+| `enabled` | `auto` | `auto`/`on` activate whenever at least one deferred tool exists; `off` disables entirely (everything stays eager). `auto` is currently an alias of `on` — it is reserved for a future mode that inlines schemas when they fit the context and defers only when they don't. Pin `on` or `off` if you want today's behavior guaranteed across upgrades. |
 | `threshold_pct` | `5` | Listing budget as a percentage of the active model's context length. Range 0–100. |
 | `search_default_limit` | `5` | Hits returned per query when the model calls `tool_search` without a `limit`. |
 | `max_search_limit` | `25` | Hard upper bound the model can request via `limit` (per query). Range 1–50. |
 | `listing` | `auto` | Embed a skills-style manifest of every deferred tool (name + first sentence of its description, ≤60 chars, grouped by MCP server) in the `tool_search` bridge description. `auto` includes it when it fits the budget (falling back to names-only, then to the tier-2 server summary); `on`/`off` force either way. |
 | `listing_max_tokens` | `4000` | Absolute cap on the embedded listing, regardless of context size. Range 200–60000. Large catalogs degrade to names-only or per-server summaries, keeping full schemas available through search. |
+| `defer` | Curated list | Tool names replaced by the bridge by default. The list may include cold built-in tools as well as MCP/plugin tools; an explicit list replaces it, and `[]` disables deferral for every tool. |
 
 Per-call array caps are internal safety bounds, not configuration. Over-cap
 calls return an error so the model can retry with a smaller batch.
