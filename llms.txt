@@ -43,6 +43,7 @@ Repo: https://github.com/NousResearch/hermes-agent
 - [Bitwarden Secrets Manager](https://hermes-agent.nousresearch.com/docs/user-guide/secrets/bitwarden)
 - [Command Helper Secret Source](https://hermes-agent.nousresearch.com/docs/user-guide/secrets/command)
 - [1Password](https://hermes-agent.nousresearch.com/docs/user-guide/secrets/onepassword)
+- [Session Storage Recovery](https://hermes-agent.nousresearch.com/docs/user-guide/session-storage-recovery): What to do when Hermes says another process holds an old copy of the session database's write-ahead log, and what the files beside state.db are
 - [Google Workspace — Gmail, Calendar, Drive, Sheets & Docs](https://hermes-agent.nousresearch.com/docs/user-guide/skills/google-workspace): Send email, manage calendar events, search Drive, read/write Sheets, and access Docs — all through OAuth2-authenticated Google APIs
 - [Which File Does What?](https://hermes-agent.nousresearch.com/docs/user-guide/which-file-does-what): SOUL.md vs USER.md vs MEMORY.md vs AGENTS.md — a one-page map of the agent's files, who writes each one, and when the agent actually sees them
 - [Windows (Native) Guide](https://hermes-agent.nousresearch.com/docs/user-guide/windows-native): Run Hermes Agent natively on Windows 10 / 11 — install, feature matrix, UTF-8 console, Git Bash, gateway as a Scheduled Task, editor handling, PATH, uninstall, and common pitfalls
