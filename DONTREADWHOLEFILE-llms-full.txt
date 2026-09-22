@@ -12582,6 +12582,13 @@ skills:
   ledger: false
 ```
 
+The file is also size-bounded: once it grows past `skills.ledger_max_bytes` (default 5 MB), the next mutation first rewrites it through the unchanged-file dedup (exactly what `hermes curator ledger --compact` does) and, if genuinely-divergent entries still exceed the cap, drops the oldest ones regardless of shape — the newest entry always survives, lines in the retained tail are never rewritten or parsed (a malformed line there survives verbatim), and the sweep frees blobs nothing references anymore and older than an hour (a fresh unreferenced blob may belong to a capture another process has not yet recorded). Set it to `0` to keep the ledger append-only forever.
+
+```yaml
+skills:
+  ledger_max_bytes: 5242880   # 0 = never auto-maintain
+```
+
 ## Archive TTL purge
 
 Archived skills are kept forever by default. If you want `~/.hermes/skills/.archive/` bounded, set a TTL and purge explicitly — purging never runs automatically, and every purged skill is captured into the ledger (with blobs) first, so even a purge leaves an auditable, recoverable trail:
@@ -14882,6 +14889,13 @@ plugins:
   # subagent_stop are never moved onto a timeout worker.
   # Shell hooks keep their own per-entry timeout under the top-level hooks: key.
   hook_callback_timeout: 30
+  # Optional: deadline (seconds) for one plugin's import + register() at load.
+  # A plugin that overruns it is skipped with the reason "load timed out after
+  # Ns" (reported like any other load failure: the startup warning and the
+  # in-session `/plugins` listing) and the remaining plugins keep loading; the
+  # stuck thread is abandoned. Default 10; set 0 to disable; values above 600
+  # are clamped.
+  load_timeout_seconds: 10
 ```
 
 Three ways to flip state:
@@ -15024,7 +15038,7 @@ Plugins can register the 27 lifecycle events currently accepted by `hermes_cli.p
 |---|---|
 | **Directive/control** | `pre_tool_call`, `pre_llm_call`, `pre_verify`, `pre_gateway_dispatch` |
 | **Transform** | `transform_tool_result`, `transform_terminal_output`, `transform_llm_output`, `pre_transcription` |
-| **Observer** | `post_tool_call`, `post_llm_call`, `pre_api_request`, `post_api_request`, `api_request_error`, `on_stream_start`, `on_stream_delta`, `on_stream_end`, `on_interim_message`, `on_session_start`, `on_session_end`, `on_session_finalize`, `on_session_reset`, `agent_loop_stopped`, `on_skill_lifecycle`, `subagent_start`, `subagent_stop`, `pre_approval_request`, `post_approval_response`, `pre_command`, `kanban_task_claimed`, `kanban_task_completed`, `kanban_task_blocked` |
+| **Observer** | `post_tool_call`, `post_llm_call`, `pre_api_request`, `post_api_request`, `api_request_error`, `pre_auxiliary_call`, `post_auxiliary_call`, `on_stream_start`, `on_stream_delta`, `on_stream_end`, `on_interim_message`, `on_session_start`, `on_session_end`, `on_session_finalize`, `on_session_reset`, `agent_loop_stopped`, `on_skill_lifecycle`, `subagent_start`, `subagent_stop`, `pre_approval_request`, `post_approval_response`, `pre_command`, `kanban_task_claimed`, `kanban_task_completed`, `kanban_task_blocked` |
 
 These categories describe current behavior rather than defining future naming rules. Plugin middleware remains a separate registry/surface.
 ## Plugin types
@@ -15175,7 +15189,12 @@ gracefully.
 **Update re-consent:** if a plugin update declares capabilities you haven't
 granted, `hermes plugins update` surfaces the additions and asks again. New
 capabilities stay off until you consent — a plugin update can never silently
-widen its access.
+widen its access. Catalog re-pins go one step further: when the new pin adds
+tools, hooks, Python dependencies, host capabilities or a Desktop UI half the
+installed version did not have, the CLI shows the delta and asks `y/N` before
+anything moves, and the Desktop / dashboard **Update** button opens the same
+confirmation. Declining (or a non-interactive session) leaves the plugin at
+the old pin.
 
 **Non-interactive sessions fail closed:** installing or updating without a
 TTY completes the install, but declared capabilities are *not* granted. Run
@@ -18961,7 +18980,7 @@ hermes kanban context <id>                             # what a worker sees
 hermes kanban specify [<id> | --all] [--tenant T]      # flesh out a triage-column idea
         [--author NAME] [--json]                       #   into a full spec and promote to todo
 hermes kanban gc [--event-retention-days N]            # workspaces + old events + old logs
-        [--log-retention-days N]
+        [--log-retention-days N]                       #   (negative N is rejected; 0 disables that sweep)
 ```
 
 All commands are also available as a slash command in the interactive CLI and in the messaging gateway (see [`/kanban` slash command](#kanban-slash-command) below).
@@ -20801,6 +20820,8 @@ Payload fields below are the exact event-specific fields supplied by each call s
 | `pre_api_request` | Observer | Per provider attempt, immediately before the request; return ignored. | `task_id`, `turn_id`, `api_request_id`, `session_id`, `user_message`, `conversation_history`, `platform`, `model`, `provider`, `base_url`, `api_mode`, `api_call_count`, `retry_count`, `request_messages`, `message_count`, `tool_count`, `approx_input_tokens`, `request_char_count`, `max_tokens`, `started_at`, `middleware_trace`, `request` | High sensitivity: legacy `user_message`, `conversation_history`, and `request_messages` are intentionally raw; prefer sanitized `request`. |
 | `post_api_request` | Observer | After normalized provider success; return ignored. | `task_id`, `turn_id`, `api_request_id`, `session_id`, `platform`, `model`, `provider`, `base_url`, `api_mode`, `api_call_count`, `api_duration`, `started_at`, `ended_at`, `finish_reason`, `message_count`, `response_model`, `response`, `usage`, `assistant_message`, `assistant_content_chars`, `assistant_tool_call_count` | Sanitized `response` is available, but raw normalized `assistant_message` may contain model/user content; `usage` is accounting data. |
 | `api_request_error` | Observer | On each failed provider attempt; return ignored. | `task_id`, `turn_id`, `api_request_id`, `session_id`, `platform`, `model`, `provider`, `base_url`, `api_mode`, `api_call_count`, `api_duration`, `started_at`, `ended_at`, `status_code`, `retry_count`, `max_retries`, `retryable`, `reason`, `error`, `request` | Error text may contain provider/user data; `request` is intended to be sanitized. |
+| `pre_auxiliary_call` | Observer | Per provider attempt of an auxiliary LLM call (titling, compression, MoA, vision, approval, ...), immediately before the request; return ignored. | `aux_task`, `task_id`, `turn_id`, `session_id`, `platform` (the parent turn's, empty outside a turn), `api_request_id`, `api_call_count`, `retry_count`, `streaming`, `model`, `provider`, `base_url`, `api_mode`, `request_messages`, `system_prompt`, `message_count`, `tool_count`, `approx_input_tokens`, `request_char_count`, `max_tokens`, `started_at`, `request` | `request_messages` is raw (compression sees the whole transcript); prefer sanitized `request`. |
+| `post_auxiliary_call` | Observer | After the same attempt returns or raises; return ignored. | `pre_auxiliary_call` identity fields plus `api_duration`, `ended_at`, `finish_reason`, `response_model`, `usage`, `response`, `assistant_content_chars`, `assistant_tool_call_count`, `error`, `error_type` (`None` on success; `usage`/`response` are `None` on error and for `streaming=True`) | Sanitized `response`; `usage` is accounting data; `error` may contain provider text. |
 | `on_stream_start` | Observer | Dispatched when a streaming LLM response begins; delivered off the token path via a host-owned bounded queue with one worker per callback; return ignored. | `turn_id`, `iteration`, `session_id`, `model`, `provider`, `surface` | Identifiers and routing metadata only. |
 | `on_stream_delta` | Observer | Dispatched per normalized streaming text delta via the bounded observer queue; a stalled callback drops only its own oldest events; return ignored. | `delta`, `kind` (`text` or `reasoning`), `turn_id`, `iteration`, `session_id`, `model`, `provider`, `surface` | Delta text is raw model output; reasoning deltas require the `plugins.stream_reasoning_deltas` opt-in. |
 | `on_stream_end` | Observer | Dispatched when a streaming response finishes or errors, after the stream closes; return ignored. | `final_text`, `finished`, `error`, `turn_id`, `iteration`, `session_id`, `model`, `provider`, `surface` | Full assembled response text; error text may include provider data. |
@@ -21023,7 +21044,7 @@ def my_callback(session_id: str, user_message: str, conversation_history: list,
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `session_id` | `str` | Unique identifier for the current session |
-| `user_message` | `str` | The user's original message for this turn (before any skill injection) |
+| `user_message` | `str \| list` | The user's original message for this turn (before any skill injection). A multimodal turn (image or other attachment) is the list of content parts, exactly as sent |
 | `conversation_history` | `list` | Copy of the full message list (OpenAI format: `[{"role": "user", "content": "..."}]`) |
 | `is_first_turn` | `bool` | `True` if this is the first turn of a new session, `False` on subsequent turns |
 | `model` | `str` | The model identifier (e.g. `"anthropic/claude-sonnet-4.6"`) |
@@ -21047,6 +21068,8 @@ return None
 **Where context is injected:** Always the **user message**, never the system prompt. This preserves the prompt cache — the system prompt stays identical across turns, so cached tokens are reused. The system prompt is Hermes's territory (model guidance, tool enforcement, personality, skills). Plugins contribute context alongside the user's input.
 
 The clean user-message `content` remains unchanged. For replay and prompt-cache stability, Hermes may persist the exact API-bound message, including plugin-injected context, in the row's `api_content` sidecar.
+
+On a **multimodal turn** (the user message is a list of content parts — an image attachment, or text sent as parts) there is no string sidecar: the joined context is appended to that turn's content as one extra `{"type": "text"}` part, before the first request, and the part is persisted with the turn so a resumed session, compaction and replay all see the same message the model saw. Earlier messages and the system prompt are never touched.
 
 When **multiple plugins** return context, their outputs are joined with double newlines in plugin discovery order (alphabetical by directory name).
 
@@ -21971,6 +21994,12 @@ Fires after a provider response has been normalized successfully. This is observ
 #### `api_request_error`
 
 Fires for a failed provider attempt with status/retry timing, an `error` object, and sanitized `request`. This is observer-only. Error messages may still contain provider or user data.
+
+### Auxiliary-call observer hooks
+
+#### `pre_auxiliary_call` / `post_auxiliary_call`
+
+Auxiliary LLM calls — session titling, context compression, MoA advisors and the aggregator, vision, approval classification, memory and other side tasks — run outside the main tool-calling loop and do **not** fire `pre_api_request` / `post_api_request` (those stay turn-scoped, so a trace-per-turn plugin never sees side traffic by accident). Subscribe to `pre_auxiliary_call` / `post_auxiliary_call` instead: they fire once per physical provider attempt (retries and fallbacks included) with the same payload shape plus `aux_task` (the task name, e.g. `title_generation`, `compression`, `moa_aggregator`, `vision`). `session_id` / `task_id` / `turn_id` are the parent turn's when the call runs under one, empty otherwise; `api_request_id` (`aux-…`) is shared by every attempt of one logical call and `retry_count` distinguishes them. Both are observer-only and fail-open: a raising or timed-out callback is logged and the auxiliary task proceeds. `post_auxiliary_call` carries `error` / `error_type` when the attempt raised and `streaming: True` (with `usage`/`response` `None`) when the response is handed back as a stream.
 
 ### `on_skill_lifecycle`
 
@@ -28027,7 +28056,7 @@ This guide walks you through the full setup process — from creating your bot o
 
 Discord REST and the Gateway WebSocket are separate transports. A successful REST response (including `fetch_user()` returning HTTP 200) does not prove that the bot can still receive Gateway events. Hermes therefore combines the ready state, client/socket closure state, socket openness, heartbeat ACK age, finite heartbeat latency, and — since the dispatch-side dimension — how long it has been since the last parsed Gateway event.
 
-After the configured number of consecutive unhealthy samples, the adapter emits one retryable fatal event. The existing gateway reconnect watcher creates a fresh adapter; the Discord adapter does not start a second unbounded reconnect loop.
+After the configured number of consecutive unhealthy samples, the adapter emits one retryable fatal event. A closed transport (`socket_closed` / `client_closed`) is a confirmed death and forces the reconnect on the first unhealthy sample; the threshold applies to soft signals only (stale heartbeat ACK, latency, event silence) — see [#118487](https://github.com/NousResearch/hermes-agent/issues/118487). The existing gateway reconnect watcher creates a fresh adapter; the Discord adapter does not start a second unbounded reconnect loop.
 
 Configure the non-secret thresholds in `config.yaml`:
 
@@ -51455,7 +51484,7 @@ Advanced per-platform knobs for throttling the outbound message batcher. Most us
 | `HERMES_DISCORD_TEXT_BATCH_DELAY_SECONDS` | Grace window before flushing a queued Discord text chunk (default: `0.6`). |
 | `HERMES_DISCORD_TEXT_BATCH_SPLIT_DELAY_SECONDS` | Delay between split chunks when a Discord message exceeds the length limit (default: `2.0`). |
 | `HERMES_DISCORD_LIVENESS_INTERVAL_SECONDS` | Compatibility/manual override for `discord.websocket_liveness_interval_seconds`. Interval for sampling the active Discord Gateway WebSocket (default: `15`; set to `0` to disable). Prefer the `config.yaml` key. |
-| `HERMES_DISCORD_LIVENESS_FAILURE_THRESHOLD` | Compatibility/manual override for `discord.websocket_liveness_failure_threshold`. Consecutive unhealthy WebSocket samples before forcing a reconnect (default: `2`). Prefer the `config.yaml` key. |
+| `HERMES_DISCORD_LIVENESS_FAILURE_THRESHOLD` | Compatibility/manual override for `discord.websocket_liveness_failure_threshold`. Consecutive unhealthy WebSocket samples before forcing a reconnect (default: `2`). Applies to soft signals only — a closed transport (`socket_closed` / `client_closed`) forces the reconnect on the first sample (#118487). Prefer the `config.yaml` key. |
 | `HERMES_MATRIX_TEXT_BATCH_DELAY_SECONDS` / `_SPLIT_DELAY_SECONDS` | Matrix equivalents of the Telegram batch knobs. |
 | `HERMES_FEISHU_TEXT_BATCH_DELAY_SECONDS` / `_SPLIT_DELAY_SECONDS` / `_MAX_CHARS` / `_MAX_MESSAGES` | Feishu batcher tuning — delay, split delay, max chars per message, max messages per batch. |
 | `HERMES_FEISHU_MEDIA_BATCH_DELAY_SECONDS` | Feishu media flush delay. |
@@ -60770,6 +60799,8 @@ API hooks describe provider attempts inside the agent loop:
 | `pre_api_request` | Immediately before a provider API request. |
 | `post_api_request` | After a successful provider response. |
 | `api_request_error` | After a failed provider request or retryable error path. |
+| `pre_auxiliary_call` | Before each provider attempt of an auxiliary LLM call (titling, compression, MoA, vision, ...). Carries `aux_task`; the `*_api_request` hooks stay main-loop only. |
+| `post_auxiliary_call` | After that attempt returns or raises (`error` set on failure). |
 
 `pre_api_request` includes:
 
@@ -61856,7 +61887,7 @@ this Hermes understands still loads with a warning.
 | `requires_plugins` | list | Inter-plugin dependencies: `- id: other-plugin` with optional `version_range: ">=1.0,<2"`. **Advisory**: a missing dependency logs a clear warning but the plugin still loads — probe at runtime with `ctx.has_plugin("other-plugin")`. Load **order** honors these edges: when A requires B, B's `register()` runs before A's (topological sort, alphabetical tiebreak; cycles warn and fall back to alphabetical order). |
 | `python_dependencies` | list of str | PEP 508 requirements (e.g. `"requests>=2.0,<3"`). Installed into Hermes' venv on `hermes plugins install` / `enable` and **re-applied after every `hermes update`** (see [Python dependencies](#python-dependencies)). A `pyproject.toml` beside `plugin.yaml` with `[project].dependencies` is the equivalent, preferred form. |
 | `python_runtime` | str | `external` — the plugin manages its own interpreter/venv (sidecar pattern); Hermes installs nothing and leaves any `pyproject.toml` alone. |
-| `config_schema` | mapping | JSON-schema-ish description of keys under `plugins.entries.<id>.settings`: `api_url: {type: str, default: "", description: "...", required: false}`. Validated at load; mismatches log actionable warnings naming the key and expected type — never load failures. Types: `str`, `int`, `float`, `bool`, `list`, `dict` (plus JSON-schema aliases). |
+| `config_schema` | mapping | JSON-schema-ish description of keys under `plugins.entries.<id>.settings`: `api_url: {type: str, default: "", description: "...", required: false}`. Validated at load; mismatches log actionable warnings naming the key and expected type — never load failures. Types: `str`, `int`, `float`, `bool`, `list`, `dict` (plus JSON-schema aliases) and `secret`. Also drives the settings form in the Desktop Plugins tab — see [Settings form in the Desktop](#settings-form-in-the-desktop). |
 | `license` | str | SPDX-style license id (e.g. `MIT`). |
 | `homepage` | str | Project URL. |
 | `tags` | list of str | Free-form discovery tags (e.g. `[gateway, telegram]`). |
@@ -62174,6 +62205,41 @@ Windows-safe namespace. Malformed existing state is reported and preserved.
 Config and state have different owners: settings are user-visible behavior in
 `config.yaml`, while state is plugin-owned runtime data under
 `<HERMES_HOME>/plugin-data/`. Neither API exposes another plugin's namespace.
+
+### Settings form in the Desktop
+
+Every key you declare in the manifest's `config_schema` renders as a field in the
+Desktop app's **Capabilities → Plugins** tab (the gear on the plugin's row). No
+Desktop code is needed: the backend's `plugins.manage list` returns the schema
+plus each key's current value, and saving writes through the same writer as
+`ctx.set_config()`, so `plugins.entries.<id>.settings.<key>` is what your plugin
+reads back. The form is table-driven by `type`:
+
+| Manifest `type` | Field | Extra keys |
+|---|---|---|
+| `str` (default) | text input | `choices: [a, b]` (or `enum:`) turns it into a dropdown |
+| `int`, `float` | number input | |
+| `bool` | switch | |
+| `list`, `dict` | JSON editor | |
+| `secret` | masked input | `env: MY_PLUGIN_TOKEN` — the `.env` variable it is stored under (default `<PLUGIN_ID>_<KEY>` upper-snaked) |
+
+Every entry also accepts `label` (shown instead of the key), `description`
+(help text under the field), `default` and `required`.
+
+```yaml
+config_schema:
+  api_url: {type: str, default: "https://api.example.com", label: "API URL", description: "Service endpoint"}
+  retries: {type: int, default: 3}
+  mode: {type: str, choices: [fast, careful], default: fast}
+  api_key: {type: secret, env: MY_PLUGIN_API_KEY, description: "Personal access token"}
+```
+
+**Secrets never touch `config.yaml`.** A `secret` field carries only the `.env`
+name and whether a value is set; the Desktop stores the value through the same
+credential route as provider API keys (`PUT /api/env`), and your plugin reads it
+with `os.environ.get("MY_PLUGIN_API_KEY")` — exactly like a `requires_env` entry.
+The `plugins.manage settings` action refuses secret keys and any value whose type
+or `choices` disagree with the schema.
 
 ## Step 6: Test it
 
@@ -62543,6 +62609,8 @@ Each hook is documented in full on the **[Event Hooks reference](../../user-guid
 | `pre_api_request` | Before each raw provider API request (several per turn when the model calls tools) | `session_id: str, model: str, provider: str, base_url: str, api_mode: str, api_call_count: int, message_count: int, tool_count: int, approx_input_tokens: int, max_tokens: int, request: dict` | ignored |
 | `post_api_request` | After each raw provider API request returns | `pre_api_request` fields plus `api_duration: float, finish_reason: str, response_model: str \| None, usage: dict, response: dict, assistant_content_chars: int, assistant_tool_call_count: int` | ignored |
 | `api_request_error` | A provider API call raised | correlation fields plus `status_code: int \| None, retry_count: int \| None, max_retries: int \| None, retryable: bool \| None, reason: str \| None, error: dict, request: dict` | ignored |
+| `pre_auxiliary_call` | Before each provider attempt of an auxiliary LLM call (titling, compression, MoA, vision, approval, ...); not a `pre_api_request` | `aux_task: str` plus the `pre_api_request` fields (`session_id`/`task_id`/`turn_id` are the parent turn's or empty, `api_request_id: str`, `retry_count: int`, `streaming: bool`, `request: dict`) | ignored |
+| `post_auxiliary_call` | After that attempt returns or raises | `pre_auxiliary_call` fields plus `api_duration: float, finish_reason, response_model, usage: dict \| None, response: dict \| None, error: str \| None, error_type: str \| None` | ignored |
 | [`on_session_start`](../../user-guide/features/hooks.md#on_session_start) | New session created (first turn only) | `session_id: str, model: str, platform: str` | ignored |
 | [`on_session_end`](../../user-guide/features/hooks.md#on_session_end) | End of every `run_conversation` call + CLI exit | `session_id: str, completed: bool, interrupted: bool, model: str, platform: str` | ignored |
 | [`on_session_finalize`](../../user-guide/features/hooks.md#on_session_finalize) | CLI/gateway tears down an active session | `session_id: str \| None, platform: str` | ignored |
@@ -63369,6 +63437,111 @@ def handler(args, **kwargs):
 # Good — model knows exactly when and how
 "description": "Evaluate a mathematical expression. Use for arithmetic, trig, logarithms. Supports: +, -, *, /, **, sqrt, sin, cos, log, pi, e."
 ```
+
+---
+
+<!-- source: website/docs/developer-guide/plugins/application-declarations.md -->
+# Application declarations
+
+# Application declarations
+
+A plugin whose MCP server fronts a desktop application declares which application that is and what the server needs of it. The core evaluates the declaration on the host and gates the server's tools, and any skill that names the application, on the answer. The parser imports only the standard library and `hermes_platform`.
+
+The vocabulary lives in `hermes_platform/declaration.py`. A declaration is data plus policy, parsed from plain mappings (already-decoded YAML, JSON, a dict literal — the parser never touches a file):
+
+```python
+from hermes_platform import declaration
+
+decl = declaration.parse_declaration(
+    "my-server",
+    raw_app={"linux": {"presence": "executable", "location": "/opt/my-app/server"}},
+    raw_requires={"app": True},
+    where="my-plugin/plugin.yaml",   # human label used in error messages
+)
+declaration.register("my-server", decl)
+```
+
+`register(server_name, decl)` stores one declaration under the configured server name in a process-local registry. Loader integration is separate work; core does not read plugin YAML automatically.
+
+An unregistered MCP server keeps its connection-only check. A skill that explicitly names an unregistered server is hidden. `clear()` removes every registration and is not a per-plugin unload operation. Registrations are process-wide, not profile-scoped.
+
+## `app` — how to find the application on each OS
+
+```yaml
+app:
+  win32:
+    presence: executable
+    location: "%ProgramFiles%/Vendor/Vendor App/McpServer/Server.exe"
+    version: { kind: uninstall_registry, display_name_prefix: "Vendor App" }
+    liveness:
+      kind: server_json
+      path: "%LOCALAPPDATA%/Vendor/Vendor App/McpServer/server.json"
+      pid_key: pid
+      url_key: http
+      token_key: token
+      endpoint_path: /mcp
+  darwin:
+    presence: bundle
+    location: /Applications/Vendor.app
+    version: { kind: plist }
+```
+
+| field | type | rule | maps to `AppDef` |
+|---|---|---|---|
+| `<os>` | `win32` \| `darwin` \| `linux` | at least one; unknown key is an error | `AppDef.os_family` |
+| `presence` | `executable` \| `bundle` | required per OS | `.presence` |
+| `location` | str | required; drive-rooted (`C:\\...`) on Windows, or starting with `~` / `%VAR%` / `$VAR`; UNC paths are rejected so a presence check never touches the network; no `..` segment or URL scheme; expansion at lookup | `.location` |
+| `version.kind` | `pe_resource` \| `plist` \| `uninstall_registry` \| `none` | default `none`; `pe_resource`/`uninstall_registry` only under `win32`, `plist` only under `darwin` | `.version_kind` |
+| `version.display_name_prefix` | str | required when `uninstall_registry` | `.version_arg` |
+| `liveness.kind` | `server_json` \| `none` | default `none` | `.liveness_kind` |
+| `liveness.path` | str | required when `server_json` | `.liveness_path` |
+| `liveness.pid_key` / `url_key` / `token_key` | str | defaults `pid` / `http` / `token` | `.liveness_*_key` |
+| `liveness.endpoint_path` | str | default `/mcp`; the path used for `initialize`, never the one in the file | `.endpoint_path` |
+
+When `requires.app` is true, an OS missing from `app:` gives `unsupported_os`.
+
+## `requires` — what the server needs before it is offered
+
+```yaml
+requires:
+  app: true
+  min_version: "2.3.0"
+```
+
+| field | type | rule |
+|---|---|---|
+| `app` | bool | when true, `app:` must exist and the server is gated on presence |
+| `min_version` | str | requires `app: true`; dotted numeric; every applicable `app.<os>` must declare a real `version.kind`; compared numerically per segment, non-numeric characters in a segment are dropped (`2.3.0.12594` ≥ `2.3.0`; prerelease suffixes are not ordered) |
+
+`requires.app: true` with no `app:` block is a `DeclarationError`.
+
+## Availability: the one evaluation every reader uses
+
+`hermes_platform/resolver/availability.py::availability(decl) -> Availability`
+
+```
+Availability(
+  state:   available | installed_not_running | missing_app | version_too_old
+         | unsupported_os | no_requirements,
+  version: str | None,       # inspected, when present
+  path:    str | None,       # where the app was found or looked for
+  min_version: str | None,   # from requires
+)
+```
+
+- `no_requirements`: no `requires.app`; the application gate passes, but the connection check still applies.
+- `unsupported_os`: `requires.app` and no `app.<this os>` block. Zero I/O.
+- `missing_app`: `locate` found nothing at `location`.
+- `version_too_old`: the version is below the minimum or cannot be read.
+- `available`: present, version acceptable or not required.
+- `installed_not_running`: reserved vocabulary; this evaluator never produces it.
+
+Evaluation uses `locate` and optional version inspection. It never probes a server, launches an application, or connects. The tool registry retains its existing availability cache.
+
+## The two gates
+
+- **MCP `check_fn`** (`tools/mcp_tool_handlers.py::_make_check_fn`): connection alive AND, when a declaration with `requires.app` is registered for the server, `availability(decl).offerable`. Returns a plain `bool` because the registry caches `bool(fn())`.
+- **Skill `requires_apps:` frontmatter** (`agent/skill_utils.py::skill_matches_apps`): each name resolves through `declaration.lookup`; an unknown name hides the skill (fail closed). Offer-time filter, like `environments:`.
 
 ---
 
@@ -78619,10 +78792,15 @@ The docs build publishes the catalog as one JSON document
 (`https://hermes-agent.nousresearch.com/docs/api/plugin-catalog.json`).
 `search`/`install`/`update` fetch it at most every six hours and cache it under
 `~/.hermes/cache/`, so new entries and removals reach installed clients without
-updating Hermes. Offline, the copy shipped with your checkout is used (a failed
-fetch is remembered for a minute, so `plugins list` and the dashboard's Plugins
-page pay at most one connection timeout, not one per installed plugin). Removals
-from the in-tree list and the live list are always both enforced.
+updating Hermes. Offline, the cached copy is used for up to 24 hours, then the
+copy shipped with your checkout takes over (a failed fetch is remembered for a
+minute, so `plugins list` and the dashboard's Plugins page pay at most one
+connection timeout, not one per installed plugin). When the cached document and
+your checkout disagree on an entry's pin, the newer of the two wins — a git
+checkout whose catalog was committed after the document was published (a fresh
+`hermes update`) installs its own pin, never the cached older one. Removals
+from the in-tree list and the live list are always both enforced, whatever the
+cache's age.
 
 ### Custom git URLs are different
 
@@ -79849,6 +80027,12 @@ Disconnecting an account is done by the user in the Portal. The same tool also i
 local MCP servers from the catalog (targets with `mcp: true`), so it is
 present whether or not you are signed in; only the managed-connector actions
 need the sign-in.
+
+The desktop backend's account-list and disconnect APIs use the Portal's
+account-management service, including its organization membership checks and
+disconnect audit. An unavailable Portal does not fall back to direct gateway
+account management. Tool discovery, execution, and connection-status watching
+continue through the gateway; the model tool cannot disconnect an account.
 
 `tool_call` accepts a batch: `calls` is an array of `{name, arguments}`
 entries (a single call is an array of one). Each connector entry in a batch
