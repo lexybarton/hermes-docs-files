@@ -44907,6 +44907,27 @@ With `gateway.multiplex_profiles: true` one process serves the default profile p
 
 Secret reads fail closed (`agent.secret_scope.get_secret` raises `UnscopedSecretError`) only after `set_multiplex_active(True)`, which the gateway, cron, `gateway migrate` and the Desktop/dashboard `serve` backend set. Adapter YAML never reaches `os.environ` under multiplex: `gateway/platforms/_shared.py::apply_yaml_bridge` seeds `PlatformConfig.extra` and skips the environ write under a secondary's scope; gates read through `platform_gate_env`. Shared-ingress platforms (WhatsApp bridge, Relay) run on the default profile only; a secondary that enables one is logged once and stamped into runtime status (`run_adapters.py::_note_unserved_secondary_platform`). Per-profile isolation as the user sees it: [Multi-profile gateways § What is isolated per profile](../user-guide/multi-profile-gateways.md#what-is-isolated-per-profile).
 
+## Mid-run plugin loading
+
+Plugins that load after the adapters connected (install/enable from the CLI, Desktop, dashboard or
+`plugins.manage`; a tool-triggered force re-discovery) re-wire their platform handlers without a restart
+(#87770). The pieces, all in `gateway/run_plugin_rewire.py`:
+
+- **Discovery listener** — `_start_recover_previous_run` subscribes `PluginManager.on_plugin_loaded` for the
+  launch profile and `_load_secondary_profile_config` does so per served profile. The event fires from inside
+  `discover_and_load` (never from an RPC) for the newly loaded plugins; the callback hops onto the gateway
+  loop with `call_soon_threadsafe`.
+- **Idempotent re-wire** — `BasePlatformAdapter.rewire_plugin_handlers()` re-reads
+  `get_platform_handler_factories(platform)` and runs only factories not yet wired on the live native
+  client (keyed `(plugin, qualname)` because a force reload hands back new function objects). Telegram
+  hoists the added handlers ahead of core's catch-alls; Slack also re-registers missing
+  `register_slack_action_handler` callbacks once per `AsyncApp`.
+- **`reload-plugins` control verb** — other processes (`hermes plugins install`, `hermes serve`) ask the
+  running gateway to force-rescan the requested (served) home; the answer carries `plugins`, per-plugin
+  `activations` and `adapters_rewired`, so the caller can say "active now" truthfully.
+- **Scope limit** — handlers only. Tools and system-prompt sections of a late plugin wait for the next
+  session (prompt-cache invariant); portable MCP servers wait for `mcp.reload`. Nothing un-wires on disable.
+
 ## Related Docs
 
 - [Session Storage](./session-storage.md)
@@ -61659,7 +61680,13 @@ and loaded through `skills_list` plus `skill_view`. MCP commands are passed as
 one executable token with a separate argument list, never through a shell.
 Use `skills_list` to discover the full qualified skill name. Portable skill
 namespaces have the deterministic form `agent-plugin-<slug>-<hash>`, derived
-from the discovered plugin key so sanitized names cannot collide.
+from the discovered plugin key so sanitized names cannot collide. A portable
+package's MCP servers keep the names their `mcp.json` gives them, the same rule
+as a user's own `mcp_servers` block, so the model-facing `mcp__<server>__<tool>`
+name keeps the tool verb inside the 64-character provider cap. A duplicate server
+name is a load-time conflict: a `config.yaml` server wins over a package, and the
+first-loaded package wins over the next; the loser is skipped with a warning
+naming both.
 
 Hermes validates `plugin.json`, Agent Skills frontmatter, fixed component
 locations, `mcp.json`, resolved paths, and symlink containment locally. It does
@@ -63037,6 +63064,36 @@ def register(ctx):
 
     ctx.register_platform_handler("discord", _wire)
 ```
+
+### Mid-run plugin loading: what activates now vs next session
+
+A plugin can load while the gateway (or the TUI/Desktop server) is already running: `hermes plugins
+install`/`enable`, a Desktop or dashboard install, a catalog re-pin, or a tool-triggered force
+re-discovery. Every one of those paths runs a **real forced rescan** (`discover_plugins(force=True)`) and
+`PluginManager.on_plugin_loaded(callback)` fires from inside it with one summary per **newly** loaded plugin
+(`hermes_cli/plugins_activation.py`):
+
+```python
+{"name": "late-mcp", "key": "late-mcp",
+ "activated_now": {"gateway_commands": ["late"], "callbacks": ["telegram"]},
+ "deferred": {"tools": ["late_tool"], "prompt": ["late.section"], "mcp_servers": ["worker"]}}
+```
+
+- **Active immediately** — gateway slash commands, gateway transform hooks / other hooks, and platform
+  callbacks: the gateway runner subscribes at boot and calls every live adapter's idempotent
+  `rewire_plugin_handlers()`, so a `register_platform_handler` factory (or Slack action handler) registered
+  by a late plugin is wired without a restart. Re-wiring is deduped per native client by `(plugin, factory
+  qualname)`; on Telegram the late handlers are hoisted ahead of core's catch-all `filters.COMMAND` /
+  `CallbackQueryHandler` (PTB dispatches the first match per group), exactly as they would sit at connect.
+- **Deferred** — `tools` and `prompt` sections apply from the **next session** (the running session's
+  prompt/tool schema is cache-stable, same rule as `/skills install`); `mcp_servers` (the plugin's
+  `mcp.json` servers, by their mcp.json names) connect on `mcp.reload` or the next session.
+- There is no un-wire: disabling a plugin mid-run keeps its already-wired handlers until the gateway
+  restarts, and the surfaces say so.
+
+Install surfaces report exactly this split: `hermes plugins install/enable` prints it after nudging the running
+gateway (`reload-plugins` control-socket verb), `plugins.manage install/toggle/update` returns `activation` +
+`gateway_reloaded` (`restart_required` is true only when no gateway answered).
 
 :::tip
 This guide covers **general plugins** (tools, hooks, slash commands, CLI commands). The sections below sketch the authoring pattern for each specialized plugin type; each links to its full guide for field reference and examples.
@@ -73409,6 +73466,17 @@ The app is built for working on several things at once:
 - **Tabs** — **Cmd/Ctrl+T** opens a new session tab; **Ctrl+Tab** / **Ctrl+Shift+Tab** cycle sessions, and **Ctrl+1…9** jump to a recent session by position. **Cmd/Ctrl+W** closes the focused tab and **Cmd/Ctrl+Shift+T** reopens the last closed one.
 - **Multiple windows** — **Cmd/Ctrl+Shift+N** opens a new window, and any session can be popped out via its context menu (**New window**) or from the command palette. A popped-out window renders that single chat without the global sidebar — handy for parking a long-running session on another monitor. Live agent output streams into every window showing the session.
 - **Panes** — **Cmd/Ctrl+B** toggles the left sidebar, **Cmd/Ctrl+J** the right one, and **Cmd/Ctrl+\\** swaps which side the sidebars sit on.
+
+#### Interface mode
+
+The layout editor (titlebar button, or **Cmd/Ctrl+Shift+\\**) opens with an **Interface mode** choice — also under **Settings → Appearance → Window & layout** and as *Simple mode* in the command palette. It changes what is shown, not what Hermes can do.
+
+- **Advanced** (default) is the app exactly as you have set it up. Picking it writes nothing.
+- **Simple** is chat-first: the statusbar, profile rail, terminal, file browser and review panes, the technical tool-call view, inline code diffs, and the Artifacts / Scheduled jobs rows rest out of the way (Capabilities and Messaging stay — they are how you set Hermes up); thinking starts collapsed; session rows show the title, a preview and when they were last active. The titlebar keeps Settings and the layout editor. Simple is always the *Basic* arrangement; its one layout choice is *Sidebar left* or *Sidebar right*. The templates and saved layouts are Advanced.
+
+A layout says what is on screen, not just where things sit: applying one opens every pane it places and closes the ones it leaves *resting*, so **Ctrl+`**, **Cmd/Ctrl+J** and **Cmd/Ctrl+G** always agree with what you see. *Basic* is sessions and chat with the terminal resting as a collapsed rail under the chat and the file browser and review resting in a right column — **Ctrl+`** opens the terminal under the chat, **Cmd/Ctrl+J** opens the tree on the right. *Focus* keeps files and review as tabs behind the chat, with the same terminal rail. *Default*, *Terminal deck* and *Quad* open everything they place. A layout you save remembers which of its panes were closed.
+
+Simple shadows your preferences instead of overwriting them, so switching back to Advanced restores every setting exactly. Every keybind still works in Simple — **Ctrl+`**, **Cmd/Ctrl+J** and **Cmd/Ctrl+G** open the terminal, file browser and review for the current session, and the next launch is quiet again. With more than one profile the profile rail stays, since it is then the only way to switch. First-run onboarding sets the mode from the layout you pick: *Basic* starts in Simple, *Elite* in Advanced; skipping leaves it on Advanced.
 
 #### Minimize to tray
 

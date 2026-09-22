@@ -234,6 +234,7 @@ Repo: https://github.com/NousResearch/hermes-agent
 - [Onboarding recommendations](https://hermes-agent.nousresearch.com/docs/developer-guide/onboarding-recommendations)
 - [Plugin LLM Access](https://hermes-agent.nousresearch.com/docs/developer-guide/plugin-llm-access): Run any LLM call from inside a plugin via ctx.llm — chat or structured, sync or async. Host-owned auth, fail-closed trust gate, optional JSON Schema validation.
 - [Build a Hermes Plugin](https://hermes-agent.nousresearch.com/docs/developer-guide/plugins): Step-by-step guide to building a complete Hermes plugin with tools, hooks, data files, and skills
+- [Application declarations](https://hermes-agent.nousresearch.com/docs/developer-guide/plugins/application-declarations)
 - [Programmatic Integration](https://hermes-agent.nousresearch.com/docs/developer-guide/programmatic-integration): Three protocols for driving hermes-agent from external programs: ACP, the TUI gateway JSON-RPC, and the OpenAI-compatible HTTP API
 - [Relay ↔ Connector Contract](https://hermes-agent.nousresearch.com/docs/developer-guide/relay-connector-contract): Wire contract between the Hermes gateway relay adapter and external connectors (experimental)
 - [Relay Shared Metrics](https://hermes-agent.nousresearch.com/docs/developer-guide/relay-shared-metrics): NeMo Relay shared metrics: what is exported, consent and retention, staging validation
