@@ -3868,9 +3868,9 @@ honors an explicit `TMPDIR`/`TMP`/`TEMP` from the environment and otherwise
 uses a managed directory on real storage at `~/.hermes/cache/terminal`
 instead of `/tmp` — on many distros (Arch-based setups in particular) `/tmp` <!-- no-tmp: ok — explains why /tmp is avoided -->
 is a small RAM-backed tmpfs that Hermes session artifacts can fill under
-load. The managed directory is auto-pruned: artifacts older than 72 hours are
-swept hourly by gateway housekeeping and once per process on CLI-only
-installs. Set `temp_dir` to an existing absolute path to redirect session
+load. The managed directory is auto-pruned: artifacts idle for 24 hours (no write
+anywhere inside them) are swept hourly by gateway housekeeping and once per process
+on CLI-only installs. Set `temp_dir` to an existing absolute path to redirect session
 temp anywhere else; user-set paths are never auto-pruned.
 
 Independently of `terminal.temp_dir`, every Hermes process (CLI, TUI, gateway, Desktop
@@ -3879,9 +3879,14 @@ backend, cron) and every child it launches gets `TMPDIR`, `TMP` and `TEMP` point
 `mktemp`, browser profiles and probe scripts all land on real storage instead of a
 RAM-backed system temp dir. The system prompt names this directory as the scratch
 directory. Hermes only sets these when they are not already set — a `TMPDIR` exported
-by you or by the OS (macOS `/var/folders`, Windows `%TEMP%`) is left alone. Entries
-older than 72 hours are pruned at startup (at most once per hour). `hermes doctor`
-reports the directory and its size.
+by you or by the OS (macOS `/var/folders`, Windows `%TEMP%`) is left alone. Entries are
+pruned at startup (at most once per hour) once they have been **idle for 24 hours**: an entry
+stays as long as anything anywhere inside it was written in the last day, and goes a day after
+the last write. Before an idle entry is deleted, Hermes also stops any process still running
+with its working directory inside that entry (or inside a scratch path that no longer exists,
+such as a headless browser left behind by a test run) and drops any `git worktree`
+registration that pointed into it. `hermes doctor` reports the directory and its size, and
+warns about directories over 1 GB elsewhere under `cache/` that no pruner covers.
 
 `desktop.font_family` sets the font for chat and the rest of the Hermes Desktop interface (the terminal pane has its own key above). Give it one installed family name (for example, `OpenDyslexic` or `Atkinson Hyperlegible`) or a CSS font stack; Hermes keeps the active theme's own stack behind it so CJK and emoji glyphs still resolve, and an empty value uses the theme's font. Edit it in **Settings → Appearance → Chat Font**.
 
@@ -51682,6 +51687,8 @@ Scoped to the Feishu document-comment handler. Drives comment read/write operati
 | `search_files` | Search file contents or find files by name. Use this instead of grep/rg/find/ls in terminal. Ripgrep-backed, faster than shell equivalents. Content search (target='content'): Regex search inside files. Output modes: full matches with line… | — |
 | `write_file` | Write content to a file, completely replacing existing content. Use this instead of echo/cat heredoc in terminal. Creates parent directories automatically. OVERWRITES the entire file — use 'patch' for targeted edits. For an existing file, call read_file first: write_file refuses (file untouched) when the task has no current full read/write of the file or the file changed on disk since — on refusal, read_file, merge, retry. Auto-runs syntax checks on .py/.json/.yaml/.toml and other linted languages; only NEW errors introduced by the write are surfaced. | — |
 
+For local files, a full unredacted read (including all pages of the same file version) or a successful `write_file` supplies a whole-file baseline. Reading a smaller region afterward does not discard that baseline while the bytes remain unchanged. A changed file, an unread file, or a view with hidden/redacted or clamped content still needs a full current read before replacement; `patch` remains available for targeted edits. Writes made through terminal commands or `execute_code` do not establish a `write_file` baseline.
+
 ## `homeassistant` toolset
 
 | Tool | Description | Requires environment |
@@ -59598,9 +59605,11 @@ Model provider plugins are the third kind of **provider plugin**. The others are
 `providers/__init__.py._discover_providers()` runs lazily the first time any code calls `get_provider_profile()` or `list_providers()`. Discovery order:
 
 1. **Bundled plugins** — `<repo>/plugins/model-providers/<name>/` — ship with Hermes
-2. **User plugins** — `$HERMES_HOME/plugins/model-providers/<name>/` — drop in a directory; restart an already-running Hermes process to discover it
+2. **User plugins** — `$HERMES_HOME/plugins/model-providers/<name>/` — drop in a directory; a running process picks it up on its next provider lookup (no restart)
 3. **Installed plugins** — `$HERMES_HOME/plugins/<name>/` (where `hermes plugins install owner/repo` clones) — imported only when `plugin.yaml` declares `kind: model-provider`; every other kind there belongs to the general PluginManager
 4. **Legacy single-file** — `<repo>/providers/<name>.py` — back-compat for out-of-tree editable installs
+
+Steps 2 and 3 are **per profile home**: one process that serves several profiles (the multiplex gateway, the Desktop app's `hermes serve`) resolves the plugins of whichever profile's `$HERMES_HOME` is bound at lookup time, and a plugin installed in one profile is not visible from another. Install the plugin in every profile that should use it (`hermes -p <profile> plugins install ...`).
 
 **User plugins override bundled plugins of the same name** because `register_provider()` is last-writer-wins. Drop a `$HERMES_HOME/plugins/model-providers/gmi/` directory to replace the built-in GMI profile without touching the repo.
 
