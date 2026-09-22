@@ -10661,6 +10661,16 @@ TERMINAL_SSH_KEY=~/.ssh/hermes_agent_key
 
 The SSH connection details live in `.env` (not `config.yaml`) so they aren't checked in or shared along with profile exports. This keeps the gateway's messaging connections separate from the agent's command execution.
 
+## Trusted-by-placement extension points {#trusted-by-placement}
+
+Most third-party code Hermes can run is gated by an explicit allow-list: general plugins need `plugins.enabled`, shell hooks need a first-use approval (or `hooks_auto_accept`), MCP servers are listed in config. One surface is deliberately different:
+
+| Extension point | Loaded from | Loaded when | Opt-in |
+|-----------------|-------------|-------------|--------|
+| [Gateway event hooks](./features/hooks.md#gateway-event-hooks) | `<profile home>/hooks/<name>/` (`HOOK.yaml` + `handler.py`) | Gateway startup (`HookRegistry.discover_and_load()`), per served profile | **Placing the directory.** No `plugins.enabled` entry, no prompt; `HERMES_SAFE_MODE` does not skip it. |
+
+The gateway imports every valid hook directory in-process, with the gateway's own privileges. This is the documented contract (since `3988c3c245f`), not an oversight: the profile home is operator-owned configuration, and anyone who can write into it can already run code as you through `config.yaml` shell hooks or by editing `plugins.enabled`, so a separate consent gate for `hooks/` would add friction without moving the trust boundary. Treat the contents of `~/.hermes/hooks/` like the contents of `config.yaml` — review a `handler.py` before you place it, and include `ls ~/.hermes/hooks/` whenever you audit the rest of the profile home (the directory is not on the [protected-paths denylist](#file-write-safety), so it is ordinary writable state). Full details: [gateway hook trust model](./features/hooks.md#gateway-hook-trust).
+
 ## Supply-chain advisory checking
 
 Hermes ships with a built-in advisory scanner that flags Python packages in the active venv that match a curated catalog of known-compromised versions (supply-chain worms like the May 2026 `mistralai 2.4.6` poisoning). Implementation lives in `hermes_cli/security_advisories.py`.
@@ -11915,10 +11925,12 @@ holds a small set of files named by topic (a decision table, a recipe, provider 
 extended in place rather than accumulated one file per session. Skills also do not
 restate what is already loaded every turn (the repo's `AGENTS.md`, tool schemas).
 
-`skill_manage` runs an advisory linter on `create` and on `references/` writes and
-returns its findings in the tool result. Two rules exist specifically for this shape:
-`incident-log-shape` (a body dense in PR/issue numbers) and `references-sprawl` (more
-than 60 reference files). They warn; they never block a write.
+`skill_manage` runs an advisory linter on `create`, on `SKILL.md` patches, and on `references/`
+writes and returns its findings in the tool result. Three rules exist specifically for this shape:
+`incident-log-shape` (a body dense in PR/issue numbers), `references-sprawl` (more
+than 60 reference files), and `oversized-body` (a `SKILL.md` body past ~24k chars — `skill_view`
+loads the whole file and it stays in context for the rest of the session). They warn; they never
+block a write.
 
 ### Actions
 
@@ -14852,6 +14864,10 @@ User plugins at `~/.hermes/plugins/model-providers/<name>/` override bundled mod
 
 **General plugins and user-installed backends are disabled by default** — discovery finds them (so they show up in `hermes plugins` and `/plugins`), but nothing with hooks or tools loads until you add the plugin's name to `plugins.enabled` in `~/.hermes/config.yaml`. This stops third-party code from running without your explicit consent.
 
+:::note `plugins.enabled` governs plugins only
+[Gateway event hooks](./hooks.md#gateway-event-hooks) under `~/.hermes/hooks/<name>/` are not plugins and are **not** gated by `plugins.enabled` or `plugins.disabled`. That directory is trusted by placement: any subdirectory holding a valid `HOOK.yaml` + `handler.py` is imported by the gateway at startup, and placing the files there is the opt-in. See the [gateway hook trust model](./hooks.md#gateway-hook-trust).
+:::
+
 ```yaml
 plugins:
   enabled:
@@ -15073,16 +15089,19 @@ Declarative plugins are symlinked with a `nix-managed-` prefix — they coexist 
 
 ```bash
 hermes plugins                               # unified interactive UI
-hermes plugins list                          # table: enabled / disabled / not enabled
+hermes plugins list                          # table: enabled / disabled / not enabled (bundled backends,
+                                             # platforms and the live memory.provider count as enabled)
 hermes plugins search <term>                 # search the Hermes plugin catalog
 hermes plugins install <name>                # install a catalog entry (repo @ reviewed pinned SHA)
 hermes plugins install user/repo             # install from Git, then prompt Enable? [y/N]
 hermes plugins install user/repo --enable    # install AND enable (no prompt)
 hermes plugins install user/repo --no-enable # install but leave disabled (no prompt)
 hermes plugins update my-plugin              # pull latest (local edits are autostashed and re-applied)
-hermes plugins remove my-plugin              # uninstall
+hermes plugins remove my-plugin              # uninstall; also drops it from plugins.enabled/disabled/entries
+                                             # and resets memory.provider when it was the live provider
 hermes plugins enable my-plugin              # add to allow-list
-hermes plugins disable my-plugin             # remove from allow-list + add to disabled
+hermes plugins disable my-plugin             # remove from allow-list + add to disabled (bundled platforms:
+                                             # either spelling works, e.g. photon-platform or platforms/photon)
 hermes plugins capabilities [my-plugin]      # declared vs granted capabilities
 ```
 
@@ -20343,6 +20362,16 @@ Hook callback errors are isolated and logged rather than crashing the agent. Hoo
 
 Gateway hooks fire automatically during gateway operation (Telegram, Discord, Slack, WhatsApp, Teams) without blocking the main agent pipeline.
 
+### Trust model: placing the files is the opt-in {#gateway-hook-trust}
+
+The hooks directory is a **trusted-by-placement** extension point — the documented contract since `3988c3c245f` (April 2026), when the comparison table below first recorded its consent model as "Implicit (dir trust)". It has no enable list, and `plugins.enabled` / `plugins.disabled` do not apply to it — gateway hooks are not plugins. Exactly what loads:
+
+- **When:** once, at gateway startup (`HookRegistry.discover_and_load()`, called from `gateway/run_startup.py`). Under [multi-profile gateways](../multi-profile-gateways.md), each served profile's own `hooks/` is loaded the first time an event fires inside that profile. The CLI, TUI, Desktop and cron never load gateway hooks.
+- **What:** every subdirectory of `<profile home>/hooks/` (`~/.hermes/hooks/` for the default profile) that contains both a `HOOK.yaml` parsing to a mapping with a non-empty `events` list **and** a `handler.py`. Directories missing either file are skipped silently; an invalid manifest or an empty `events` list is skipped with a `[hooks] Skipping …` log line.
+- **How:** `handler.py` is imported in-process — its module body runs at import, and its `handle` function is registered for the declared events. It runs as the gateway process with the same access as the gateway itself (loaded credentials, tools, plugin state). There is no sandbox, no first-use prompt, and `HERMES_SAFE_MODE` does not skip this loader.
+
+Dropping the two files into the directory **is** the opt-in; removing (or renaming) `HOOK.yaml` or the directory is the opt-out. Anyone who can write into your profile home can already run code as you through `config.yaml` shell hooks or `plugins.enabled`, so the directory sits inside the same trust envelope as the rest of `~/.hermes/` — see [Trusted-by-placement extension points](../security.md#trusted-by-placement) on the security page. Review a hook's `handler.py` before you place it, exactly as you would a plugin before enabling it.
+
 ### Creating a Hook
 
 Each hook is a directory under `~/.hermes/hooks/` containing two files:
@@ -20671,7 +20700,7 @@ An earlier version of Hermes shipped this as a built-in hook and silently spawne
 ### How It Works
 
 1. On gateway startup, `HookRegistry.discover_and_load()` scans `~/.hermes/hooks/`
-2. Each subdirectory with `HOOK.yaml` + `handler.py` is loaded dynamically
+2. Each subdirectory with `HOOK.yaml` + `handler.py` is imported in-process — no enable list is consulted (see [Trust model](#gateway-hook-trust))
 3. Handlers are registered for their declared events
 4. At each lifecycle point, `hooks.emit()` fires all matching handlers
 5. Errors in any handler are caught and logged — a broken hook never crashes the agent
@@ -20760,7 +20789,7 @@ Payload fields below are the exact event-specific fields supplied by each call s
 
 | Hook | Category | Exact timing and return behavior | Explicit payload fields | Privacy / sensitivity |
 |---|---|---|---|---|
-| [`pre_tool_call`](#pre_tool_call) | Directive/control | Once before execution; first valid `block` or `approve` directive wins, and `modify` returns are shallow-merged into the tool arguments. | `tool_name`, `args`, `task_id`, `session_id`, `tool_call_id`, `turn_id`, `api_request_id`, `middleware_trace` | Raw arguments may contain user content, paths, commands, or secrets. |
+| [`pre_tool_call`](#pre_tool_call) | Directive/control | Once before execution; any valid `block` wins over any `approve` (then the first valid `approve`), and `modify` returns are shallow-merged into the tool arguments. | `tool_name`, `args`, `task_id`, `session_id`, `tool_call_id`, `turn_id`, `api_request_id`, `middleware_trace` | Raw arguments may contain user content, paths, commands, or secrets. |
 | `post_tool_call` | Observer | After blocked, error, or successful result; return ignored. | `tool_name`, `args`, `result`, `task_id`, `session_id`, `tool_call_id`, `turn_id`, `api_request_id`, `duration_ms`, `status`, `error_type`, `error_message`, `middleware_trace` | Result/error text may contain arbitrary tool or user content and secrets. |
 | `transform_tool_result` | Transform | After `post_tool_call`, before conversation append; first string replaces the result. | `tool_name`, `args`, `result`, `task_id`, `session_id`, `tool_call_id`, `turn_id`, `api_request_id`, `duration_ms`, `status`, `error_type`, `error_message` | Exposes the full model-bound result and arguments. |
 | `transform_terminal_output` | Transform | After bounded foreground process capture, before final output limiting; first string replaces output. | `command`, `output`, `returncode`, `task_id`, `env_type` | Command/output may contain credentials. |
@@ -20876,7 +20905,7 @@ return {"action": "block", "message": "Reason the tool call was blocked"}
 return {"action": "approve", "message": "Why approval is required", "rule_key": "optional:scope"}
 ```
 
-The first valid directive wins (Python plugins registered first, then shell hooks). `block` requires a non-empty `message` and short-circuits the tool with that text as the error returned to the model. `approve` escalates the call to the existing human-approval gate; `message` and `rule_key` are optional, and denial, timeout, or gate error fails closed. Other return values are ignored, so existing observer-only callbacks keep working unchanged.
+Precedence is `block` > `approve` > no directive, regardless of registration order: any plugin's valid `block` wins over an earlier plugin's `approve`, and among `approve` directives the first valid one wins (Python plugins are registered first, then shell hooks). `block` requires a non-empty `message` and short-circuits the tool with that text as the error returned to the model. `approve` escalates the call to the existing human-approval gate; `message` and `rule_key` are optional, and denial, timeout, or gate error fails closed. Other return values are ignored, so existing observer-only callbacks keep working unchanged.
 
 **Return value — rewrite the tool's arguments:**
 
@@ -20894,7 +20923,7 @@ Shell hooks also accept the Claude Code-compatible format:
 
 Both formats are normalized internally to `{"action": "modify", "args": {...}}`.
 
-If a `pre_tool_call` callback exceeds `plugins.hook_callback_timeout` (or is still running from a previous timed-out fire), Hermes **fails closed**: the tool is blocked with a timeout message rather than proceeding without a policy decision.
+If a `pre_tool_call` callback exceeds `plugins.hook_callback_timeout` (or is still running from a previous timed-out fire), Hermes **fails closed**: the tool is blocked with a timeout message rather than proceeding without a policy decision. The same applies to a callback that raises: the block message names the callback and the error. A hung callback is skipped for a 60s suppression window; after that a new tool call runs it again (up to three abandoned workers per callback, so a permanently hung plugin blocks tool calls with a warning naming it instead of silently wedging the agent until restart).
 
 **Use cases:** Logging, audit trails, tool call counters, blocking dangerous operations, rate limiting, per-user policy enforcement, argument sanitization, path rewriting, injecting default parameters.
 
@@ -21536,6 +21565,8 @@ def my_callback(event, gateway, session_store, **kwargs):
 
 **Return value:** `None` or a dict. The first recognized action dict wins; remaining plugin results are ignored. Exceptions in plugin callbacks are caught and logged; the gateway always falls through to normal dispatch on error.
 
+Callbacks may be `async def`: they are awaited on the gateway's own event loop, so awaiting loop-bound work (an `asyncio.Event`, an aiohttp session, `asyncio.to_thread`) makes progress and other inbound messages keep flowing while the callback runs. The hook is intentionally not bounded by `plugins.hook_callback_timeout` — dropping or passing a message on timeout are both wrong for a policy gate — so a callback that never returns holds up dispatch of that message.
+
 | Return | Effect |
 |--------|--------|
 | `{"action": "skip", "reason": "..."}` | Drop the message — no agent reply, no pairing flow, no auth. Plugin is assumed to have handled it (e.g. silent-ingested into the transcript). |
@@ -21840,6 +21871,8 @@ Applies to every tool. For terminal-only rewriting see `transform_terminal_outpu
 
 Fires inside the `terminal` tool after foreground process capture has already been bounded by the environment, and before the final output limit. It lets plugins replace the captured stdout/stderr; the replacement is still subject to the final output limit.
 
+It also fires for background-process output on its way to the model or the chat: the `process_manage` `poll` / `wait` / `log` / `kill` results (and `list` previews) and the completion, heartbeat and watch-pattern notifications. There `returncode` is `None` while the process is still running and `env_type` is an empty string (the environment is not recorded per process). In both cases the hook runs *before* secret redaction, so a replacement that still carries a credential is masked.
+
 **Callback signature:**
 
 ```python
@@ -21881,7 +21914,7 @@ Pairs with `transform_tool_result`, which runs afterward for every tool, includi
 
 ### `transform_llm_output`
 
-Fires **once per turn** after the tool-calling loop completes and the model has produced a final response, **before** that response is delivered to the user (CLI, gateway, or programmatic caller). Lets a plugin rewrite the assistant's final text using classical-programming methods — no extra inference tokens burned on SOUL flavor text or a skill-driven transform.
+Fires **once per turn** after the tool-calling loop completes and the model has produced a final response, **before** that response is delivered to the user (CLI, gateway, or programmatic caller) and **before** the assistant row is persisted — the replacement is what the session stores, what `/resume` shows and what the next turn replays, so the transcript never diverges from what the user saw. Hermes' own trailers (the file-mutation warning, the abnormal-exit note) are appended afterwards and are not part of `response_text`. Lets a plugin rewrite the assistant's final text using classical-programming methods — no extra inference tokens burned on SOUL flavor text or a skill-driven transform.
 
 **Callback signature:**
 
@@ -21997,7 +22030,7 @@ Shell hooks are registered by calling `agent.shell_hooks.register_from_config(cf
 | Events | `VALID_HOOKS` (incl. `subagent_stop`) | `VALID_HOOKS` | Gateway lifecycle (`gateway:startup`, `agent:*`, `command:*`) |
 | Can block a tool call | Yes (`pre_tool_call`) | Yes (`pre_tool_call`) | No |
 | Can inject LLM context | Yes (`pre_llm_call`) | Yes (`pre_llm_call`) | No |
-| Consent | First-use prompt per `(event, command)` pair | Implicit (Python plugin trust) | Implicit (dir trust) |
+| Consent | First-use prompt per `(event, command)` pair | Explicit (`plugins.enabled`), then in-process trust | Implicit ([dir trust](#gateway-hook-trust)) |
 | Inter-process isolation | Yes (subprocess) | No (in-process) | No (in-process) |
 
 ### Configuration schema
@@ -22050,6 +22083,10 @@ profile's `HERMES_HOME`. `tool_name` and `tool_input` are `null` for non-tool ev
 // Modify a pre_tool_call — rewrite tool args before dispatch:
 {"action": "modify", "args": {"new_string": "fixed content"}}         // Hermes-canonical
 {"decision": "modify", "tool_input": {"new_string": "fixed content"}} // Claude-Code style
+
+// Escalate a pre_tool_call to the human-approval gate (Hermes-only; `message` and `rule_key`
+// are optional). Claude-Code's `{"decision": "approve"}` means auto-allow and is NOT mapped here:
+{"action": "approve", "message": "Why approval is required", "rule_key": "optional:scope"}
 
 // Inject context for pre_llm_call:
 {"context": "Today is Friday, 2026-04-17"}
@@ -22241,7 +22278,7 @@ Shell hooks run with **your full user credentials** — same trust boundary as a
 
 ### Ordering and precedence
 
-Both Python plugin hooks and shell hooks flow through the same `invoke_hook()` dispatcher. Python plugins are registered first (`discover_and_load()`), shell hooks second (`register_from_config()`), so Python `pre_tool_call` block decisions take precedence in tie cases. The first valid block wins — the aggregator returns as soon as any callback produces `{"action": "block", "message": str}` with a non-empty message.
+Both Python plugin hooks and shell hooks flow through the same `invoke_hook()` dispatcher. Python plugins are registered first (`discover_and_load()`), shell hooks second (`register_from_config()`), so Python `pre_tool_call` decisions take precedence in tie cases. The first valid block wins — the aggregator returns as soon as any callback produces `{"action": "block", "message": str}` with a non-empty message — and a block anywhere in the list outranks an `approve` returned earlier.
 
 ## Outbound Webhooks
 
@@ -26577,6 +26614,38 @@ Notes:
 - After a crash, a preserved queue can redeliver an update the crashed
   instance partially processed. Telegram's offset usually prevents this,
   but time-sensitive commands sent during a long outage will run on boot.
+
+### Repeated inbound updates
+
+Hermes suppresses repeated Telegram `update_id` values before message batching,
+command/media handling, observed group-history writes and plugin observers.
+The receiving adapter and numeric bot ID scope this check; it does not deduplicate
+by text or `message_id`. A genuine edit with a new update ID can still be processed.
+
+This is bounded, **in-memory** protection, not an exactly-once guarantee:
+
+- The adapter remembers the most recent 4096 completed admissions, with no time
+  expiry. Active updates stay claimed until dispatch and its scheduled PTB handler
+  tasks finish, including nonblocking native plugins and registered error callbacks.
+- Reconnecting the same adapter retains that history. Eviction, adapter replacement
+  or a process restart can allow an old update through again. Nothing is written
+  to a replay ledger on disk.
+- Failed or cancelled preparation releases its claim if nothing has been handed
+  off. Once an update enters a batch/hold queue, gateway dispatch, an observer or
+  a native plugin, a later error does not reopen it. Native plugins own their own
+  partial effects, so entering their update or registered error callback is
+  conservatively treated as handoff. PTB's own exception logging is not a handoff.
+  Uncached static-sticker vision analysis is also a handoff: cancelling the await
+  cannot undo an auxiliary model request already submitted. Caught preparation
+  errors before any handoff remain retryable; an intentional refusal is terminal.
+- Releasing a claim only permits a later delivery; it does not request one from
+  Telegram. Polling acknowledgement is independent of agent completion. This check
+  does not retry failed replies or prevent a downstream component from independently
+  duplicating work.
+
+For a suspected late replay, compare both occurrences' bot/profile, chat/topic,
+`update_id`, update kind, `message_id` and actual receive time. An edit can reuse
+`message_id`, and the message's sent timestamp is not its receive time.
 
 ### Command menu priority and cap (Optional)
 
@@ -48674,6 +48743,8 @@ Custom-endpoint config checks (both warn-only; `--fix` does not rewrite them):
 - `custom_providers` that is not a YAML list (for example a string left by a bad `config set`) is reported as an error naming the key and the received type — the runtime ignores every custom endpoint until it is a list again.
 - A legacy `custom_providers` list entry with no matching `providers:` entry (same endpoint URL) is reported with the move to make: such an entry is still served from the retired list store (the model picker and the Custom Endpoints page dual-read it) rather than the `providers:` map every other surface edits, and the one-shot v12 migration that moved the list into `providers:` does not run again.
 
+**Config Structure** also flags any list/mapping setting stored as one quoted string (`plugins.enabled: '["a","b"]'`, `model_catalog.excluded_providers: '["openai-api"]'` — the shape older `config set` versions wrote): every reader ignores such a string, so the plugins silently stay unmounted and the exclusion never applies. The finding names the key and the `hermes config set <key> '<literal>'` command that stores a real list; the same warning appears in the startup banner. `--fix` does not rewrite the file.
+
 ## `hermes dump`
 
 ```bash
@@ -49020,7 +49091,7 @@ Subcommands:
 | `show` | Show current config values. |
 | `edit` | Open `config.yaml` in your editor. |
 | `get <key> [--json] [--raw]` | Print a single config value by dotted key (e.g. `hermes config get model.default`). `--json` emits machine-readable output. Credential-shaped values (`api_key`, `*_TOKEN`, `*_SECRET`, `password`, …) are masked (`sk-o...7890`) because the agent runs this from sessions whose transcripts persist; `--raw` prints the real value (or set `security.redact_secrets: false`). A nested key under a known section that the schema does not define (`compression.compressor.enabled`) still prints its file value, plus a stderr notice that Hermes may not read it; stdout and the exit code (0) are unchanged. |
-| `set <key> <value> [--force]` | Set a config value. Dotted paths go to `config.yaml`; every `UPPER_SNAKE` name (`OPENROUTER_API_KEY`, `DISCORD_HOME_CHANNEL`, `TELEGRAM_GROUP_ALLOWED_USERS`, `HERMES_TIMEZONE`, …) is an environment variable and goes to `.env` — the same file the platform setup flows and `/sethome` write, and the one every runtime reader resolves against. `config set` never writes an `UPPER_SNAKE` key into `config.yaml`, `--force` included; names on the env writer's denylist (`HERMES_YOLO_MODE`, `PATH`, …) are refused outright; any other `UPPER_SNAKE` name is saved to `.env` as-is (plugins, skills and external tools read it from the process environment). A known key written under the wrong prefix (`gateway.discord.foo`, where `discord.foo` is itself a known key) is refused with a did-you-mean and nothing is written; any other unknown path under a known section (`agent.max_turnz`, or a runtime-read key that has no seeded default) is written with a did-you-mean notice, and an unknown lowercase *top-level* key is written with a notice (top-level scalars are bridged into the environment for skills). `--force` writes the refused wrong-prefix path too. Values are type-checked against the schema: a key that must hold a list or a mapping (`custom_providers`, `model.aliases`, `display.platforms`, any key already holding one) refuses a plain string or a wrong-shaped literal, and a value that looks like a list/mapping but is not valid YAML/JSON is refused instead of being stored as a string — nothing is written and the error names the expected type. Pass a YAML/JSON literal (`hermes config set custom_providers '[{name: x, base_url: https://...}]'`); to store a string that merely starts with `[` or `{`, quote it in YAML (`"'[text'"`). `--force` still replaces a whole mapping section; a non-list in a list slot has no override, except that a bare name for a list of names read leniently (`agent.disabled_toolsets`, `skills.disabled`) is stored as a one-item list. |
+| `set <key> <value> [--force]` | Set a config value. Dotted paths go to `config.yaml`; every `UPPER_SNAKE` name (`OPENROUTER_API_KEY`, `DISCORD_HOME_CHANNEL`, `TELEGRAM_GROUP_ALLOWED_USERS`, `HERMES_TIMEZONE`, …) is an environment variable and goes to `.env` — the same file the platform setup flows and `/sethome` write, and the one every runtime reader resolves against. `config set` never writes an `UPPER_SNAKE` key into `config.yaml`, `--force` included; names on the env writer's denylist (`HERMES_YOLO_MODE`, `PATH`, …) are refused outright; any other `UPPER_SNAKE` name is saved to `.env` as-is (plugins, skills and external tools read it from the process environment). A known key written under the wrong prefix (`gateway.discord.foo`, where `discord.foo` is itself a known key) is refused with a did-you-mean and nothing is written; any other unknown path under a known section (`agent.max_turnz`, or a runtime-read key that has no seeded default) is written with a did-you-mean notice, and an unknown lowercase *top-level* key is written with a notice (top-level scalars are bridged into the environment for skills). `--force` writes the refused wrong-prefix path too. Values are type-checked against the schema: a key that must hold a list or a mapping (`custom_providers`, `model.aliases`, `display.platforms`, `plugins.enabled`/`plugins.disabled`, `model_catalog.excluded_providers`, any key already holding one) refuses a plain string or a wrong-shaped literal, and a value that looks like a list/mapping but is not valid YAML/JSON is refused instead of being stored as a string — nothing is written and the error names the expected type. Pass a YAML/JSON literal (`hermes config set custom_providers '[{name: x, base_url: https://...}]'`); to store a string that merely starts with `[` or `{`, quote it in YAML (`"'[text'"`). `--force` still replaces a whole mapping section; a non-list in a list slot has no override, except that a bare name for a list of names read leniently (`agent.disabled_toolsets`, `skills.disabled`) is stored as a one-item list. |
 | `unset <key>` | Remove a config key, reverting it to the built-in default. For `UPPER_SNAKE` names this removes the `.env` entry and also drops a stale top-level `config.yaml` copy left by older `config set` runs (`get` reports such a copy as stale). |
 | `path` | Print the config file path. |
 | `env-path` | Print the `.env` file path. |
@@ -49318,7 +49389,7 @@ Unified plugin management — general plugins, memory providers, and context eng
 | Subcommand | Description |
 |------------|-------------|
 | *(none)* | Composite interactive UI — general plugin toggles + provider plugin configuration. |
-| `install <identifier> [--force] [--ref COMMIT_SHA] [--allow-removed]` | Install a plugin from the Hermes plugin catalog (bare entry name), a Git URL, or `owner/repo` shorthand. Catalog names resolve to the entry's repo at its pinned 40-hex commit SHA, show the declared capability summary, and record catalog provenance in a `.hermes-catalog.json` sidecar. Raw URLs are flagged as custom (unreviewed) sources; `--ref` (full 40-character commit SHA) pins them. `--allow-removed` (DANGEROUS) bypasses the removed-plugin blocklist. |
+| `install <identifier> [--force] [--ref COMMIT_SHA] [--allow-removed]` | Install a plugin from the Hermes plugin catalog (bare entry name), a Git URL, or `owner/repo` shorthand. Catalog names resolve to the entry's repo at its pinned 40-hex commit SHA, show the declared capability summary, and record catalog provenance on the installer's `.install-metadata.json` record (a `.hermes-catalog.json` copy is written inside the plugin dir for convenience, but is never trusted). Raw URLs are flagged as custom (unreviewed) sources; `--ref` (full 40-character commit SHA) pins them, and on a catalog entry records the checked-out SHA rather than the reviewed pin. `--allow-removed` (DANGEROUS) bypasses the removed-plugin blocklist at install AND exempts that install from the update/enable/load-time kill-list checks. |
 | `search [term] [--json]` | Search the Hermes plugin catalog (matches entry names, descriptions, and declared tools; omit `term` to list everything). The catalog is curated in-repo (`plugin-catalog/`), refreshed from the live repo with a 6-hour cache, and falls back to the in-tree copy offline. Cataloged ≠ audited — admission reviews the entry, not the code. |
 | `update <name>` | Pull latest changes for an unpinned installed plugin. Pinned plugins must be reinstalled with `--force --ref <new-commit>` to move. |
 | `remove <name>` (aliases: `rm`, `uninstall`) | Remove an installed plugin. |
@@ -55281,6 +55352,7 @@ These have sensible defaults in the ABC. Override as needed:
 | `get_status()` | Standard token/threshold dict | You have custom metrics to expose |
 | `select_context(request_messages, *, conversation_messages, incoming_message, budget_tokens)` | Returns `None` (no-op) | You select/route which context enters **this** request (retrieval, topic routing) — see below |
 | `on_turn_complete(messages, usage=None, **kwargs)` | No-op | You ingest/index/observe the finished turn — see below |
+| `clone_for_agent()` | `copy.deepcopy(self)` | Your engine holds uncopyable state (locks, SQLite/DB connections) — see [Via general plugin system](#via-general-plugin-system) |
 
 ## Per-turn context selection and observation
 
@@ -55372,7 +55444,7 @@ Engine tools are injected into the agent's tool list at startup and dispatched a
 
 ### Via directory (recommended)
 
-Place your engine in `plugins/context_engine/<name>/`. The `__init__.py` must export a `ContextEngine` subclass. The discovery system finds and instantiates it automatically.
+Place your engine in `plugins/context_engine/<name>/` (bundled) or `~/.hermes/plugins/<name>/` (user-installed; `$HERMES_HOME/plugins/<name>/`). The `__init__.py` must export a `ContextEngine` subclass or a `register(ctx)` that calls `ctx.register_context_engine(...)`. Setting `context.engine: <name>` is the activation — a user-installed engine does not need a `plugins.enabled` entry. Bundled names win on collision.
 
 ### Via general plugin system
 
@@ -55385,6 +55457,21 @@ def register(ctx):
 ```
 
 Only one engine can be registered. A second plugin attempting to register is rejected with a warning.
+
+The registered instance is shared process-wide, but every `AIAgent` (parent, subagents, gateway
+sessions) needs its own engine so a child's `update_model()` cannot mutate the parent's budget.
+Hermes therefore calls `engine.clone_for_agent()` on the registered instance at each agent init.
+The default is `copy.deepcopy(self)`; override it when the engine holds state that cannot be
+deep-copied (locks, SQLite or HTTP connections) and return a fresh engine sharing the durable
+backend while copying only the mutable budget fields. If the clone raises, the agent falls back to
+the built-in compressor and logs `Context engine 'X' could not be safely copied for this agent`.
+
+```python
+def clone_for_agent(self):
+    clone = LCMEngine(db_path=self.db_path)  # reopens its own connection
+    clone.threshold_percent = self.threshold_percent
+    return clone
+```
 
 ## Lifecycle
 
@@ -56044,6 +56131,12 @@ interface PluginContext {
   socket: (path: string, onMessage: (data: unknown) => void) => () => void
   /** Gateway event stream by type (`'*'` = all). Tracked: removed on unload/reload/disable. */
   onEvent: (type: string, listener: (event: GatewayEvent) => void) => () => void
+  /** Any other cleanup to run on unload/reload/disable (store subscriptions, injected DOM). */
+  onDispose: (fn: () => void) => void
+  /** Scoped timers and DOM listeners — cleared with the plugin. Each returns a disposer. */
+  setTimeout: (fn: () => void, ms: number) => () => void
+  setInterval: (fn: () => void, ms: number) => () => void
+  addEventListener: (target: EventTarget, type: string, listener: EventListener, options?: AddEventListenerOptions | boolean) => () => void
   /** The curated OS door: native notification, open-external, reveal-in-file-manager, clipboard. */
   os: PluginOs
   /** Plugin-scoped JSON persistence (keys live under `hermes.plugin.<id>.`). */
@@ -56764,16 +56857,23 @@ companion repo.
 
 A loaded plugin is evaluated as ESM in the renderer realm with **full app
 authority** — the React singleton, the whole SDK (`host.request` gateway RPC,
-`ctx.rest`, storage, `navigate`). The isolation the loader provides is **error
+`ctx.rest`, storage, `navigate`) and the `window.hermesDesktop` native bridge
+(files, git, terminal, installs). The isolation the loader provides is **error
 isolation only**: a plugin can't crash the app (contributions are error-bounded,
-listeners isolated), but it can do anything the app can.
+listeners isolated, a throwing `register()` is rolled back and reported on the
+plugin's row), but it can do anything the app can. Plugin storage namespaces
+are a convention, not a wall.
 
 This is acceptable for **local** sources — a disk file can already run code on
 your machine — which is why the disk door only loads local files you (or your
-agent) wrote. The optional `integrity` (`sha256-…`) check only proves the bytes
-match a hash; it does **not** sandbox. A future remote-source door will need a
-real boundary (iframe/worker + CSP + capability gating) before it can land; do
-not treat this pipeline as a trust boundary.
+agent) wrote. For [catalog](../user-guide/features/plugin-catalog.md#trust-model)
+installs the trust comes from admission — a human reviewed the exact pinned
+commit — backed by two tripwires: the `desktop surface` lint at admission and
+the loader's import allowlist (`@hermes/plugin-sdk` and `react*` only; a static
+or dynamic `import` of anything else, including `https:` URLs, fails the load).
+Neither is a sandbox. A future remote-source door will need a real boundary
+(iframe/worker + CSP + capability gating) before it can land; do not treat this
+pipeline as a trust boundary.
 
 ## Pitfalls
 
@@ -56794,6 +56894,17 @@ not treat this pipeline as a trust boundary.
   the canvas (width/height attributes, not just CSS) — panes resize constantly.
 - **Don't poll faster than a few seconds** with `host.request`; prefer
   `host.onEvent` / `ctx.socket` and let React Query dedupe.
+- **Bare globals are not tracked.** `window.setInterval`, `window.addEventListener`,
+  a `<style>` you append — the host never sees them, so they survive disable and
+  every hot-reload (ES modules can't be unloaded; a hot-edit loop stacks live
+  copies). Use `ctx.setTimeout` / `ctx.setInterval` / `ctx.addEventListener`, and
+  wire anything else to `ctx.onDispose`. Module-scope state is yours to reset.
+- **Module evaluation has a 10 s deadline.** A top-level `await` that never
+  settles (waiting for a gateway that isn't up) fails the load as `import timed
+  out` instead of stalling the plugin scan; do the waiting inside `register()`.
+- **One id, one file.** Two folders exporting the same `id` (a standalone install
+  beside a unified-package copy) load first-wins in folder-name order; the later
+  one shows `duplicate id` on its own row in Capabilities ▸ Plugins.
 - **`ctx.socket` is a no-op on OAuth remotes.** Always have a polling fallback.
 
 ## Reference
@@ -61963,7 +62074,9 @@ def unit_convert(args: dict, **kwargs) -> str:
 1. **Signature:** `def my_handler(args: dict, **kwargs) -> str`
 2. **Return:** Always a JSON string. Success and errors alike.
 3. **Never raise:** Catch all exceptions, return error JSON instead.
-4. **Accept `**kwargs`:** Hermes may pass additional context in the future.
+4. **Accept `**kwargs`:** Hermes injects context keywords (`task_id`, `session_id`, `user_task`,
+   `parent_agent`, ...) and only forwards the ones your signature names, so `def handler(args)`
+   works; `**kwargs` is how you opt into the full, additively growing context.
 
 ## Step 5: Write the registration
 
@@ -63081,7 +63194,7 @@ Hermes connects to each server at startup, lists its tools, and registers them a
 
 ### Gateway event hooks — fire on lifecycle events
 
-Drop a manifest + handler into `~/.hermes/hooks/<name>/`:
+Drop a manifest + handler into `~/.hermes/hooks/<name>/`. Unlike plugins there is no `plugins.enabled` step: the gateway imports every valid hook directory at startup, so placing the files **is** the opt-in ([trust model](../../user-guide/features/hooks.md#gateway-hook-trust)):
 
 ```yaml
 # ~/.hermes/hooks/long-task-alert/HOOK.yaml
@@ -63223,11 +63336,11 @@ def handler(args, **kwargs):
 
 **Missing `**kwargs` in handler signature:**
 ```python
-# Wrong — will break if Hermes passes extra context
+# Works — the dispatcher only forwards the context keywords a signature names
 def handler(args):
     ...
 
-# Right
+# Better — receives every injected context field (task_id, session_id, parent_agent, ...)
 def handler(args, **kwargs):
     ...
 ```
@@ -73509,6 +73622,15 @@ hot-reloads every save. Manage installed plugins live in **Capabilities → Plug
 See [Desktop Plugin SDK](../developer-guide/desktop-plugin-sdk.md) for the full
 reference. (This is separate from the [web dashboard plugin system](./features/extending-the-dashboard.md).)
 
+A desktop plugin is **not sandboxed**: it runs inside the app with the app's own
+authority (gateway RPC, the native bridge, other plugins' storage). Only load
+files you wrote or reviewed; for catalog installs the protection is the
+[catalog trust model](./features/plugin-catalog.md#trust-model) (human-reviewed,
+SHA-pinned) plus an import allowlist — not isolation. A plugin whose
+`register()` throws is rolled back and shown as **Failed** with the error on its
+row; **⌘K → Reload desktop plugins** re-reads every installed `plugin.js`,
+including one an installer replaced in place.
+
 **Capabilities → Plugins** is the one place for everything that extends
 Hermes: **one row per plugin**, with two switch columns.
 
@@ -73529,7 +73651,10 @@ Hermes: **one row per plugin**, with two switch columns.
   profile selector lives in this column's header because it governs only
   this column; with a single profile there is no selector at all.
   Repo-bundled built-ins (platform adapters, provider plugins) are not
-  listed: they ship enabled and are configured from their own surfaces.
+  listed: they ship enabled and are configured from their own surfaces. The
+  exceptions are the bundled lifecycle plugins with no surface of their own
+  (`disk-cleanup`, `security-guidance`), which appear here so they can be
+  toggled like any other agent plugin.
 - A half the plugin does not ship shows a dash. A desktop half whose agent
   half is **not** installed in the selected profile shows **Install here**,
   which pre-fills the install dialog from the package's origin (catalog entry
@@ -78393,18 +78518,29 @@ The catalog is designed so you know exactly what you're installing:
   catalog install checked out at exactly the pinned SHA does not stop to ask
   about `caution` again; `dangerous` still blocks, and anything installed from
   a raw URL or at another revision gets the normal prompt.
-- **Desktop plugins stay inside the SDK.** A plugin's `desktop/plugin.js` runs
-  inside the Desktop app with the app's own authority, so listed ones may only
-  use the plugin SDK: no patching of built-in prototypes, no `eval`, no
-  importing the app's own bundle chunks or remote scripts. Admission refuses
-  these (`desktop surface` check) so a marketplace install cannot quietly
-  rewire the app around you.
+- **Desktop plugins run with the app's authority — review is the boundary.**
+  A plugin's `desktop/plugin.js` is evaluated inside the Desktop app itself,
+  in the same realm as the app's own code: there is no sandbox, and it can
+  do anything the app can (gateway RPC, the full `window.hermesDesktop`
+  bridge, storage of other plugins). What protects you is the trust model
+  above — a human read the exact pinned commit, and the install is that
+  commit — plus two tripwires: admission's `desktop surface` lint refuses
+  the obvious moves outside the plugin SDK (patching built-in prototypes,
+  `eval`, importing anything other than `@hermes/plugin-sdk`/`react`,
+  including remote scripts), and the app's loader refuses every non-SDK
+  import again at load time. Treat the lint as a review aid, not a
+  guarantee; give Desktop halves the same scrutiny you'd give a Python half.
 - **Capability declarations.** Entries state up front which tools, hooks, and
   middleware the plugin provides and which environment variables (API keys
   etc.) it needs, so you can judge its blast radius before installing.
 - **Removed list.** Plugins pulled from the catalog (for example after a
   security incident) go on `plugin-catalog/removed.yaml` with a reason and
-  date. The installer refuses to install anything on the removed list.
+  date. Matching is by name or repository identity — `git@`, `ssh://`,
+  `http://` and `www.` spellings of the same repo all match. The installer
+  refuses to install anything on the removed list, and a plugin that lands on
+  the list *after* you installed it stops updating, cannot be enabled and is
+  refused at load time (`hermes plugins remove <name>`, or reinstall with
+  `--allow-removed` to keep it knowingly).
 - **Installed ≠ enabled.** Installing a catalog plugin puts it on disk; like
   any plugin it must still be enabled before it loads. See
   [Plugins → Enabling and disabling](plugins.md).
@@ -78456,8 +78592,20 @@ hermes plugins enable snyk
 `hermes plugins update <name>` never runs `git pull` for catalog installs —
 it compares your installed pin against the current catalog pin and, when the
 catalog moved (via a reviewed PR), force-reinstalls at the new SHA. Your
-enabled/disabled state is preserved. `hermes plugins list` shows catalog
+enabled/disabled state is preserved, and so are files the plugin's repo does
+not track (the `config.yaml` created from its `.example`, data files, `.env`).
+Edits you made to *tracked* files are not carried onto the new code; copies are
+saved under `~/.hermes/plugins-backup/<name>-<sha>/` and the update warns you.
+If the new pin renames the plugin's manifest, the old directory is removed and
+your enabled flag follows the new name. `hermes plugins list` shows catalog
 installs as `catalog:<tier>@<sha>` so you can see provenance at a glance.
+
+Provenance is recorded by the installer in `~/.hermes/plugins/.install-metadata.json`,
+outside the plugin's own tree — a repository cannot ship a file that makes it
+look like a reviewed catalog install. (The `.hermes-catalog.json` inside the
+plugin directory is a convenience copy only.) Installing a catalog entry with
+`--ref <sha>` records the SHA you actually checked out, so `list`, the Desktop
+Plugins tab and `update` all report it as off the reviewed pin.
 
 ### Names not in the catalog
 
