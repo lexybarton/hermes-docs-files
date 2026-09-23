@@ -62,6 +62,7 @@ Repo: https://github.com/NousResearch/hermes-agent
 - [Personality & SOUL.md](./user-guide/features/personality.md): Customize Hermes Agent's personality with a global SOUL.md, built-in personalities, and custom persona definitions
 - [Plugins](./user-guide/features/plugins.md): Extend Hermes with custom tools, hooks, and integrations via the plugin system
 - [Built-in Plugins](./user-guide/features/built-in-plugins.md): Plugins shipped with Hermes Agent that run automatically via lifecycle hooks — disk-cleanup and friends
+- [Bot Screen](./user-guide/features/bot-screen.md)
 - [Codex App-Server Runtime (optional)](./user-guide/features/codex-app-server-runtime.md)
 - [Computer Use](./user-guide/features/computer-use.md)
 - [Passwords & Logins](./user-guide/features/credential-vault.md): The agent signs into sites, pays and fills addresses for you without ever seeing a password.
