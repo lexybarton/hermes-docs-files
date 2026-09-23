@@ -2886,7 +2886,7 @@ A persistent status bar sits above the input area, updating in real time:
 | Model name | Current model (truncated if longer than 26 chars) |
 | Token count | Context tokens used / max context window; `~` marks an estimate |
 | Context bar | Visual fill indicator with color-coded thresholds |
-| Cost | Estimated session cost (or `n/a` for unknown/zero-priced models) |
+| Cost | Estimated session cost (or `n/a` for unknown/zero-priced models). Rates come from Hermes' bundled official price table, then the provider's `/models` listing; on a direct first-party API (OpenAI, xAI, Anthropic, Google, DeepSeek, Xiaomi) a model missing from both is priced at the vendor's list price from models.dev. Proxies, relays and custom endpoints serving the same model id stay `n/a` rather than inherit that price. |
 | 🗜️ N | **Context compression count** — how many times the running session has been auto-compressed. Appears once the first compression fires. |
 | ▶ N | **Active background tasks** — how many `/bg` prompts are still running in the current session. Appears whenever at least one task is in flight. |
 | Duration | Elapsed session time |
@@ -2928,7 +2928,7 @@ When resuming a previous session (`hermes -c` or `hermes --resume <id>`), a "Pre
 | `Ctrl+S` | **Stash the prompt.** Parks the current draft and clears the composer so you can send something else first. Press `Ctrl+S` again on an empty composer to bring the draft back (cursor at the end, attached images restored). Repeated presses build a stack rather than overwriting, so an earlier draft is never silently lost — with two or more stashed, `Ctrl+S` opens a browse panel (`↑`/`↓` to navigate, `Enter` to restore, `D` to discard, `Esc` or `Ctrl+S` to close). A `📌 N` badge in the status bar shows how many drafts are parked. Multi-line drafts round-trip exactly, including blank lines. The stash lives in memory for the session only — nothing is written to disk, since drafts often contain secrets. |
 | `Ctrl+C` | Interrupt agent (double-press within 2s to force exit) |
 | `Ctrl+T` / `F6` | Open the full-screen live work monitor (subagents and background processes) without losing the composer draft. The live dock appears automatically above the status bar; arrows select a worker or process, `Enter` shows its recent log, `s` steers a worker, and `x` requests stop with confirmation. See [Monitoring subagents](./features/delegation.md#monitoring-running-subagents-agents). |
-| `F7` | Toggle the live work dock (subagents + background processes) between its multi-row preview and a single summary line without moving composer focus. |
+| `F7` | Toggle the live work dock between its multi-row preview and a single summary line without moving composer focus. Besides subagents and background processes, the dock shows a standing `/goal` (active, parked or paused, with turns used) on its top row and the prompts waiting in `/queue` on its bottom rows. |
 | `Ctrl+D` | Exit |
 | `Ctrl+Z` | Suspend Hermes to background (Unix only). Run `fg` in the shell to resume. |
 | `Tab` | Accept auto-suggestion (ghost text) or autocomplete slash commands |
@@ -3139,6 +3139,8 @@ display:
 `"queue"` mode prepares a separate follow-up turn. `"steer"` always waits for the next tool-result boundary. The default `"interrupt"` mode responds sooner during model generation while avoiding cancellation of a running tool; a long foreground `terminal` command (a build, a poller) is handed to the background so the agent sees your message right away instead of after the command exits. Use `/stop` when you want to cancel the turn and its foreground work. Unknown values fall back to `"interrupt"`.
 
 `"steer"` has two automatic fallbacks: if the agent hasn't started yet, or if images are attached, the message falls back to `"queue"` behavior so nothing is lost.
+
+Whatever the mode, `/queue <prompt>` queues a follow-up turn explicitly, and `/queue list`, `/queue rm N`, `/queue edit N …` and `/queue move A B` act on the pending queue immediately, even mid-run. The live work dock lists what is waiting.
 
 You can also change it inside the CLI:
 
@@ -3421,6 +3423,7 @@ The directory must contain `dist/entry.js`.
 Keybindings match the [Classic CLI](cli.md#keybindings) exactly. The only behavioral differences:
 
 - **`Ctrl+T`** expands the automatic live-work dock (subagents, plus a **Processes** block for `terminal(background=true)` spawns) into the full-height `/agents` roster. Select a worker and press **Enter** (or **`t`**) for its live transcript, **`d`** for rich details, **`e`** to steer, or **`x`** to stop it. The dock fits its row count to terminal height and preserves your composer draft. See [Monitoring subagents](./features/delegation.md#monitoring-running-subagents-agents).
+- A standing **`/goal`** gets its own row above the live dock (`⊙ goal · 3/20 turns · …`, or `⏳ goal parked` / `⏸ goal paused` with the reason); it leaves once the goal is done or cleared. Queued follow-ups are listed above it.
 - **`F7`** toggles the live dock between its default preview and one summary line. This does not open the monitor or move composer focus; the choice lasts for this TUI process without changing config.
 - **Mouse drag** highlights text with a uniform selection background.
 - **`Cmd+V` / `Ctrl+V`** first tries normal text paste, then falls back to OSC52/native clipboard reads, and finally image attach when the clipboard or pasted payload resolves to an image.
@@ -4854,7 +4857,7 @@ agent:
 
 `agent.api_max_retries` controls how many times Hermes retries a provider API call on transient errors (rate limits, connection drops, 5xx) **before** fallback-provider switching engages. The default is `3` — four attempts total. If you have [fallback providers](./features/fallback-providers.md) configured and want to fail over faster, drop this to `0` so the first transient error on your primary immediately hands off to the fallback instead of churning retries against the flaky endpoint.
 
-`agent.auto_recovery_cycles` is the safety net *after* both the retries and the fallback chain are spent. When the failure is a transient outage (HTTP 5xx, an `overloaded`/529 response, a connect or read timeout) and no answer text has reached you yet, Hermes does not end the turn with "API failed after N retries" — it waits and tries again, up to this many cycles (default `5`), with a jittered 15/30/60/60/60 s schedule. A provider `Retry-After` header wins over the schedule (honoured up to 120 s). Every surface shows the same line while it waits — `⏳ Provider temporarily unavailable — retrying automatically in 30s (cycle 2/5); press Esc to stop` on the CLI/TUI/Desktop, a status bubble on messaging platforms (`send /stop to cancel`), a `hermes.status` SSE event on the API server, and a log line for cron jobs. Pressing Esc (or `/stop`) cancels the wait immediately. Fallback still comes first: with a fallback chain configured, exhaustion moves to the next provider as before, and the ladder only engages once the chain has nothing left. Authentication, billing, request-format, entitlement and content-policy errors never enter the ladder. Set `0` to disable it.
+`agent.auto_recovery_cycles` is the safety net *after* both the retries and the fallback chain are spent. When the failure is a transient outage (HTTP 5xx, an `overloaded`/529 response, a connect or read timeout) and no answer text has reached you yet, Hermes does not end the turn with "API failed after N retries" — it waits and tries again, up to this many cycles (default `5`), with a jittered 15/30/60/60/60 s schedule. A provider `Retry-After` header wins over the schedule (honoured up to 120 s). Every surface shows the same line while it waits — `⏳ Provider temporarily unavailable — retrying automatically in 30s (cycle 2/5); press Esc to stop` on the CLI/TUI/Desktop, a status bubble on messaging platforms (`send /stop to cancel`), a `hermes.status` SSE event on the API server, and a log line for cron jobs. Pressing Esc (or `/stop`) cancels the wait immediately. Fallback still comes first: with a fallback chain configured, exhaustion moves to the next provider as before, and the ladder only engages once the chain has nothing left. Authentication, billing, request-format, entitlement, content-policy and account-policy errors never enter the ladder. Set `0` to disable it.
 
 ## Wall-Clock Run Budget
 
@@ -5569,7 +5572,7 @@ The override applies automatically everywhere: CLI startup, `hermes -p` one-shot
 
 ## Fast Mode
 
-Fast mode asks the provider for faster output at a premium price: OpenAI [Priority Processing](https://openai.com/api-priority-processing/) (`service_tier: priority`), xAI Priority Processing on Grok 4.6, and Anthropic [Fast Mode](https://platform.claude.com/docs/en/build-with-claude/fast-mode) (`speed: fast`, Opus 4.8 / Opus 5 only). It is **off by default**.
+Fast mode asks the provider for faster output at a premium price: OpenAI [Priority Processing](https://openai.com/api-priority-processing/) (`service_tier: priority`), xAI Priority Processing on Grok 4.6, and Anthropic [Fast Mode](https://platform.claude.com/docs/en/build-with-claude/fast-mode) (`speed: fast`, Opus 4.8 / Opus 5 / Opus 5.5 only). It is **off by default**.
 
 ```yaml
 agent:
@@ -5586,7 +5589,13 @@ agent:
 
 `/fast normal|fast|auto|cold` switches the mode for the session; add `--global` to persist to `config.yaml`. `/fast` alone shows the current mode.
 
-**Cost note:** both providers bill fast requests at a multiplier on standard rates (Anthropic: $10 / $50 per MTok in/out on Opus 4.8 and Opus 5), stacking with prompt-cache pricing. `auto`/`cold` bound that premium to the window only. Fast params are only sent to the first-party endpoint that supports them (`api.openai.com` / Codex subscription, `api.anthropic.com`, `api.x.ai`); OpenRouter, Nous Portal, Copilot, Azure, Bedrock, and custom `base_url` routes never receive them in any mode. Only the per-request parameter changes between requests — the system prompt, tools, and messages stay byte-identical, so the prompt cache survives the window boundary.
+**Cost note:** both providers bill fast requests at a multiplier on standard rates (Anthropic: $8 / $40 per MTok in/out on Opus 5.5, $10 / $50 on Opus 5 and Opus 4.8), stacking with prompt-cache pricing. Hermes prices each Anthropic response from the speed the API reports in `usage.speed`. `auto`/`cold` bound that premium to the window only. Fast params are only sent to the first-party endpoint that supports them (`api.openai.com` / Codex subscription, `api.anthropic.com`, `api.x.ai`); OpenRouter, Nous Portal, Copilot, Azure, Bedrock, and custom `base_url` routes never receive them in any mode.
+
+**Prompt cache:** only the per-request parameter changes between requests; the system prompt, tools, and messages stay byte-identical. Anthropic keeps a separate prompt cache for each speed, so on Anthropic every `auto`/`cold` window boundary re-writes the conversation prefix at the new speed. For long Anthropic sessions, `fast` or `normal` keeps a single warm cache.
+
+Fast mode's speedup is in output tokens per second, so long answers gain the most.
+
+When an Anthropic organization has no fast-mode capacity for a model (the API answers a fast request with a fast-mode limit of 0), Hermes switches that model to standard speed for the rest of the session and retries the request.
 
 ### Fast tiers behind a gateway or proxy
 
@@ -7583,7 +7592,7 @@ hermes sessions export --format md --model sonnet --min-messages 50 --redact
 hermes sessions export --format md --session-id 20250305_091523_a1b2c3d4 --delete-after-verified --yes
 ```
 
-Markdown/QMD export writes one `.md` or `.qmd` file per exported session plus a `manifest.jsonl` with the file path, message count, lineage ids, and SHA-256. Bulk export requires at least one filter; a bare bulk export is refused. `--delete-after-verified` is intentionally limited to `--session-id` and requires `--yes`. Because deleting a parent session also removes its delegate/subagent sessions, this mode exports and verifies each delegate in a separate file before deleting anything. If the delegate set changes during export, deletion is refused. `--redact` scrubs secrets (API keys, tokens, credentials) from message content and tool output before writing — recommended for any export you plan to share.
+Markdown/QMD export writes one `.md` or `.qmd` file per exported session plus a `manifest.jsonl` with the file path, message count, lineage ids, and SHA-256. Bulk export requires at least one filter; a bare bulk export is refused. `--delete-after-verified` is intentionally limited to `--session-id` and requires `--yes`. Because deleting a parent session also removes its delegate/subagent sessions, this mode exports and verifies each delegate in a separate file before deleting anything. Markdown/QMD files hold the full history shown by the session, including turns archived by in-place compaction. Deletion compares that exact display transcript and the delegate set again inside the same database transaction that performs the delete; any intervening append, rewrite, rewind, compaction, or delegate change refuses deletion. The same display-history rule applies to `--format html`, `--only user-prompts` (with either Markdown or JSONL output), and `/save md|html`. Full-session JSON/JSONL exports and `/save json` remain live-only because importing archived turns would restore them as live model context. `--redact` scrubs secrets (API keys, tokens, credentials) from message content and tool output before writing — recommended for any export you plan to share.
 
 ### Delete a Session
 
@@ -8298,7 +8307,7 @@ You can also set or auto-generate the description later with `hermes profile des
 hermes profile create work --clone
 ```
 
-Copies your current profile's `config.yaml`, `.env`, `SOUL.md`, skills, and the curated memory files `memories/MEMORY.md` and `memories/USER.md` into the new profile — memory is treated as part of the agent's identity, like `SOUL.md`. Sessions, `state.db`, cron jobs and everything else start empty. For a blank memory as well, create the profile without `--clone` or delete the two files afterwards; the agent never falls back to another profile's memory when they are absent. Edit `~/.hermes/profiles/work/.env` for different API keys, or `~/.hermes/profiles/work/SOUL.md` for a different personality.
+Copies your current profile's `config.yaml`, `.env`, `SOUL.md`, skills, and the curated memory files `memories/MEMORY.md` and `memories/USER.md` into the new profile — memory is treated as part of the agent's identity, like `SOUL.md`. If `config.yaml` selects an external memory provider (`memory.provider`), that provider's own config travels too — its `<provider>/` directory or `<provider>.json` under the profile home, e.g. `hindsight/config.json` — so the clone's memory is available instead of silently off; a cloned `local_embedded` hindsight config still shares the source's embedded daemon and bank until you give the clone its own hindsight `profile`/`bank_id` ([#81815](https://github.com/NousResearch/hermes-agent/issues/81815)). Sessions, `state.db`, cron jobs and everything else start empty. For a blank memory as well, create the profile without `--clone` or delete the two files afterwards; the agent never falls back to another profile's memory when they are absent. Edit `~/.hermes/profiles/work/.env` for different API keys, or `~/.hermes/profiles/work/SOUL.md` for a different personality.
 
 #### Keep a clone's imported agent setups synced (`--sync-imports`)
 
@@ -16062,8 +16071,10 @@ Hermes will use the unified `cronjob_manage` tool internally.
 Before constructing any agent machinery for a scheduled run, the scheduler
 validates that the job's configuration can actually produce a successful run:
 
-- the provider API key resolves (skipped when a `fallback_providers` chain is
-  configured, since the fallback path may rescue a missing primary key),
+- the provider API key resolves (skipped for an unpinned job when a
+  `fallback_providers` chain is configured, since the fallback path may rescue a
+  missing primary key; a pinned job does not use that chain, so it is always
+  checked),
 - attached skills are ready (no missing required environment variables,
   commands, or credential files),
 - delivery platform targets are known and have gateway credentials configured
@@ -16990,12 +17001,16 @@ From the CLI: `hermes cron create "every 6h" "Scan for news" --continuity`, and 
 
 ## Provider recovery
 
-Cron jobs inherit your configured fallback providers and credential pool rotation. If the primary API key is rate-limited or the provider returns an error, the cron agent can:
+If the primary API key is rate-limited or the provider returns an error, the cron agent can:
 
-- **Fall back to an alternate provider** if you have `fallback_providers` (or the legacy `fallback_model`) configured in `config.yaml`
-- **Rotate to the next credential** in your [credential pool](../configuration.md#credential-pool-strategies) for the same provider
+- **Rotate to the next credential** in your [credential pool](../configuration.md#credential-pool-strategies) for the same provider. This applies to every job, pinned or not.
+- **Fall back to an alternate provider** from `fallback_providers` (or the legacy `fallback_model`) in `config.yaml` — **unpinned jobs only**. That covers a failure while resolving credentials before the run starts and a provider error mid-run.
 
-This means cron jobs that run at high frequency or during peak hours are more resilient — a single rate-limited key won't fail the entire run.
+A job with its own `provider`, `model` or `base_url` (set with `--provider` / `--model`, `--pin`, the dashboard, or `jobs.json`) never falls back to the global chain. The pin says which route the job runs on, and a fallback entry is a different provider and usually a different model, so when the pinned route fails the run fails and the failure alert says so. This is the same rule [subagent delegation](./delegation.md) applies to a pinned child. To keep fallback for a job, leave it unpinned: it follows `cron.model` / `cron.model_provider` (or the main model) and walks the chain like any other unpinned job.
+
+Before this rule, a pinned job whose provider failed could run on the first working `fallback_providers` entry instead, with a one-line notice in its output. If you relied on that, unpin the job (`hermes cron edit <job_id> --unpin`) and set the model through `cron.model` instead.
+
+A single rate-limited key therefore does not fail a run that has another credential for the same provider, and unpinned jobs still survive a provider outage when a chain is configured.
 
 ## Run failures (`last_error`)
 
@@ -25843,13 +25858,15 @@ Final agent responses are recorded in a durable **delivery ledger**
 (`state.db`) around each platform send. If the gateway crashes or restarts
 between producing a response and the platform confirming receipt, the next
 boot redelivers the stored response instead of losing it — or re-running the
-whole turn.
+whole turn. The ledger lives in the home the gateway was started from; a
+multiplexed gateway keeps every served profile's replies there too.
 
 Semantics are honest at-least-once:
 
 - A response whose send **never started** is redelivered as-is.
 - A response that was **mid-send** when the gateway died (the platform may or
-  may not have received it) is redelivered with a visible
+  may not have received it), including a redelivery an earlier boot was
+  still sending, is redelivered with a visible
   "♻️ Recovered reply — … may be a duplicate" prefix. Ambiguity is labeled,
   never silently resent.
 - A final send refused by **flood control** (such as Telegram rate limits) is retried automatically
@@ -26227,6 +26244,10 @@ The generated plist lives at `~/Library/LaunchAgents/ai.hermes.gateway.plist`. I
 
 :::tip PATH changes after install
 launchd plists are static — if you install new tools (e.g. a new Node.js version via nvm, or ffmpeg via Homebrew) after setting up the gateway, run `hermes gateway install` again to capture the updated PATH. The gateway will detect the stale plist and reload automatically.
+:::
+
+:::info Installing without starting
+The plist sets `RunAtLoad`, so loading it starts the gateway. `hermes gateway install --no-start-now`, like answering No to "Start the gateway now?" in `hermes gateway setup`, writes the plist without loading it: the gateway starts at your next login, or when you run `hermes gateway start`. A gateway that launchd is already running is reloaded onto the new plist, not stopped.
 :::
 
 :::info Local Network access (LAN devices fail with "No route to host")
@@ -30797,10 +30818,15 @@ When enabled, attachment and inline parts are skipped before payload decoding. T
 
 Email access is stricter by default than chat-style platforms:
 
-1. **`EMAIL_ALLOWED_USERS` set** → only emails from those addresses are processed
+1. **`EMAIL_ALLOWED_USERS` set** → only emails from those addresses (and from `GATEWAY_ALLOWED_USERS` or an approved pairing) are processed
 2. **No allowlist set** → unknown senders are ignored silently
 3. **`EMAIL_ALLOW_ALL_USERS=true`** → any sender is accepted (use with caution)
 4. **`platforms.email.unauthorized_dm_behavior: pair`** → unknown senders receive a pairing code
+5. **`platforms.email.unauthorized_dm_behavior: decline`** → an unknown sender receives one polite refusal, then nothing more for 24 hours
+
+Allowlist entries match whole addresses. A bare entry such as `alice` (a chat username in `GATEWAY_ALLOWED_USERS`, say) never admits `alice@` at any domain, and mail from such an address is dropped rather than paired or declined.
+
+Unless open access is on, Hermes acts on a message only when the `Authentication-Results` header stamped by your receiving server authenticates its `From:` domain (DMARC, or aligned SPF/DKIM). `GATEWAY_ALLOW_ALL_USERS` counts as open access only while no allowlist is set, as it does for the gateway itself. Pairing codes and declines need an authenticated `From:` even with open access on, so neither is mailed to a forged address. If your mail server does not stamp that header, set `platforms.email.require_authenticated_sender: false` to accept the risk.
 
 :::warning
 **Use a dedicated inbox and configure `EMAIL_ALLOWED_USERS` for normal operation.** Email pairing is opt-in because shared inboxes often contain unrelated unread messages, and Hermes should not reply to those contacts by default.
@@ -37263,6 +37289,8 @@ X-Hermes-Session-Key: agent:main:webui:dm:user-42
 
 Rules: max 256 chars, control characters (`\r`, `\n`, `\x00`) are rejected, and the value is echoed back on responses (JSON + SSE). `/v1/capabilities` advertises support via `"session_key_header": "X-Hermes-Session-Key"`. Without the key, Honcho's `per-session` strategy produces a different scope per `session_id` — exactly the behavior Hermes had before.
 
+Automatic recall follows the **transcript**: the memory provider is initialised once per session and kept across requests, so a continued session (`X-Hermes-Session-Id`, `previous_response_id`, or a declared `X-Hermes-Session-Key` conversation) receives the recall the provider prepared after the previous turn, exactly like a Telegram or Discord chat does. A request without any continuation starts a fresh session and, like the first turn of any new CLI session, has nothing queued yet. Idle sessions release their provider after the same idle TTL as the gateway agent cache (`agent.agent_cache.idle_ttl_secs`, default one hour).
+
 ## System Prompt Handling
 
 When a frontend sends a `system` message (Chat Completions) or `instructions` field (Responses API), hermes-agent **layers it on top** of its core system prompt. Your agent keeps all its tools, memory, and skills — the frontend's system prompt adds extra instructions.
@@ -38150,7 +38178,7 @@ fallback_providers:
 | Messaging gateway (Telegram, Discord, etc.) | ✔ |
 | Desktop app / TUI chats | ✔ (a chain added or edited while a chat is open applies from its next turn) |
 | Subagent delegation | ✔ (`delegation.fallback_providers` when set; otherwise only unpinned children inherit the parent chain; `[]` disables) |
-| Cron jobs | ✔ (cron agents inherit configured fallback providers) |
+| Cron jobs | ✔ (unpinned jobs inherit the configured chain; a job with its own provider/model/base_url never falls back to it) |
 | Auxiliary tasks on `provider: auto` | ✔ (try per-task fallback, then the main fallback chain before built-in aux discovery) |
 
 :::tip
@@ -38376,7 +38404,7 @@ See [Subagent Delegation](./delegation.md) for full configuration details.
 
 ## Cron Job Providers
 
-Cron jobs inherit your configured `fallback_providers` chain (or legacy `fallback_model`) when they create an agent. To use a different primary provider for a cron job, configure `provider` and `model` overrides on the cron job itself:
+Unpinned cron jobs inherit your configured `fallback_providers` chain (or legacy `fallback_model`), both when the primary's credentials fail to resolve before the run and when the provider errors mid-run. A job pinned to its own provider, model or endpoint does **not**: if that route fails, the run fails (same-provider [credential pool](../configuration.md#credential-pool-strategies) rotation still applies). This matches how a pinned [delegation](./delegation.md) child behaves. Pin a cron job with `provider` and `model` overrides on the job itself:
 
 ```python
 cronjob(
@@ -38388,7 +38416,7 @@ cronjob(
 )
 ```
 
-See [Scheduled Tasks (Cron)](./cron.md) for full configuration details.
+To keep fallback for a job, leave it unpinned and choose its model with `cron.model` / `cron.model_provider` instead. See [Scheduled Tasks (Cron)](./cron.md#provider-recovery) for details.
 
 ---
 
@@ -38407,7 +38435,7 @@ See [Scheduled Tasks (Cron)](./cron.md) for full configuration details.
 | Title generation | Layered (see above) | `auxiliary.title_generation` |
 | Triage specifier | Layered (see above) | `auxiliary.triage_specifier` |
 | Delegation | Uses `delegation.fallback_providers` when declared; otherwise only unpinned children inherit the parent chain | `delegation.provider` / `delegation.model` / `delegation.fallback_providers` |
-| Cron jobs | Inherit the configured `fallback_providers` chain; optional per-job provider override | Per-job `provider` / `model` |
+| Cron jobs | Unpinned jobs inherit the configured `fallback_providers` chain; a job with its own `provider` / `model` / `base_url` never falls back to it | Per-job `provider` / `model`, or `cron.model` / `cron.model_provider` |
 
 ---
 
@@ -45288,6 +45316,15 @@ PENDING/RESERVED/SHARED). The open-descriptor scan cannot make this distinction
 because every Hermes process has the DB open. Look for that line in
 `~/.hermes/logs/errors.log` next to the `database is locked` failure.
 
+Lock contention is recognised by SQLite result code (`SQLITE_BUSY` /
+`SQLITE_LOCKED`, `hermes_state_errors.is_sqlite_lock_error`), not by message
+text. In rollback-journal (`delete`) mode a lock lost inside FTS5's table
+constructor arrives as `SQLITE_BUSY` with the text `vtable constructor failed:
+messages_fts`; it is treated like `database is locked`. Opening a writable
+`SessionDB` waits up to `_WRITE_PATIENCE_S`; a read-only open waits its
+`_READ_BUSY_TIMEOUT_S` (5 s) read budget once. If the lock outlasts that, the dashboard
+answers 503 (busy), not 500.
+
 
 ## Common Operations
 
@@ -45721,7 +45758,7 @@ Hermes supports a configured fallback provider chain — a list of `(provider, m
 - **Subagent delegation** (`tools/delegate_tool.py`): subagents inherit the parent's provider but not the fallback config
 - **Auxiliary tasks**: use their own independent provider auto-detection chain (see Auxiliary model routing above)
 
-Cron jobs **do** support fallback: `run_job()` reads `fallback_providers` (or legacy `fallback_model`) from `config.yaml` and passes it to `AIAgent(fallback_model=...)`, matching the gateway's `_load_fallback_model()` pattern. See [Cron Internals](./cron-internals.md).
+Unpinned cron jobs **do** support fallback: `run_job()` reads `fallback_providers` (or legacy `fallback_model`) from `config.yaml` and passes it to `AIAgent(fallback_model=...)`, matching the gateway's `_load_fallback_model()` pattern. A job with its own `provider` / `model` / `base_url` gets no chain, the same rule as a pinned delegation child. See [Cron Internals](./cron-internals.md).
 
 ### Test coverage
 
@@ -47174,6 +47211,21 @@ async def _handle_callback(self, request):
 
 For platforms with tight response deadlines (e.g., WeCom's 5-second limit), always acknowledge immediately and deliver the agent's reply proactively via API later. Agent sessions run 3–30 minutes — inline replies within a callback response window are not feasible.
 
+### Inbound Deduplication
+
+Platforms redeliver: websocket resumes replay recent events, webhooks retry, and an unacknowledged poll batch comes back. Drop repeats with the shared helper, keyed on the platform's message ID:
+
+```python
+from gateway.platforms.helpers import MessageDeduplicator
+
+self._dedup = MessageDeduplicator(ttl_seconds=600)  # in __init__
+
+if self._dedup.is_duplicate(msg_id):  # in the inbound handler
+    return
+```
+
+When the gateway's reconnect watcher replaces a failed adapter with a new instance, it copies every `MessageDeduplicator` attribute's live IDs from the old instance to the new one, so a replay right after the reconnect is still dropped. A cache kept in another structure (a plain dict or set) starts empty on the new instance.
+
 ### Token Locks
 
 If the adapter holds a persistent connection with a unique credential, add a scoped lock to prevent two profiles from using the same credential:
@@ -47865,6 +47917,10 @@ hermes [global-options] <command> [subcommand/options]
 | `--tui` | Launch the [TUI](../user-guide/tui.md) instead of the classic CLI. Equivalent to `HERMES_TUI=1`. Always wins over `display.interface`. |
 | `--cli` | Force the classic prompt_toolkit REPL. Use this to override `display.interface: tui` for a single invocation. |
 | `--dev` | With `--tui`: run the TypeScript sources directly via `tsx` instead of the prebuilt bundle (for TUI contributors). |
+
+### `hermes-agent` (legacy single-query runner)
+
+The install also ships `hermes-agent`, a minimal runner that sends one query and exits: `hermes-agent --query "summarize README.md"` (or `hermes-agent "summarize README.md"`). `hermes-agent --help` lists its options (`--model`, `--base-url`, `--max-turns`, `--enabled-toolsets`, `--disabled-toolsets`, `--list-tools`, `--save-trajectories`, …) and `hermes-agent --version` prints the version; neither starts the agent. Run with no query, it prints the same help and exits. For anything else use `hermes` (`hermes -z <prompt>` is the scripted one-shot).
 
 ## Top-level commands
 
@@ -49797,7 +49853,7 @@ Pulls the latest `hermes-agent` code and reinstalls dependencies in the managed 
 
 Additional behavior:
 
-- **Gateway restart.** After a successful update, Hermes attempts to restart all running gateway profiles automatically so they pick up the new code. Use `hermes gateway restart` when you want to restart a gateway without applying an update.
+- **Gateway restart.** After a successful update, Hermes attempts to restart all running gateway profiles of the home being updated (its root and every `profiles/<name>` under it) automatically so they pick up the new code. Gateways and `hermes-gateway*` services that belong to a different `HERMES_HOME` on the same machine — another install, or a scratch home running `hermes update` — are named in the output and left alone. Use `hermes gateway restart` when you want to restart a gateway without applying an update.
 - **Restart-phase recovery.** If the in-process restart phase aborts while importing the freshly pulled tree, supervised gateway profiles are retried through a clean Python process. Only restarts independently confirmed by systemd (`systemctl --user is-active`) are reported as verified; a relaunch that merely exited 0 is recorded as `relaunch_attempted` and still fails the update conservatively. Manual gateways and serve/dashboard runtimes are never killed without a relaunch authority; they are recorded as skipped with a reason and remain in the incomplete-update report with the exact restart command.
 - **Update receipts + fleet version check.** Every run writes a machine-readable receipt to `~/.hermes/logs/update_receipts/` (pre-update fleet plan, steps, skips with reasons, restart outcome; `latest.json` points at the newest). After the restart phase the updater verifies each live gateway's running code against the updated checkout and prints a per-profile version matrix; a gateway still on pre-update code fails the update (exit 1) with the exact restart command.
 - **Local source changes.** For git installs, dirty tracked files and untracked files are auto-stashed before branch checkout or pull (`git stash push --include-untracked`). Interactive terminal updates ask before restoring the stash. Non-interactive updates restore it by default; set `updates.non_interactive_local_changes: discard` only on managed installs where local source edits should be thrown away after a successful pull. If stash restore conflicts or the pull fails, the stash is left in place for manual recovery.
@@ -50242,7 +50298,7 @@ Creates a new profile.
 | Argument / Option | Description |
 |-------------------|-------------|
 | `<name>` | Name for the new profile. Must be a valid directory name (alphanumeric, hyphens, underscores). |
-| `--clone` | Copy `config.yaml`, `.env`, `SOUL.md`, skills, and the curated `memories/MEMORY.md` / `memories/USER.md` from the current profile. Sessions, `state.db` and cron jobs are not copied. |
+| `--clone` | Copy `config.yaml`, `.env`, `SOUL.md`, skills, the curated `memories/MEMORY.md` / `memories/USER.md`, and the active `memory.provider`'s own config (`<provider>/` or `<provider>.json`, e.g. `hindsight/config.json`) from the current profile. Sessions, `state.db` and cron jobs are not copied. |
 | `--clone-all` | Copy everything (config, memories, skills, plugins) from the current profile. Excludes per-profile history: sessions, `state.db`, backups, state-snapshots, checkpoints — and cron jobs, which stay bound to the source profile (a clone that inherited them would fire every job twice). When the source is the default profile, the machine-scoped local-model trees (`models/`, `runtimes/`, `node/`) are also skipped — the same trees `hermes backup` excludes. |
 | `--clone-from <profile>` | Clone config/skills/SOUL from a specific profile instead of the current one. Implies `--clone` unless paired with `--clone-all`. |
 | `--no-alias` | Skip wrapper script creation. |
@@ -52039,7 +52095,7 @@ Backends ship as plugins under `plugins/video_gen/<name>/`:
 
 - **xAI Grok-Imagine** — text-to-video and image-to-video (SuperGrok OAuth or `XAI_API_KEY`).
 - **FAL.ai** — Veo 3.1, Pixverse v6, Kling 3.0 / O3 (requires `FAL_KEY`).
-- **OpenRouter** — every generative model on OpenRouter's video API (Veo 3.1, Sora 2 Pro, Kling 3, Seedance 2, Wan 3, Hailuo 3, Grok Imagine, FLUX 3 Video, …); text-to-video, image-to-video and reference-to-video; catalog and per-model limits fetched live (requires `OPENROUTER_API_KEY`, billed to your OpenRouter credit).
+- **OpenRouter** — every generative model on OpenRouter's video API (Veo 3.1, Sora 2 Pro, Kling 3, Seedance 2, Wan 3, Hailuo 3, Grok Imagine, FLUX 3 Video, …); text-to-video, image-to-video and reference-to-video; catalog and per-model limits fetched live (requires `OPENROUTER_API_KEY` or a credential added with `hermes auth add openrouter`, billed to your OpenRouter credit).
 - **DeepInfra** — live `video-gen` catalog over the OpenAI-compatible videos endpoint (requires `DEEPINFRA_API_KEY`).
 
 The single `video_generate` tool covers both modalities — pass `image_url` to animate a still, omit it to generate from text alone. The active backend auto-routes to the right endpoint. As with `image_generate`, the model is user-configured (`video_gen.model`) and not selectable by the agent — none of the video tools take a `model` argument. The tool's description is rebuilt at session start to reflect the active backend's actual capabilities (modalities, aspect ratios, resolutions, duration range, max reference images, audio support). See [Video Generation Provider Plugins](../developer-guide/video-gen-provider-plugin.md) for backend authoring.
@@ -53516,6 +53572,12 @@ To isolate the source:
 4. If an explicit tool error appears, use its exact text when reporting the problem.
 
 See [Security](../user-guide/security.md) for Hermes' documented execution controls and [Providers](../integrations/providers.md) for provider configuration.
+
+#### "…refused this request because of a policy on your account"
+
+**Meaning:** the provider rejected the request for an account-level reason that retrying cannot change — an aggregator's data/privacy settings excluded every endpoint for the model, or the model's upstream provider has blocked the account (for example `this user has been blocked for a previous policy violation`, which OpenRouter can relay inside an otherwise successful HTTP 200 stream). Hermes sends the request once, does not retry it or rotate credentials, and moves to your fallback chain if one is configured.
+
+**Solution:** check the account's status and data/privacy settings with the provider named in the reply, or switch to another model or provider with `/model`. `hermes fallback add` routes future blocks to a backup automatically.
 
 #### "Could not open a stream to `<host>` after N attempts (request X KB)"
 
@@ -55939,7 +56001,7 @@ Windows continues to use `taskkill /F /T`.
 
 `run_job()` passes the user's configured fallback providers and credential pool into the `AIAgent` instance:
 
-- **Fallback providers** — reads `fallback_providers` (list) or `fallback_model` (legacy dict) from `config.yaml`, matching the gateway's `_load_fallback_model()` pattern. Passed as `fallback_model=` to `AIAgent.__init__`, which normalizes both formats into a fallback chain.
+- **Fallback providers** — reads `fallback_providers` (list) or `fallback_model` (legacy dict) from `config.yaml`, matching the gateway's `_load_fallback_model()` pattern. Passed as `fallback_model=` to `AIAgent.__init__`, which normalizes both formats into a fallback chain. **Unpinned jobs only:** `_job_fallback_chain()` returns no chain for a job carrying its own `provider`, `model` or `base_url`, and the same answer feeds the credential-resolution walk in `_resolve_job_runtime()`, the pre-dispatch key check, and the mid-run ladder, so a pinned job never lands on a global chain entry (#100437). It shares `hermes_cli.fallback_config.scoped_fallback_chain()` with pinned delegation children.
 - **Credential pool** — loads via `load_pool(provider)` from `agent.credential_pool` using the resolved runtime provider name. Only passed when the pool has credentials (`pool.has_credentials()`). Enables same-provider key rotation on 429/rate-limit errors.
 
 This mirrors the gateway's behavior — without it, cron agents would fail on rate limits without attempting recovery.
@@ -56569,7 +56631,7 @@ host.logs(...)                             // tail an app log file
 host.status()                              // one-shot system status snapshot
 host.restartGateway()                      // restart the backend gateway
 host.profileRoutes()                       // [{ profile, targetProfile, connectionId, mode }]
-host.requestProfile<T>(route, method, params?)   // registry-routed RPC; no foreground swap
+host.requestProfile<T>(route, method, params?, timeoutMs?, { spawnPriority? })   // registry-routed RPC; no foreground swap
 host.requestProfile<T>(profile, method, params?) // legacy v1/local overload
 host.request<T>(method, params?)           // active-gateway JSON-RPC — the real power
 ```
@@ -56580,6 +56642,13 @@ cron, kanban, …). `host.requestProfile` accepts a descriptor from
 profile without changing the active chat or gateway. The profile-only overload is
 retained only for the sole-local/legacy topology; registry-aware plugins should pass
 the descriptor so two sources exposing the same profile name cannot collide.
+
+A call that may cold-start a pooled profile backend dials at background priority by
+default, and background dials never get the slot the pool keeps free for user actions.
+When the call IS a user action (a save, a button press, a dialog opening), pass
+`host.requestProfile(route, method, params, undefined, { spawnPriority: 'foreground' })`;
+otherwise, with the pool full of warm backends, it waits out the 30-second slot timeout
+and fails. Keep the background default for polling and roster warming.
 
 `host.openWorkspace(id, { render, title?, minWidth?, onClose? })` docks a
 plugin-rendered view into the **main workspace zone** — the same center area
@@ -57091,6 +57160,9 @@ tests/hermes_cli/test_iron_proxy_cli.py          CLI handler unit tests (~20).  
                                        wire-up, dest='egress_command'
                                        regression guard.
 
+tests/agent/test_iron_proxy_e2e.py          Live E2E (gated on HERMES_RUN_E2E=1).
+                                       Real iron-proxy binary, real curl,
+                                       end-to-end token swap verified.
 ```
 
 ## Lifecycle
@@ -57330,6 +57402,9 @@ iron-proxy writes line-delimited JSON to `~/.hermes/proxy/iron-proxy.log` on the
 ```bash
 # Hermetic suite (no network, no real binary)
 scripts/run_tests.sh tests/agent/test_iron_proxy.py tests/hermes_cli/test_iron_proxy_cli.py
+
+# Live E2E (real binary, real curl, real CONNECT tunnel)
+HERMES_RUN_E2E=1 scripts/run_tests.sh tests/agent/test_iron_proxy_e2e.py
 
 # Live PTY smoke against `hermes egress`
 HERMES_HOME=$HOME/.hermes/cache/scratch/hermes-egress-test python3 -m hermes_cli.main egress --help
@@ -59224,6 +59299,12 @@ contains everything they held — so they're dropped as they're superseded. This
 matters more than it sounds: leaving them in place stacks near-duplicate copies
 of the same text, each with its own heading and end-marker scaffolding, and the
 transcript grows on every turn instead of shrinking.
+
+Dropping a marker leaves the user turns on either side of it adjacent, so they
+are joined into one user message for the model. That joined row is flagged
+`display_metadata.model_only`: the originals stay in display history as compacted
+rows, and every display projection (resume, paged history, prompt timeline)
+skips the join, so a resumed session shows each input exactly once.
 
 ### Defrag
 
@@ -62011,6 +62092,34 @@ When both exist the `pyproject.toml` wins. What Hermes does with them:
 
 `HERMES_HOME/plugins/` survives `hermes update` and Desktop updates: the updater only rebuilds the
 venv and the checkout, never the home directory.
+
+### Dependency security policy
+
+Hermes quarantines **its own** dependencies: the checkout's `[tool.uv] exclude-newer = "14 days"`
+keeps a freshly published release of any package Hermes itself depends on out of `hermes update`
+and the built-in lazy installs for two weeks, so a hijacked upload is caught upstream before it
+reaches users. **That quarantine does not apply to your plugin's dependencies.** Plugin installs
+run outside Hermes's project policy (`uv pip install --no-config`, still under the core constraints
+file above), so a plugin can floor on a release published yesterday and install today — and the
+plugin's author, not Hermes, is responsible for what that pulls in.
+
+Set your own policy and hold yourself to it. Strongly recommended:
+
+- **Upper bounds on every dependency** — `>=floor,<next_major` for stable packages,
+  `>=0.29,<0.32` for pre-1.0 ones. A bare `>=X.Y` adopts every future release unreviewed.
+- **Floor on the oldest API-compatible version**, not the release of the week. A floor on a
+  fresh wheel forces every installer onto it the day it appears; `>=old,!=broken,<next` keeps the
+  wide range and skips the one bad release.
+- **Adopt a new-release quarantine of your own** — wait ~14 days before floors move to a new
+  release, and resolve with `uv --exclude-newer "14 days"` (or `UV_EXCLUDE_NEWER`) in your own CI so
+  the lock you test is the one users get. Operators who want the same guard on plugin installs
+  can set `UV_EXCLUDE_NEWER` in Hermes's environment; it applies to every install Hermes runs.
+- **Pin your lock, review your bumps.** Treat a dependency bump as a code change: read the
+  upstream diff, then re-pin.
+
+The plugin catalog review reads your dependency list at the pinned SHA (`plugin.yaml` or
+`pyproject.toml`) and flags bare floors and missing bounds; an entry is not held for a floor that
+is merely recent.
 
 ## Step 3: Write the tool schemas
 
@@ -81061,7 +81170,17 @@ Set a username and password, then run the dashboard bound to a reachable address
 EnvironmentFile=%h/.hermes/.env
 ExecStart=/path/to/venv/bin/python -m hermes_cli.main dashboard \
     --host 0.0.0.0 --port 9119 --no-open
+Restart=always
+RestartSec=10
+# Exit 78 (EX_CONFIG) is a deliberate refusal ("this host is already served by PID … on
+# another port"); parking on it beats an infinite restart loop with nothing listening.
+RestartPreventExitStatus=78
 ```
+
+One backend serves a whole host, so when `hermes dashboard` finds a live backend it cannot
+serve your typed `--host`/`--port` with, it refuses with exit 78 and names the owner. Stop that
+backend, or give the service its own dedicated server with `--isolated`. The Desktop app's own
+loopback backends never claim host ownership, so the two can coexist without either flag.
 
 with `~/.hermes/.env` containing:
 
@@ -89306,8 +89425,8 @@ The model above runs **one process per profile**. The alternative is a
 launched it — becomes the sole inbound process and serves messages for *every*
 profile on the box.
 
-Because there is only ever one of them, the lifecycle verbs target that process
-rather than "this profile's gateway":
+The default profile's lifecycle verbs target that process. Named profiles can
+stop or restart just their own bots without stopping the host:
 
 - `hermes -p <name> gateway run` while it is live **attaches** instead of
   starting a second process: it prints the host gateway's PID and served set and
@@ -89318,13 +89437,23 @@ rather than "this profile's gateway":
   multiplexer*. They never sweep every gateway process on the box; a profile
   that still runs its own gateway is reported, never killed, with the
   `hermes gateway migrate --multiplex` one-liner.
-- `hermes gateway run --replace` takes the host role over, whichever profile
-  launched the running process; `hermes gateway run --force` starts a separate
-  gateway without asking the host process at all (the escape hatch when it is
-  wedged or answering wrongly).
+- `hermes gateway run --replace` takes over the process **serving this
+  profile**, whichever profile launched it. When the host owner is another
+  profile's standalone gateway (an unmigrated per-profile fleet) it never serves
+  this profile, so `--replace` starts beside it exactly as a plain `run` does,
+  instead of refusing and respawn-storming under the supervisor. An older Hermes
+  wrote a systemd drop-in (`hermes-gateway.service.d/20-replace.conf`) that
+  forced `--replace` onto the unit; `hermes update` / `hermes gateway restart`
+  now remove that file. `hermes gateway run --force` starts a separate gateway
+  without asking the host process at all (the escape hatch when it is wedged or
+  answering wrongly).
 - Under a service supervisor the attach exits 75, not 0 — systemd, s6 and
   launchd all restart a 75 after a short delay, so the unit keeps retrying and
   takes over by itself the moment the host process goes away.
+- Two units started at once can both see no host process yet; the host lock
+  decides which one runs, and the loser exits 75 and attaches on the retry.
+  `--replace` does not skip that check (every generated unit carries it), only
+  `--force` does.
 
 Multiplexing is **on by default** (`gateway.multiplex_profiles` defaults to
 `true`), with one safety rule: an *unset* flag is a request the default gateway
@@ -89332,22 +89461,30 @@ settles at boot, never a verdict. Each start it runs the same preflight as
 [`hermes gateway migrate --multiplex`](#migrating-from-per-profile-gateways) and
 multiplexes only when the fold would have been safe — two
 or more profiles, no secondary still running its own gateway (live process or
-installed service), no duplicate bot credential, no port-binding platform
-without a `/p/<profile>/` ingress, and a host the migration understands (not an
-s6 container or Windows Scheduled Tasks). Otherwise it comes up exactly as
-before — serving the default profile only — and logs the blocker plus the
-`hermes gateway migrate --multiplex` one-liner. Nothing is changed on disk.
+installed service, or under s6 a per-profile slot that is actually *up*), no
+duplicate bot credential, and no port-binding platform without a `/p/<profile>/`
+ingress. **Unset means on**: when nothing blocks, the gateway multiplexes and
+writes `gateway.multiplex_profiles: true` into the default profile's
+`config.yaml` (comments preserved) so the file says what the runtime does.
+Otherwise it comes up serving the default profile only and says so **loudly** on
+a host with other profiles: a boxed warning at gateway start naming the profiles
+that are not served, the blocker, and the fix; the same box in the `hermes
+update` summary and `hermes gateway status`; a banner in the dashboard
+(`/api/status` carries `multiplex_standalone_reason`). A single-profile install
+is not warned — there is nothing to serve. Nothing is written on a refusal.
 
 An **explicit** `true` bypasses migration preflight, except for a launching
 profile that opts out with `gateway.standalone: true`:
 
 - `gateway.multiplex_profiles: true` (what the migration writes) multiplexes
   regardless of the preflight — you, or the migration, made the call.
-- `gateway.multiplex_profiles: false` is **retired**. It used to keep
-  per-profile gateways for good; now it resolves exactly like an unset key and
-  the gateway logs a warning pointing at `hermes gateway migrate --multiplex`.
-  `--force` remains the path for the boundary cases below; `gateway.standalone:
-  true` is a temporary shim for fleets the switch broke, not a supported topology.
+- `gateway.multiplex_profiles` has **one valid value right now: `true`**, and
+  it is written for you. An unset key resolves on and is made explicit in the
+  default profile's `config.yaml`. `false` is **retired**: the gateway rewrites
+  it to `true` in place and prints a one-time boxed notice at that start and in
+  the next `hermes update` summary — never a silent flip. A per-profile gateway
+  is `gateway.standalone: true` in that profile's own config (a temporary shim,
+  not a supported topology) or `--force` for the boundary cases below.
 - `GATEWAY_MULTIPLEX_PROFILES` in the process environment overrides the
   unset-key decision the same way an explicit `true` does.
 - `gateway.standalone: true` in a **named** profile's own `config.yaml`
@@ -89406,8 +89543,66 @@ credentials, and routes each inbound message to the profile it belongs to. Each
 turn resolves the routed profile's config, skills, memory, SOUL, **and provider
 keys** — credentials are never shared across profiles.
 
-You do **not** run `hermes gateway start` for the secondary profiles — the
-default gateway serves them. See the contract changes below.
+The host automatically serves unparked secondary profiles. Use `gateway start`
+on a parked profile to bring it back online.
+
+### Stopping one profile without stopping the host
+
+For a named profile served by the host multiplexer:
+
+```bash
+hermes -p coder gateway stop     # park coder; other profiles keep running
+hermes -p coder gateway start    # unpark coder and serve it again
+hermes -p coder gateway restart  # reconnect coder with its current configuration
+```
+
+`stop` writes `gateway.parked` in the profile home before asking the host to stop
+that profile's adapters and exclude its cron jobs from subsequent ticks. The
+marker persists across host restarts. Its contents are ignored; an empty file
+is sufficient. Provisioning can pre-create
+`<profiles-root>/coder/gateway.parked` so an installed profile stays offline.
+Parking does not delete the profile, its sessions, or its scheduled jobs.
+
+`start` removes the marker, then asks a running host to serve the profile.
+Without a running host it removes the marker and follows the normal start
+path; start the host from the default profile if prompted. `restart` unserves
+and serves the profile without writing a parked marker, re-reading its config.
+These operations do not terminate work already dispatched by a cron tick.
+
+The host also rescans every 30 seconds: adding the marker by hand unserves the
+profile; removing it by hand makes it eligible again. If the control socket
+does not confirm the request, the CLI says so and the next rescan applies the
+marker state. Adapter teardown or connection can take additional time.
+`hermes -p coder gateway status` reports
+`parked (hermes -p coder gateway start)` while the marker exists.
+
+The launch profile cannot be unserved. The default profile's marker is ignored
+with a warning; its lifecycle verbs and the `--all` variants retain their
+whole-host behavior. A separately running `--force` gateway retains its own
+process lifecycle.
+
+The dashboard and Desktop **Stop** / **Start** buttons for a served profile do the
+same thing: Stop parks it (`/api/gateway/stop?profile=coder` spawns
+`hermes -p coder gateway stop`), Start unparks it while a host gateway is live,
+and `/api/status` lists `parked_profiles`. Start on a named profile that is
+*not* parked still answers `409` — it would need a gateway of its own.
+
+#### Parked vs `gateway.standalone: true`
+
+The two never apply to the same profile at the same time, and neither one
+implies the other:
+
+| Profile | Host serves it | `-p X gateway stop` | `-p X gateway start` |
+|---|---|---|---|
+| Served (default case) | yes | parks it (marker + `unserve-profile`) | already served |
+| Parked (`gateway.parked` exists) | no, until unparked | already parked | unparks (marker removed + `serve-profile`) |
+| Standalone (`gateway.standalone: true`) | never | stops **its own** gateway process; writes no marker | starts its own gateway |
+
+`gateway.standalone` wins: the host never writes `gateway.parked` for a
+standalone profile and never serves it, parked or not, so `stop` and `start` on
+that profile keep their per-process meaning. Parking is the multiplex-native way
+to take one profile offline — it is what closes the "per-profile stop/restart"
+gap the [temporary shim](#temporary-gatewaystandalone-true) was kept open for.
 
 ### No new per-profile gateways
 
@@ -89451,9 +89646,11 @@ The dashboard's **Start** button for a named profile returns the same refusal.
 
 :::warning Temporary backwards compatibility, not a topology we keep
 Multiplex-only is the direction: one gateway per host serves every profile. The
-switch landed before every gap was closed — per-profile stop/restart, the
-WhatsApp bridge and relay on secondary profiles, and dashboard scoping are the
-open ones — and fleets that relied on per-profile gateways lost them overnight.
+switch landed before every gap was closed — the WhatsApp bridge and relay on
+secondary profiles, and dashboard scoping are the open ones; per-profile
+stop/start/restart is closed by
+[parking](#stopping-one-profile-without-stopping-the-host) — and fleets that
+relied on per-profile gateways lost them overnight.
 `gateway.standalone: true` exists so those fleets keep working **while those
 gaps are fixed**. It will be removed once they are, with a release-notes notice
 ahead of time; every surface that prints it says so. Do not build new setups on
@@ -89512,24 +89709,17 @@ gateway on a blocked host.
 
 #### 1. Secondary profiles must not start their own gateway
 
-With a multiplexer running, a named-profile `hermes gateway run`, `start`,
-`install` or `restart` is a **hard error** (exit code 78), pointing you back at
-the multiplexer:
-
-```
-The default gateway is running as a profile multiplexer and already serves
-profile 'coder'. ...
-```
-
-The refusal happens in the CLI before any service manager is touched, so a served
-profile never ends up with a permanently failed systemd unit or a launchd respawn
-loop. `hermes -p coder gateway stop` refuses the same way (exit 78) when coder has no
-gateway of its own — there is nothing to stop but the multiplexer, which
-`hermes gateway stop` on the default profile takes down for every served profile.
-The dashboard and Desktop app follow the CLI: for a served profile the "Start" and
-"Stop" gateway actions answer `409` with the same explanation (rendered as an inline
-notice on the System page), and "Restart" restarts the multiplexer (the process that
-actually serves the profile) instead of spawning a `-p coder gateway restart` that
+With a multiplexer running, a named profile's `gateway run` attaches to it;
+`gateway install` refuses to create another process (exit code 78). The CLI
+refuses before touching a service manager, preventing a permanently failed
+systemd unit or a launchd respawn loop. Use the per-profile `stop`, `start`, and
+`restart` commands above to manage a satellite inside the host. `hermes gateway
+stop` on the default profile still takes every served profile offline.
+The dashboard and Desktop app follow the CLI: for a served profile the "Stop" action
+parks it and "Start" unparks it (see above); "Start" on an unparked named profile
+answers `409` with the same explanation (rendered as an inline notice on the System
+page). "Restart" restarts the multiplexer (the process that actually serves the
+profile) instead of spawning a `-p coder gateway restart` that
 could only fail. Because that restart reconnects every bot on the device, both apps
 first ask *"Restart the shared gateway? All bots on this device reconnect: default,
 coder, research"* (the list is the running gateway's `served_profiles`) and report
@@ -89555,7 +89745,7 @@ separate process opts out with `gateway.standalone: true` (see
 (accepted by `run`, `start`, `install` and `restart`) only where a boundary
 blocks the fold. The cross-profile
 lifecycle wrapper script earlier on this page is therefore **not** used in
-multiplex mode — you only manage the default gateway.
+multiplex mode — manage the host or its named profiles directly.
 
 #### 2. HTTP-inbound platforms are reached via a `/p/<profile>/` URL prefix
 
@@ -89849,6 +90039,7 @@ profile and never shares with the default or any sibling:
 | Dashboard actions (`hermes -p <name> …` spawned by the Desktop/dashboard) | A scrubbed child env pinned to that profile's `HERMES_HOME` | The child loads its own `.env`; the dashboard profile's tokens and ports are not inherited |
 | Every child that acts for a served profile (slash worker, Bot Chat delivery, A2A forward, `key_cmd` helper, browser driver) | That profile's own `.env` + secret sources over a credential-scrubbed base — with or without `gateway.multiplex_profiles` (the Desktop/dashboard `?profile=` route counts) | Absent from the child — a key that reached the launch process only through systemd / Compose / the shell is never inherited by another profile's child |
 | Authorization gates in a child spawned for another profile (`*_ALLOWED_USERS` / `*_ALLOWED_CHANNELS` / `*_IGNORED_CHANNELS` / `*_ALLOW_ALL_USERS` / `*_ALLOW_BOTS`, `GATEWAY_ALLOW*`) — dashboard `hermes -p <name>` actions, kanban workers, Bot Chat delivery, the post-update per-profile `gateway restart` | The child's own `.env` / `config.yaml`, loaded by the child itself | Closed (the adapter's documented default) — a gate exported into the spawning process by a unit file or the shell is dropped before the child starts, so profile B never enforces profile A's channel or user list; a same-profile child keeps it |
+| Routed-profile detection in an embedding host that mirrors the served profile into the live `HERMES_HOME` env var for legacy readers (Hermes WebUI) | The launch home the host pinned with `hermes_constants.pin_process_hermes_home()`; MCP connection keys, the launch-env strip for a served profile's children, the bridged allow-all seed and the `terminal.*` env-bridge guard all compare against it | Without a pin the live env var is the launch home, exactly as before — a host that never mutates `HERMES_HOME` needs nothing |
 | The launch (default) profile's own credentials in a `hermes serve` / dashboard process that also serves another profile | Its `.env` + secret sources over the process env **frozen the moment the first other profile is served**; not re-read afterwards | A credential rotated only in the process env (`systemctl set-environment`, a refreshed `op run` wrapper that did not re-exec) is not picked up until the process restarts — put rotating keys in `.env` or a secret source, or restart after rotating |
 | Cron `.env` tuning (`HERMES_CRON_TIMEOUT`, `HERMES_MODEL` fallback, `HERMES_CRON_MAX_PARALLEL`, prefill file), worker / Bot Chat child env | The profile's own `.env`; children never inherit the default profile's `.env` settings or bridged `TERMINAL_*` policy | Cron defaults / model refusal, exactly as a standalone `hermes -p <name> gateway run` |
 | Kanban workers and notifications for a profile's tasks | The assignee's `.env` + `config.yaml` (toolset pin, terminal backend, media policy, display language) | — |
@@ -90268,6 +90459,20 @@ keeps `hermes -p <name> gateway install --force` as its path — or opts out of
 the host gateway with `gateway.standalone: true` (see
 [No new per-profile gateways](#no-new-per-profile-gateways)), which
 `hermes gateway migrate --multiplex` respects.
+
+### Docker / Hermes Cloud (s6-supervised container)
+
+Inside the official image every profile has an s6 slot
+(`/run/service/gateway-<profile>`). The container's boot registers every *named*
+slot down and folds its autostart intent into the root slot, so a fresh boot
+already multiplexes. An **in-place** update no longer needs a container restart
+to converge either: `hermes gateway migrate --multiplex` (and the hook `hermes
+update` runs) parks any named slot that is still up (`s6-svc -d` plus a `down`
+file so a supervisor restart does not revive it), folds its intent into the root
+slot through the same rule the boot uses, and restarts the root slot. A
+registered-down slot is never a blocker — only a slot that is actually up is.
+The one thing the command still cannot do from inside is create a root slot the
+boot never registered; that case names itself and asks for a container restart.
 
 ### What `hermes update` does
 
