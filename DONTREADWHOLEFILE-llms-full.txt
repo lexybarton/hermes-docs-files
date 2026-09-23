@@ -2300,8 +2300,8 @@ services.hermes-agent.extraDependencyGroups = [ "messaging" ];
 ```nix
 # Enable a memory provider
 services.hermes-agent = {
-  extraDependencyGroups = [ "hindsight" ];
-  settings.memory.provider = "hindsight";
+  extraDependencyGroups = [ "honcho" ];
+  settings.memory.provider = "honcho";
 };
 ```
 
@@ -2320,12 +2320,13 @@ This is resolved by uv alongside core dependencies — no PYTHONPATH patching, n
 | `bedrock` | AWS Bedrock (boto3) |
 | `azure-identity` | Azure Entra ID auth |
 | `honcho` | Honcho memory provider |
-| `hindsight` | Hindsight memory provider |
 | `modal` | Modal terminal backend |
 | `daytona` | Daytona terminal backend |
 | `exa` | Exa web search |
 | `firecrawl` | Firecrawl web search |
 | `fal` | FAL image generation |
+
+Memory providers that live in the [plugin catalog](../user-guide/features/plugins.md) rather than in the Hermes tree (e.g. Hindsight) are not extras. Install them like any catalog plugin with `hermes plugins install hindsight`, or declaratively via [`extraPlugins`](#directory-plugins-extraplugins) pointing at the plugin's source tree.
 
 Or use the pre-built `#messaging` or `#full` flake packages instead of per-extra configuration (see [Quick Start](#quick-start-any-nix-user)).
 
@@ -2361,7 +2362,7 @@ External flakes can override the package directly:
     nixpkgs.overlays = [ hermes-agent.overlays.default ];
     # Then:
     #   pkgs.hermes-agent.override { extraPythonPackages = [...]; }
-    #   pkgs.hermes-agent.override { extraDependencyGroups = [ "hindsight" ]; }
+    #   pkgs.hermes-agent.override { extraDependencyGroups = [ "honcho" ]; }
   };
 }
 ```
@@ -2508,7 +2509,7 @@ nix build .#checks.x86_64-linux.config-roundtrip    # merge script preserves use
 | `extraPackages` | `listOf package` | `[]` | Extra packages available to the agent. Added to the hermes user's per-user profile so terminal commands, skills, and cron jobs all see them |
 | `extraPlugins` | `listOf package` | `[]` | Directory plugin packages to symlink into `$HERMES_HOME/plugins/`. Each must contain `plugin.yaml` |
 | `extraPythonPackages` | `listOf package` | `[]` | Python packages added to PYTHONPATH for entry-point plugin discovery. Build with `python312Packages` |
-| `extraDependencyGroups` | `listOf str` | `[]` | pyproject.toml optional extras to include in the sealed venv (e.g. `["hindsight"]`). Resolved by uv — no collisions |
+| `extraDependencyGroups` | `listOf str` | `[]` | pyproject.toml optional extras to include in the sealed venv (e.g. `["honcho"]`). Resolved by uv — no collisions |
 | `restart` | `str` | `"always"` | The systemd `Restart=` policy. macOS does not use it. |
 | `restartSec` | `int` | `5` | The systemd `RestartSec=` value. macOS does not use it. |
 
@@ -9360,7 +9361,7 @@ docker run -d \
 
 The official image is based on `debian:13.4` and includes:
 
-- Python 3.13 with dependencies synced from the lockfile via `uv sync --frozen --no-install-project` for the baked extras (`all`, `messaging`, Anthropic/Bedrock/Azure identity, Hindsight, Matrix), followed by a no-dependency editable install of Hermes itself.
+- Python 3.13 with dependencies synced from the lockfile via `uv sync --frozen --no-install-project` for the baked extras (`all`, `messaging`, Anthropic/Bedrock/Azure identity, Matrix), followed by a no-dependency editable install of Hermes itself. Catalog plugins such as the Hindsight memory provider are not baked in; `hermes plugins install hindsight` installs the plugin and its dependencies into `HERMES_LAZY_INSTALL_TARGET` (`/opt/data/lazy-packages`) at install time.
 - Node.js 26 + npm (for browser automation, WhatsApp bridge, TUI/Desktop bundles, and workspace build tooling)
 - Playwright with Chromium (`npx playwright install --with-deps chromium --only-shell`)
 - ripgrep, ffmpeg, git, and `xz-utils` as system utilities
@@ -11058,7 +11059,7 @@ Hermes Agent includes a rich set of capabilities that extend far beyond basic ch
 - **[Fallback Providers](fallback-providers.md)** — Automatic failover to backup LLM providers when your primary model encounters errors, including independent fallback for auxiliary tasks like vision and compression.
 - **[Credential Pools](credential-pools.md)** — Distribute API calls across multiple keys for the same provider. Automatic rotation on rate limits or failures.
 - **[Prompt caching](../configuration#prompt-caching)** — Built-in cross-session 1-hour prefix cache for Claude on native Anthropic, OpenRouter, and Nous Portal. Always-on; no configuration required.
-- **[Memory Providers](memory-providers.md)** — Plug in external memory backends (Honcho, OpenViking, Mem0, Hindsight, Holographic, RetainDB, ByteRover, Supermemory) for cross-session user modeling and personalization beyond the built-in memory system.
+- **[Memory Providers](memory-providers.md)** — Plug in external memory backends (Honcho, OpenViking, Mem0, Holographic, RetainDB, ByteRover, Supermemory, plus Hindsight from the plugin catalog) for cross-session user modeling and personalization beyond the built-in memory system.
 - **[API Server](api-server.md)** — Expose Hermes as an OpenAI-compatible HTTP endpoint. Connect any frontend that speaks the OpenAI format — Open WebUI, LobeChat, LibreChat, and more.
 - **[IDE Integration (ACP)](acp.md)** — Use Hermes inside ACP-compatible editors such as VS Code, Zed, and JetBrains. Chat, tool activity, file diffs, and terminal commands render inside your editor.
 - **[Batch Processing](batch-processing.md)** — Run the agent over many prompts or tasks in parallel from the CLI, with structured outputs and trajectory capture suitable for evals or downstream training pipelines.
@@ -13322,7 +13323,7 @@ Full details in [Gating agent skill writes](./skills.md#gating-agent-skill-write
 
 ## External Memory Providers
 
-For deeper, persistent memory that goes beyond MEMORY.md and USER.md, Hermes ships with 8 external memory provider plugins — including Honcho, OpenViking, Mem0, Hindsight, Holographic, RetainDB, ByteRover, and Supermemory.
+For deeper, persistent memory that goes beyond MEMORY.md and USER.md, Hermes ships with 7 external memory provider plugins — Honcho, OpenViking, Mem0, Holographic, RetainDB, ByteRover, and Supermemory — and more, such as Hindsight, are available from the [plugin catalog](plugins.md) via `hermes plugins install <name>`.
 
 External providers run **alongside** built-in memory (never replacing it) and add capabilities like knowledge graphs, semantic search, automatic fact extraction, and cross-session user modeling.
 
@@ -13340,7 +13341,7 @@ See the [Memory Providers](./memory-providers.md) guide for full details on each
 
 # Memory Providers
 
-Hermes Agent ships with 8 external memory provider plugins that give the agent persistent, cross-session knowledge beyond the built-in MEMORY.md and USER.md. Only **one** external provider can be active at a time — the built-in memory is always active alongside it.
+Hermes Agent ships with 7 external memory provider plugins that give the agent persistent, cross-session knowledge beyond the built-in MEMORY.md and USER.md, and more (such as Hindsight) are available from the [plugin catalog](./plugins.md). Only **one** external provider can be active at a time — the built-in memory is always active alongside it.
 
 ## Quick Start
 
@@ -13356,7 +13357,8 @@ Or set manually in `~/.hermes/config.yaml`:
 
 ```yaml
 memory:
-  provider: openviking   # or honcho, mem0, hindsight, holographic, retaindb, byterover, supermemory
+  provider: openviking   # or honcho, mem0, holographic, retaindb, byterover, supermemory,
+                         # or hindsight (plugin catalog — run `hermes plugins install hindsight` first)
 ```
 
 ## How It Works
@@ -13764,26 +13766,31 @@ The plugin authenticates with `X-API-Key` and uses the server's `/search` / `/me
 
 ### Hindsight
 
+:::info Plugin catalog
+Hindsight is maintained by [vectorize-io](https://github.com/vectorize-io/hindsight) and installed from the [plugin catalog](./plugins.md) rather than bundled with Hermes. Setup details live in the upstream docs: [hindsight.vectorize.io/sdks/integrations/hermes](https://hindsight.vectorize.io/sdks/integrations/hermes).
+:::
+
 Long-term memory with knowledge graph, entity resolution, and multi-strategy retrieval. The `hindsight_reflect` tool provides cross-memory synthesis that no other provider offers. Automatically retains full conversation turns (including tool calls) with session-level document tracking.
 
 | | |
 |---|---|
 | **Best for** | Knowledge graph-based recall with entity relationships |
-| **Requires** | Cloud: API key from [ui.hindsight.vectorize.io](https://ui.hindsight.vectorize.io). Local: LLM API key (OpenAI, Groq, OpenRouter, etc.) |
-| **Data storage** | Hindsight Cloud or local embedded PostgreSQL |
+| **Requires** | `hermes plugins install hindsight`. Cloud: API key from [ui.hindsight.vectorize.io](https://ui.hindsight.vectorize.io). Local: LLM API key (OpenAI, Groq, OpenRouter, etc.) |
+| **Data storage** | Hindsight Cloud, local embedded PostgreSQL, or an external local Hindsight server |
 | **Cost** | Hindsight pricing (cloud) or free (local) |
 
 **Tools:** `hindsight_retain` (store with entity extraction), `hindsight_recall` (multi-strategy search), `hindsight_reflect` (cross-memory synthesis)
 
 **Setup:**
 ```bash
-hermes memory setup    # select "hindsight"
+hermes plugins install hindsight   # from the plugin catalog
+hermes memory setup                # select "hindsight"
 # Or manually:
 hermes config set memory.provider hindsight
 echo "HINDSIGHT_API_KEY=your-key" >> ~/.hermes/.env
 ```
 
-The setup wizard installs dependencies automatically and only installs what's needed for the selected mode (`hindsight-client` for cloud, `hindsight-all` for local). Requires `hindsight-client >= 0.4.22` (auto-upgraded on session start if outdated).
+The plugin lands in `~/.hermes/plugins/hindsight/` (per profile home) and is enabled under `plugins.enabled` in `config.yaml`. `hermes memory setup`, `hermes memory status`, `hermes plugins list` and the dashboard Memory settings all work with the catalog-installed plugin. In local embedded mode the plugin installs `hindsight-all` on first use through Hermes' lazy-install path, which honours `security.allow_lazy_installs`.
 
 **Local mode UI:** `hindsight-embed -p hermes ui start`
 
@@ -13805,7 +13812,17 @@ The setup wizard installs dependencies automatically and only installs what's ne
 | `retain_assistant_prefix` | `Assistant` | Label used before assistant turns in auto-retained transcripts |
 | `recall_tags` | — | Tags to filter on recall |
 
-See [plugin README](https://github.com/NousResearch/hermes-agent/blob/main/plugins/memory/hindsight/README.md) for the full configuration reference.
+See the [upstream Hermes integration docs](https://hindsight.vectorize.io/sdks/integrations/hermes) for the full configuration reference.
+
+#### Migrating from bundled Hindsight
+
+Hindsight used to ship inside the Hermes tree (and as the `hermes-agent[hindsight]` pip extra). If your `config.yaml` already has `memory.provider: hindsight`, there is nothing to do for most users:
+
+- `hermes update` installs the catalog plugin into every profile home that names the provider (this runs even when `security.allow_lazy_installs` is `false`).
+- If the plugin is still missing on the first agent start (`hermes chat`, the gateway, …), Hermes installs it and prints `✓ Memory provider 'hindsight' moved out of core — installed its plugin from the catalog (your memory.hindsight settings and data are unchanged).`
+- With `security.allow_lazy_installs: false`, the agent-start path instead logs one line — ``Memory provider 'hindsight' is not installed; security.allow_lazy_installs is off — run `hermes plugins install hindsight`.`` — and you run `hermes plugins install hindsight` yourself.
+
+What changes on disk: the plugin appears in `~/.hermes/plugins/hindsight/` and `config.yaml` gains `plugins.enabled: [hindsight]`. `memory.provider`, `memory.hindsight.*`, `$HERMES_HOME/hindsight/config.json`, `HINDSIGHT_API_KEY` in `.env` and your memory bank data are untouched. Verify with `hermes memory status` (provider active) and `hermes plugins list` (plugin installed and enabled).
 
 ---
 
@@ -14012,7 +14029,7 @@ hermes memory setup
 | **Honcho** | Cloud | Paid | 5 | `honcho-ai` | Dialectic user modeling + session-scoped context |
 | **OpenViking** | Self-hosted | Free | 6 | `openviking` + server | Filesystem hierarchy + tiered loading |
 | **Mem0** | Cloud/Self-hosted | Free/Paid | 4 | `mem0ai` | Server-side LLM extraction + self-hosted/OSS modes |
-| **Hindsight** | Cloud/Local | Free/Paid | 3 | `hindsight-client` | Knowledge graph + reflect synthesis |
+| **Hindsight** (plugin catalog) | Cloud/Local | Free/Paid | 3 | `hermes plugins install hindsight` | Knowledge graph + reflect synthesis |
 | **Holographic** | Local | Free | 2 | None | HRR algebra + trust scoring |
 | **RetainDB** | Cloud | $20/mo | 10 | `requests` | Delta compression |
 | **ByteRover** | Local/Cloud | Free/Paid | 3 | `brv` CLI | Pre-compression extraction |
@@ -14031,12 +14048,13 @@ Each provider's data is isolated per [profile](../profiles.md):
 ## Providers Moving to the Plugin Catalog
 
 Memory providers are moving out of the Hermes tree into their maintainers' own repositories,
-published through the [plugin catalog](./plugins.md). Nothing changes for you: the
+published through the [plugin catalog](./plugins.md) — Hindsight is the first (see
+[Migrating from bundled Hindsight](#migrating-from-bundled-hindsight)). Nothing changes for you: the
 provider name, your `memory.<name>` settings, its data directory and its tools stay the same.
 When a provider you have configured stops shipping with Hermes, `hermes update` installs its
 catalog plugin for every profile that names it; if you update through the Desktop app, the
 agent does the same the first time it starts (unless `security.allow_lazy_installs` is
-`false`, in which case it prints the `hermes plugins install <name>` one-liner instead).
+`false`, in which case it logs the `hermes plugins install <name>` one-liner instead).
 
 ## Building a Memory Provider
 
@@ -33331,7 +33349,7 @@ Speech-to-text supports eight providers: local faster-whisper (free, runs on-dev
 ## Memory & Personalization
 
 - **[Built-in Memory](../user-guide/features/memory.md)** — Persistent, curated memory via `MEMORY.md` and `USER.md` files. The agent maintains bounded stores of personal notes and user profile data that survive across sessions.
-- **[Memory Providers](../user-guide/features/memory-providers.md)** — Plug in external memory backends for deeper personalization. Eight providers are supported: Honcho (dialectic reasoning), OpenViking (tiered retrieval), Mem0 (cloud extraction), Hindsight (knowledge graphs), Holographic (local SQLite), RetainDB (hybrid search), ByteRover (CLI-based), and Supermemory.
+- **[Memory Providers](../user-guide/features/memory-providers.md)** — Plug in external memory backends for deeper personalization. Seven providers ship with Hermes: Honcho (dialectic reasoning), OpenViking (tiered retrieval), Mem0 (cloud extraction), Holographic (local SQLite), RetainDB (hybrid search), ByteRover (CLI-based), and Supermemory; Hindsight (knowledge graphs) is available from the plugin catalog via `hermes plugins install hindsight`.
 
 ## Messaging Platforms
 
@@ -49365,7 +49383,7 @@ See [Hooks](../user-guide/features/hooks.md) for event signatures and payload sh
 hermes memory <subcommand>
 ```
 
-Set up and manage external memory provider plugins. Available providers: honcho, openviking, mem0, hindsight, holographic, retaindb, byterover, supermemory. Only one external provider can be active at a time. Built-in memory (MEMORY.md/USER.md) is always active.
+Set up and manage external memory provider plugins. Bundled providers: honcho, openviking, mem0, holographic, retaindb, byterover, supermemory; hindsight (plugin catalog) after `hermes plugins install hindsight`. Only one external provider can be active at a time. Built-in memory (MEMORY.md/USER.md) is always active.
 
 Subcommands:
 
@@ -51871,6 +51889,14 @@ Tools for driving desktop [Projects](../user-guide/cli.md) — named, multi-fold
 |------|-------------|----------------------|
 | `memory` | Save important information to persistent memory that survives across sessions. Your memory appears in your system prompt at session start -- it's how you remember things about the user and your environment between conversations. WHEN TO SA… | — |
 
+## `setup` toolset
+
+Granted only to sessions of the desktop setup profile (`role: setup` in its `profile.yaml`); never configurable.
+
+| Tool | Description | Requires environment |
+|------|-------------|----------------------|
+| `manage_catalog` | Setup profile only (the `setup` toolset), desktop chat only. `search` lists catalog plugins and hub skills matching `query` (optionally one `kind`) with `id`, `kind`, `display`, `tier`, `platforms` and `installed` (present in the `default` profile); it changes nothing. `install` takes `items: [{kind, id}]` and shows one approval card with a row per item (Install, Advanced, Skip); an id the catalog does not know, or a plugin this OS cannot run, is drawn failed with the reason. An approved row installs into `default` (or the profile chosen under Advanced) at the catalog's reviewed commit, with the same kill list, security scan and live activation as the Plugins tab, so the plugin's MCP tools and skills are usable in that profile's open chats at once. The result lists each row as `connected` (with `tools` and `skill`), `skipped`, `failed` (with `detail`) or `not_connected`. The model cannot pass a source, commit, profile or setting. Anywhere else the call returns the `hermes plugins install` / `hermes skills install` command to run instead. | — |
+
 ## `session_search` toolset
 
 | Tool | Description | Requires environment |
@@ -52164,6 +52190,7 @@ Or in-session:
 | `safe` | `image_generate`, `vision_analyze`, `web_extract`, `web_search` (via `includes`) | Read-only research + media generation. No file writes, no terminal, no code execution. |
 | `search` | `web_search` | Web search only (without extract). |
 | `session_search` | `session_search` | Search past conversation sessions. |
+| `setup` | `manage_catalog` | Onboarding-only surface of the desktop setup profile: search the plugin catalog and skills hub, and install items through the approval card. Granted by the backend to sessions whose profile carries `role: setup` in its `profile.yaml`; stripped from every other profile even when a config list, `HERMES_TUI_TOOLSETS`, or `all` names it. Not configurable and not listed by `hermes tools`. |
 | `skills` | `skill_manage`, `skill_view`, `skills_list` | Skill CRUD and browsing. |
 | `spotify` | `spotify_albums`, `spotify_devices`, `spotify_library`, `spotify_playback`, `spotify_playlists`, `spotify_queue`, `spotify_search` | Native Spotify control (playback, queue, search, playlists, albums, library). Registered by the bundled `spotify` plugin. |
 | `terminal` | `process_manage`, `terminal` | Shell command execution and background process management. |
@@ -58754,8 +58781,16 @@ workspace; absent or empty cwd remains unpinned.
 | `sync_turn(user, assistant, *, session_id="", messages=None)` | After each completed turn | Persist conversation |
 | `on_session_end(messages)` | Conversation ends | Final extraction/flush |
 | `on_pre_compress(messages)` | Before context compression | Save insights before discard |
-| `on_memory_write(action, target, content)` | Built-in memory writes | Mirror to your backend |
+| `on_memory_write(action, target, content, metadata=None)` | Built-in memory writes | Mirror to your backend |
 | `shutdown()` | Process exit | Clean up connections |
+
+For native `replace` and `remove`, `metadata["previous_content"]` contains the full
+entry selected under the native-store lock. Notifications are emitted only after
+the complete write or batch succeeds. Batch notifications preserve operation order;
+each operation's previous content reflects earlier operations in that batch.
+`old_text` is the caller's search text, not the identity of the changed entry.
+Older Hermes versions can omit `previous_content`. Providers that require exact
+identity should skip destructive mirroring when it is absent.
 
 ### Oversized prefetch results
 
@@ -73471,12 +73506,16 @@ The app is built for working on several things at once:
 
 The layout editor (titlebar button, or **Cmd/Ctrl+Shift+\\**) opens with an **Interface mode** choice — also under **Settings → Appearance → Window & layout** and as *Simple mode* in the command palette. It changes what is shown, not what Hermes can do.
 
-- **Advanced** (default) is the app exactly as you have set it up. Picking it writes nothing.
-- **Simple** is chat-first: the statusbar, profile rail, terminal, file browser and review panes, the technical tool-call view, inline code diffs, and the Artifacts / Scheduled jobs rows rest out of the way (Capabilities and Messaging stay — they are how you set Hermes up); thinking starts collapsed; session rows show the title, a preview and when they were last active. The titlebar keeps Settings and the layout editor. Simple is always the *Basic* arrangement; its one layout choice is *Sidebar left* or *Sidebar right*. The templates and saved layouts are Advanced.
+- **Advanced** (default) is the app as you have set it up. Users who have not explicitly selected Simple stay in Advanced.
+- **Simple** is chat-first: the statusbar, profile rail, terminal, file browser and review panes, the technical tool-call view, inline code diffs, and the Artifacts / Scheduled jobs rows rest out of the way (Capabilities and Messaging stay — they are how you set Hermes up); thinking starts collapsed; session rows show the title, a preview and when they were last active. The titlebar keeps Settings and the layout editor. Simple's layout picker offers *Sidebar left* or *Sidebar right*. The templates and saved layouts are Advanced.
 
 A layout says what is on screen, not just where things sit: applying one opens every pane it places and closes the ones it leaves *resting*, so **Ctrl+`**, **Cmd/Ctrl+J** and **Cmd/Ctrl+G** always agree with what you see. *Basic* is sessions and chat with the terminal resting as a collapsed rail under the chat and the file browser and review resting in a right column — **Ctrl+`** opens the terminal under the chat, **Cmd/Ctrl+J** opens the tree on the right. *Focus* keeps files and review as tabs behind the chat, with the same terminal rail. *Default*, *Terminal deck* and *Quad* open everything they place. A layout you save remembers which of its panes were closed.
 
-Simple shadows your preferences instead of overwriting them, so switching back to Advanced restores every setting exactly. Every keybind still works in Simple — **Ctrl+`**, **Cmd/Ctrl+J** and **Cmd/Ctrl+G** open the terminal, file browser and review for the current session, and the next launch is quiet again. With more than one profile the profile rail stays, since it is then the only way to switch. First-run onboarding sets the mode from the layout you pick: *Basic* starts in Simple, *Elite* in Advanced; skipping leaves it on Advanced.
+Each mode remembers its own arrangement: pane positions, sizes, active tabs, hidden tabs, dismissals, collapsed sides and floating-card positions. Returning to a mode restores that arrangement rather than reapplying a preset. Simple starts with the sidebar on the left; moving it to the right does not change Advanced. Conversations, drafts, previews and running work stay shared.
+
+Existing layouts are retained on upgrade. Advanced continues using the original storage keys. If you already explicitly selected Simple, its current layout is copied into Simple's separate storage without deleting the originals. An older arrangement that was overwritten before this separation cannot be reconstructed.
+
+Simple shadows your display preferences instead of overwriting them. Every keybind still works in Simple — **Ctrl+`**, **Cmd/Ctrl+J** and **Cmd/Ctrl+G** open the terminal, file browser and review for the current session, and the next launch is quiet again. With more than one profile the profile rail stays, since it is then the only way to switch. First-run onboarding sets the mode from the layout you pick: *Basic* starts in Simple, *Elite* in Advanced; skipping leaves it on Advanced.
 
 #### Minimize to tray
 
@@ -78719,6 +78758,10 @@ The catalog complements — it does not replace — the existing
 normal plugin under the hood; the catalog just adds discovery and a review
 layer on top.
 
+During desktop onboarding, the setup guide can also offer catalog plugins and skills through an
+approval card. Each row installs into your `default` profile only when you click Install, at the
+same reviewed commit this page describes.
+
 ## What's in an entry
 
 Each catalog entry is a small YAML file in the
@@ -78736,6 +78779,8 @@ directory of the hermes-agent repository, declaring:
 | `capabilities` | Declared tools, hooks, middleware, and required env vars |
 | `requires_hermes` | Minimum Hermes version, e.g. `>=0.19` (optional) |
 | `platforms` | OS restrictions, empty = all (optional) |
+| `title` | Human name shown on cards, e.g. `NVIDIA App` (optional; defaults to `name`) |
+| `onboarding` | `true` offers the plugin on the desktop onboarding card, beside the hosted connectors, on the platforms it lists. Curated: official entries only (optional, default `false`) |
 | `docs_url` | External documentation link (optional) |
 | `version` | Human-readable label for the pinned sha, e.g. `"1.4.0"`; shown as `1.4.0 @ abcd1234` in the CLI, on the catalog card and on the Desktop **Update to** button (optional, cosmetic) |
 | `image` | Banner image for the catalog card and the plugin page hero, shown at 2:1 (1200×600 works; other shapes are centre-cropped); an `https` URL on `raw.githubusercontent.com`, `github.com` or `*.githubusercontent.com` (optional). Pin it to the entry's commit (`raw.githubusercontent.com/owner/repo/<sha>/...`) so it never changes under the review |
@@ -88780,9 +88825,12 @@ that live on one gateway.
   are all scoped to the active `(gateway, profile)`. Switching from a Telegram
   gateway to a Signal gateway cannot leave the previous gateway's channel groups
   or sessions in the sidebar.
-- Merely displaying the switcher reads Electron's local connection registry.
-  Remote gateways are opened only when selected; there is no periodic fleet
-  polling.
+- Desktop loads the local connection registry at startup, even with the status
+  bar hidden, and keeps it current when gateways are saved or removed. Opening
+  Settings is not required. In Simple mode, the profile rail stays available
+  when more than one gateway is registered, even with only a default profile.
+  Loading the registry does not connect every gateway; there is no periodic
+  fleet polling.
 - Hovering an agent pre-warms its backend so the switch doesn't pay a cold
   boot. SSH agents are the exception: hovering never dials the tunnel or
   starts a remote backend — only opening one does.
@@ -88999,17 +89047,26 @@ s6 container or Windows Scheduled Tasks). Otherwise it comes up exactly as
 before — serving the default profile only — and logs the blocker plus the
 `hermes gateway migrate --multiplex` one-liner. Nothing is changed on disk.
 
-An **explicit** `true` is never second-guessed:
+An **explicit** `true` bypasses migration preflight, except for a launching
+profile that opts out with `gateway.standalone: true`:
 
 - `gateway.multiplex_profiles: true` (what the migration writes) multiplexes
   regardless of the preflight — you, or the migration, made the call.
 - `gateway.multiplex_profiles: false` is **retired**. It used to keep
   per-profile gateways for good; now it resolves exactly like an unset key and
   the gateway logs a warning pointing at `hermes gateway migrate --multiplex`.
-  One gateway per host serves every profile — the only way to run a separate
-  per-profile gateway is `--force` (below).
+  `--force` remains the path for the boundary cases below; `gateway.standalone:
+  true` is a temporary shim for fleets the switch broke, not a supported topology.
 - `GATEWAY_MULTIPLEX_PROFILES` in the process environment overrides the
   unset-key decision the same way an explicit `true` does.
+- `gateway.standalone: true` in a **named** profile's own `config.yaml`
+  (`profiles/<name>/config.yaml`) is a **temporary compatibility shim** (see
+  [below](#temporary-gatewaystandalone-true)): the host gateway does not serve
+  that profile, and the profile runs its own gateway without `--force`. Its gateway serves only itself, even if
+  `multiplex_profiles: true` is also set (see
+  [No new per-profile gateways](#no-new-per-profile-gateways)). Set on the
+  default profile it is ignored with a warning — the default profile is the
+  host gateway. There is no environment variable for this key.
 
 Other processes (`hermes -p <name> gateway start`, the dashboard, `hermes gateway
 migrate`) never guess how an unset flag was settled: they read the running
@@ -89023,12 +89080,14 @@ only when no gateway runs.
 - Many low-traffic profiles that don't each justify a full process.
 - You want a single thing to start, monitor, and restart.
 
-One-process-per-profile is no longer a supported topology to *choose*: a named
+One-process-per-profile is no longer a topology to *choose* implicitly: a named
 profile's `gateway install` / `gateway start` refuses without `--force` (see
-[No new per-profile gateways](#no-new-per-profile-gateways)). It survives only
-where a real boundary blocks the fold — a fleet split across UNIX users, or a
-`HERMES_HOME` outside `<default home>/profiles/` — and there every profile keeps
-`--force` as its stated path.
+[No new per-profile gateways](#no-new-per-profile-gateways)). A profile that
+still needs its own gateway while a multiplexing gap is open can set the
+temporary `gateway.standalone: true` in its own `config.yaml`; where a real
+boundary blocks the fold — a fleet split across
+UNIX users, or a `HERMES_HOME` outside `<default home>/profiles/` — every
+profile keeps `--force` as its path.
 
 ### Pinning the flag
 
@@ -89061,8 +89120,9 @@ default gateway serves them. See the contract changes below.
 
 ### No new per-profile gateways
 
-Because one host gateway serves every profile, a named profile never gets a
-gateway of its own. `hermes -p coder gateway install` (or `start`, `run`, and
+By default, one host gateway serves every profile, and a named profile does
+not get a gateway of its own. Without the opt-out below,
+`hermes -p coder gateway install` (or `start`, `run`, and
 the service step of `hermes -p coder setup`) refuses with exit 78 whether or not
 a host gateway is running right now:
 
@@ -89083,19 +89143,81 @@ a host gateway is running right now:
 
   A separate per-profile gateway (for a fleet split across UNIX users or a
   HERMES_HOME outside profiles/) needs --force:  hermes -p coder gateway install --force
+
+  Temporary compatibility path while multiplexing gaps are closed: set
+  gateway.standalone: true in profiles/coder/config.yaml,
+  then wait for the host gateway to rescan (<=30s) or send its rescan-profiles control verb.
+  (gateway.standalone is a temporary compatibility shim while multiplexing gaps are fixed;
+  it will be removed once they are — plan to fold this profile with `hermes gateway migrate --multiplex`.)
 ```
 
 When the host gateway is already running and serves the profile, the first
 line reads `The host gateway already serves profile 'coder'.` with the owner's
 PID and served set, and the pointer is `hermes -p default gateway restart`.
 The dashboard's **Start** button for a named profile returns the same refusal.
-`--force` is the one escape: it installs a real per-profile service, and that
-service (its `ExecStart` carries no `--force`) keeps starting normally afterwards.
+
+### Temporary: `gateway.standalone: true`
+
+:::warning Temporary backwards compatibility, not a topology we keep
+Multiplex-only is the direction: one gateway per host serves every profile. The
+switch landed before every gap was closed — per-profile stop/restart, the
+WhatsApp bridge and relay on secondary profiles, and dashboard scoping are the
+open ones — and fleets that relied on per-profile gateways lost them overnight.
+`gateway.standalone: true` exists so those fleets keep working **while those
+gaps are fixed**. It will be removed once they are, with a release-notes notice
+ahead of time; every surface that prints it says so. Do not build new setups on
+it: if you are starting fresh, run the host multiplexer. If a gap blocks you
+today, set the key, and file or upvote the issue for the gap so we can remove
+the shim sooner.
+:::
+
+Set `gateway.standalone: true` in the profile's own `config.yaml`:
+
+```yaml
+# profiles/coder/config.yaml
+gateway:
+  standalone: true
+```
+
+The host gateway then does not serve the profile, and the boot log
+records `profile 'coder' is standalone (gateway.standalone: true); not served
+by this gateway`. `hermes -p coder gateway install|start|run` works without
+`--force`. If the running host still lists the profile in its served set,
+the command refuses until it rescans: wait for the next rescan (at most 30
+seconds under normal operation), or send the `rescan-profiles` control verb
+to the host gateway. No host restart is required.
+
+Removing the key makes the profile eligible for the host again. While the
+profile's own gateway is live, the host skips adding it and logs that it must
+be stopped first. Stop that gateway; the host takes the profile on its next
+rescan.
+
+A standalone profile's adapters, cron, webhook ingress and Kanban
+notifications run only while its own gateway runs, not under the host
+multiplexer or `hermes serve`. Point webhook clients at the standalone
+gateway's own listener; the host's `/p/<profile>/` ingress no longer serves
+it. The cron destination picker still lists standalone profiles as
+`bot-chat:<name>` targets, but the host cannot deliver to those targets.
+
+`hermes -p coder gateway status` prints `standalone by config
+(gateway.standalone: true)` before the profile's own gateway state, and
+`hermes gateway status` (default) lists it as `standalone by config: coder`
+after the served set. `hermes gateway migrate --multiplex` leaves the profile
+alone and prints it as `Standalone by config (gateway.standalone: true), left
+alone`. The WhatsApp bridge and relay run in the profile's own gateway, as in
+any standalone gateway.
+
+`--force` is not the path for this shim; it remains the escape for the two
+boundary cases the refusal names (a fleet split across UNIX users, a
+`HERMES_HOME` outside `profiles/`): it installs a real per-profile service, and
+that service (its `ExecStart` carries no `--force`) keeps starting normally
+afterwards.
 
 ### What changes when multiplexing is on
 
 Multiplexing changes how a few things behave. None of these apply to a profile
-that runs a separate `--force` gateway on a blocked host.
+that opts out with `gateway.standalone: true` or runs a separate `--force`
+gateway on a blocked host.
 
 #### 1. Secondary profiles must not start their own gateway
 
@@ -89136,9 +89258,11 @@ stray unit or plist that could only sit dead. Add the bot token and the running 
 picks it up.
 
 The multiplexer is the single inbound process; a second profile gateway would
-double-bind that profile's platforms. Pass `--force` (accepted by `run`, `start`,
-`install` and `restart`) only if you deliberately want a separate process for that
-profile (not recommended while the multiplexer is running). The cross-profile
+double-bind that profile's platforms. A profile that deliberately wants a
+separate process opts out with `gateway.standalone: true` (see
+[No new per-profile gateways](#no-new-per-profile-gateways)); pass `--force`
+(accepted by `run`, `start`, `install` and `restart`) only where a boundary
+blocks the fold. The cross-profile
 lifecycle wrapper script earlier on this page is therefore **not** used in
 multiplex mode — you only manage the default gateway.
 
@@ -89178,6 +89302,9 @@ no API server is enabled); it serves three kinds of profile-prefixed paths:
   secondary platform, and if **no** profile runs it a WARNING says the platform
   is not being served; `hermes gateway status --profile work` shows
   `whatsapp: not served under multiplex (shared ingress owned by default)`.
+  The one exception is a profile that opted out with `gateway.standalone:
+  true` — it runs its own WhatsApp bridge and relay in its own gateway, as any
+  standalone gateway does.
 
 Authentication follows the profile named in the URL. Unprefixed endpoints keep
 using the default listener's existing credentials.
@@ -89443,10 +89570,14 @@ on the default profile).
 ### Which profiles are served
 
 `gateway.multiplex_profiles: true` serves the default profile plus **every**
-live named profile under `profiles/` — there is no per-profile opt-out list.
+live named profile under `profiles/`, except the ones that opted out with
+`gateway.standalone: true` in their own `config.yaml` — a standalone profile
+runs its own gateway and is not enumerated by the host (see
+[No new per-profile gateways](#no-new-per-profile-gateways)).
 (The former `gateway.multiplex_profile_allowlist` key is retired; a config
-migration removes it from `config.yaml`, and a profile you do not want served is
-archived or deleted instead — `hermes profile delete <name>`, or move the
+migration removes it from `config.yaml`, and a profile you do not want served
+but that has not opted out is archived or deleted instead —
+`hermes profile delete <name>`, or move the
 directory out of `profiles/`.) Deleted profiles leave a tombstone and are never
 enumerated; a profile whose directory is gone is never recreated by a served
 turn, the cron ticker or log routing.
@@ -89842,7 +89973,10 @@ hermes gateway migrate --multiplex             # apply (asks for confirmation on
 
 There is no `--standalone` reverse command: a per-profile fleet is not a
 supported target. A blocked fleet keeps running as it is, and each profile
-keeps `hermes -p <name> gateway install --force` as its stated path.
+keeps `hermes -p <name> gateway install --force` as its path — or opts out of
+the host gateway with `gateway.standalone: true` (see
+[No new per-profile gateways](#no-new-per-profile-gateways)), which
+`hermes gateway migrate --multiplex` respects.
 
 ### What `hermes update` does
 
@@ -89877,8 +90011,9 @@ A standalone secondary behind any of these boundaries stops the automatic path:
 
 In that case `hermes update` prints the boundary it found plus
 `hermes gateway migrate --multiplex`, and changes nothing — no unit is removed
-and the per-profile gateways keep running (`--force` remains their stated
-path). Collapsing such a fleet replaces a
+and the per-profile gateways keep running (`--force` remains their path where
+a boundary like these blocks the fold; a profile free of them opts out with
+`gateway.standalone: true`). Collapsing such a fleet replaces a
 kernel-enforced boundary (file ownership, `User=`) with in-process isolation,
 which is an operator's decision. The explicit command still makes it: the same
 findings appear as **notices** in `hermes gateway migrate --multiplex --dry-run`
@@ -89933,7 +90068,7 @@ Older clones that still carry them are flagged by `hermes profile list`.
 | Blocker | Why | Fix |
 |---|---|---|
 | Two profiles configure the same platform credential (e.g. the same `TELEGRAM_BOT_TOKEN`) | Under one process a bot token can only be polled once; the multiplexer would park the duplicate and that profile's bot would go silent | Remove the token from the second profile, or keep it in `default` and route that profile's chats with [`profile_routes`](#routing-shared-bot-chats-to-profiles-profile_routes) |
-| A secondary profile enables a port-binding platform that has **no** `/p/<profile>/` ingress on the default listener | The multiplexer skips that whole profile (see [rule 2](#2-http-inbound-platforms-are-reached-via-a-pprofile-url-prefix)) | Disable the platform in that profile (`platforms.<name>.enabled: false`), or keep the profile on a standalone gateway with `hermes -p <name> gateway install --force` (a served profile's `install`/`start` refuse without it) |
+| A secondary profile enables a port-binding platform that has **no** `/p/<profile>/` ingress on the default listener | The multiplexer skips that whole profile (see [rule 2](#2-http-inbound-platforms-are-reached-via-a-pprofile-url-prefix)) | Disable the platform in that profile (`platforms.<name>.enabled: false`), or run the profile standalone: set `gateway.standalone: true` in its own `config.yaml` and wait for the host to rescan (at most 30 seconds), or send its `rescan-profiles` control verb. Use `hermes -p <name> gateway install --force` only where a boundary blocks the fold. |
 
 The credential check reuses the gateway's own conflict detection, so its verdict
 matches what the multiplexer does at startup. Which port-binding platforms have
