@@ -7874,11 +7874,13 @@ waiting out openers (a holder that appears mid-way makes SQLite refuse instead
 of racing it), and verifies the file header reports the new mode. It reminds
 you to set `database.journal_mode` to the same value when the config disagrees,
 because the next open re-applies the configured mode. The holder scan is local
-and POSIX-only, so it cannot see a process in another container or VM sharing
-the volume, and on Windows there is no scan at all — the command refuses there
-outright unless you pass `--force` after stopping every Hermes process
-yourself. Enabling WAL is also refused when the store sits on a cross-VM
-filesystem (virtiofs/9p), where WAL shared memory corrupts silently.
+(open-file tables on Linux/macOS, the Restart Manager on Windows), so it
+cannot see a process in another container or VM sharing the volume. If the
+scan itself fails the command refuses because it cannot prove the store is
+quiet; `--force` waives only that case after you have stopped every Hermes
+process yourself — a process the scan does find is always refused. Enabling
+WAL is also refused when the store sits on a cross-VM filesystem (virtiofs/9p),
+where WAL shared memory corrupts silently.
 
 
 ## Importing Sessions from Claude Code and Codex CLI
@@ -13103,7 +13105,7 @@ Beyond viewing, the journey is also where you **prune and correct** what Hermes 
 
 | Command | What it does |
 |---------|--------------|
-| `hermes journey list` | List node ids — skill names and `memory:<source>:<index>` ids for memory chunks. |
+| `hermes journey list` | List node ids — skill names and `memory:<source>:<index>:<fingerprint>` ids for memory chunks (pass one back exactly as printed). |
 | `hermes journey delete <node> [-y]` | Delete a node. Skills are **archived** (restorable), memory chunks are removed. `-y` skips the confirmation. |
 | `hermes journey edit <node>` | Open the node's content (a skill's `SKILL.md` or the memory chunk) in `$EDITOR`. |
 
@@ -16475,10 +16477,15 @@ identically on every tick — and to alert every time. A 429 the model API
 returns mid-run is not held this way; it is retried on the normal cadence.
 
 Instead, the scheduler **parks the job**: the one failure alert says the
-window is closed and that the job is held, `next_run_at` moves to the first
-scheduled occurrence after the window (`quota_hold_until` on the job record),
-and nothing fires or alerts until then. Any run that reaches the model clears
-the hold. One-shot jobs are not held.
+window is closed and that the job is held. If the provider reopens well before
+a **sparse** cron job's next natural occurrence (at least half a schedule
+period early), a blocked scheduled occurrence retries once at that recovery
+boundary; a second quota failure waits for the natural schedule. Dense
+schedules, manual runs and interval jobs retain their natural next run.
+Otherwise, missed occurrences are coalesced and
+`next_run_at` moves to the first scheduled occurrence after the window. The
+parked instant is stored as `quota_hold_until`; nothing fires or alerts before
+it. Any run that reaches the model clears the hold. One-shot jobs are not held.
 
 ### Failure incidents: alert once, remind on a cooldown, acknowledge
 
@@ -26483,6 +26490,8 @@ Telegram is usually a mobile inbox, so the defaults are tuned for that surface:
 - **`busy_ack_detail`** defaults to **`off`** — busy-state acknowledgments and long-running heartbeats stay terse (no `iteration 21/60` debug detail).
 - **`interim_assistant_messages`** stays **on** — real mid-turn assistant commentary (the model literally telling you what it's about to do) is signal, not noise.
 - **`long_running_notifications`** stays **on** — a single edit-in-place "⏳ Working — N min" bubble updates every few minutes so you have a heartbeat instead of staring at `typing…` for half an hour.
+
+These per-platform defaults apply only while the same key is unset directly under `display:`. A global `display.tool_progress`, `display.show_reasoning`, `display.busy_ack_detail`, `display.interim_assistant_messages` or `display.long_running_notifications` applies to every platform and replaces its default. A `config.yaml` copied from an older `cli-config.yaml.example` sets all five globally, and an older first-time `hermes setup` wrote `tool_progress: all`; delete those lines to get the per-platform defaults back.
 
 Opt out of either of the kept-on defaults or opt back into verbose progress per platform:
 
@@ -49124,6 +49133,8 @@ Restore a previously created Hermes backup into your Hermes home directory. All 
 :::warning
 Stop the gateway before importing to avoid conflicts with running processes.
 :::
+
+**Exit status:** `1` when the archive is damaged — before anything is written, every member is decompressed once and its CRC checked; if any fail, the command prints `Error: backup archive is damaged (N member(s) …)` with the offending members and stops with the Hermes home untouched. Also `1` when any file from the archive could not be restored (listed under `Warnings (N files skipped)` and summarised as `Import incomplete: …`). The files that did land stay in place, but a script or the dashboard will not report a partial restore as success. Runtime files the import deliberately keeps from this machine (`gateway.pid`, `gateway_state.json`, …) and the older-backup session warning below do not change the exit status.
 
 ### SQLite databases
 
