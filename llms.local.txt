@@ -2,19 +2,19 @@
 
 > The self-improving AI agent built by Nous Research. A terminal-native autonomous coding and task agent with persistent memory, agent-created skills, and a messaging gateway that lives on 21+ messaging platforms — 19 native to the gateway plus IRC and Microsoft Teams via plugins (Telegram, Discord, Slack, SMS, Matrix, ...). Runs on local, Docker, SSH, Daytona, Modal, or Singularity backends. Works with Nous Portal, OpenRouter, OpenAI, Anthropic, Google, or any OpenAI-compatible endpoint.
 
-Install: `curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash`  (Linux, macOS, WSL2, Termux)
+Install: `curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash`  (Linux, macOS, WSL2)
 
 Repo: https://github.com/NousResearch/hermes-agent
 
 ## Getting Started
 
-- [Installation](./getting-started/installation.md): Install Hermes Agent on Linux, macOS, WSL2, native Windows, or Android via Termux
+- [Installation](./getting-started/installation.md): Install Hermes Agent with desktop bundles, source installers, Docker, Nix, or the Termux APT package
 - [Quickstart](./getting-started/quickstart.md): Your first conversation with Hermes Agent — from install to chatting in under 5 minutes
 - [Learning Path](./getting-started/learning-path.md): Choose your learning path through the Hermes Agent documentation based on your experience level and goals.
 - [Updating](./getting-started/updating.md): How to update Hermes Agent to the latest version or uninstall it
-- [Termux (Android)](./getting-started/termux.md): Run Hermes Agent directly on an Android phone with Termux
 - [Nix Setup](./getting-started/nix-setup.md): Install and deploy Hermes Agent with Nix — from quick `nix run` to fully declarative NixOS module with container mode
 - [Platform Support](./getting-started/platform-support.md): Which operating systems, distribution methods, and features Hermes Agent supports.
+- [Android / Termux](./getting-started/termux.md): Install Hermes Agent on Android from its signed Termux APT repository
 
 ## Using Hermes
 
@@ -45,6 +45,7 @@ Repo: https://github.com/NousResearch/hermes-agent
 - [1Password](./user-guide/secrets/onepassword.md)
 - [Session Storage Recovery](./user-guide/session-storage-recovery.md): What to do when Hermes says another process holds an old copy of the session database's write-ahead log, and what the files beside state.db are
 - [Google Workspace — Gmail, Calendar, Drive, Sheets & Docs](./user-guide/skills/google-workspace.md): Send email, manage calendar events, search Drive, read/write Sheets, and access Docs — all through OAuth2-authenticated Google APIs
+- [Switching to a Source Install](./user-guide/switching-to-source.md): Run a separate source checkout without overwriting packaged files or losing track of user data
 - [Which File Does What?](./user-guide/which-file-does-what.md): SOUL.md vs USER.md vs MEMORY.md vs AGENTS.md — a one-page map of the agent's files, who writes each one, and when the agent actually sees them
 - [Windows (Native) Guide](./user-guide/windows-native.md): Run Hermes Agent natively on Windows 10 / 11 — install, feature matrix, UTF-8 console, Git Bash, gateway as a Scheduled Task, editor handling, PATH, uninstall, and common pitfalls
 - [Windows (WSL2) Guide](./user-guide/windows-wsl-quickstart.md): Run Hermes Agent on Windows via WSL2 — setup, filesystem access between Windows and Linux, networking, and common pitfalls
@@ -226,6 +227,7 @@ Repo: https://github.com/NousResearch/hermes-agent
 - [Gateway Monitoring](./developer-guide/gateway-monitoring.md): Health export, structured diagnostics, fleet queries and how to extend the monitoring plane
 - [Gateway Session Lifecycle](./developer-guide/gateway-session-lifecycle.md): SessionSource, SessionEntry, SessionStore, session-key rules and multi-user isolation in the gateway
 - [Image Generation Provider Plugins](./developer-guide/image-gen-provider-plugin.md): How to build an image-generation backend plugin for Hermes Agent
+- [macOS bundle updates](./developer-guide/macos-bundle-updates.md)
 - [Memory Provider Plugins](./developer-guide/memory-provider-plugin.md): How to build a memory provider plugin for Hermes Agent
 - [Micro-compaction](./developer-guide/micro-compaction.md): How micro-compaction amortizes context compression cost: triggers, tail sizing, the cached-prefix trade-off
 - [Middleware](./developer-guide/middleware.md): Behavior-changing plugin middleware for LLM and tool calls: contract, execution order, examples
@@ -236,10 +238,14 @@ Repo: https://github.com/NousResearch/hermes-agent
 - [Plugin LLM Access](./developer-guide/plugin-llm-access.md): Run any LLM call from inside a plugin via ctx.llm — chat or structured, sync or async. Host-owned auth, fail-closed trust gate, optional JSON Schema validation.
 - [Build a Hermes Plugin](./developer-guide/plugins.md): Step-by-step guide to building a complete Hermes plugin with tools, hooks, data files, and skills
 - [Application declarations](./developer-guide/plugins/application-declarations.md)
+- [PM audit remediation status](./developer-guide/pm-audit-status.md)
 - [Programmatic Integration](./developer-guide/programmatic-integration.md): Three protocols for driving hermes-agent from external programs: ACP, the TUI gateway JSON-RPC, and the OpenAI-compatible HTTP API
 - [Relay ↔ Connector Contract](./developer-guide/relay-connector-contract.md): Wire contract between the Hermes gateway relay adapter and external connectors (experimental)
 - [Relay Shared Metrics](./developer-guide/relay-shared-metrics.md): NeMo Relay shared metrics: what is exported, consent and retention, staging validation
 - [Secret Source Plugins](./developer-guide/secret-source-plugin.md): How to build a secret-manager backend plugin for Hermes Agent
+- [Shared bundle builds](./developer-guide/shared-bundle-builds.md)
+- [Source update completion ownership](./developer-guide/source-update-completion.md)
+- [Stable release admission and promotion](./developer-guide/stable-releases.md)
 - [State DB Recovery](./developer-guide/state-db-recovery.md): How Hermes recovers state.db when the FTS index or the file itself is corrupt
 - [Streaming TTS Internals](./developer-guide/streaming-tts.md): Sentence chunker, streaming provider ABC, capability matrix and how to add a streaming TTS provider
 - [Public Subagent Lifecycle API](./developer-guide/subagent-lifecycle-api.md)
@@ -265,6 +271,7 @@ Repo: https://github.com/NousResearch/hermes-agent
 - [FAQ & Troubleshooting](./reference/faq.md): Frequently asked questions and solutions to common issues with Hermes Agent
 - [Automation Blueprints Catalog](./reference/automation-blueprints-catalog.md): Ready-to-run automation blueprints — set one up from the dashboard, CLI, TUI, any messenger, or the desktop app.
 - [CLI Symbols Glossary](./reference/cli-symbols.md): What every symbol in the Hermes terminal UI means — transcript markers, status-bar badges, overlay glyphs, and approval prompts.
+- [Package Management](./reference/package-management.md): PM tool pins, Python environments, optional dependencies, and installation ownership
 
 ## More
 
