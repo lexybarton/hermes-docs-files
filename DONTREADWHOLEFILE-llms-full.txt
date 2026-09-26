@@ -11321,6 +11321,52 @@ See also:
 - [Bundled Skills Catalog](../../reference/skills-catalog.md)
 - [Official Optional Skills Catalog](../../reference/optional-skills-catalog.md)
 
+## Browse and install in Desktop
+
+Open **Capabilities → Skills** and switch between **Installed** and **Browse**.
+Search stays at the top; the tab switch and actions share one row.
+**Installed** reads the selected profile's actual skills and enabled state;
+it is not inferred from the public catalog. **Browse** is a native catalog UI,
+not an embedded website or a second, smaller catalog.
+
+Desktop and the public [Skills Hub](/skills) read the same published CDN
+snapshot: [`/docs/api/skills.json`](https://hermes-agent.nousresearch.com/docs/api/skills.json).
+The public docs alias serves the same snapshot as Desktop's fetch URL,
+`https://nousresearch.github.io/hermes-agent/docs/api/skills.json`. The docs
+build generates it from bundled `skills/`, `optional-skills/`, and the
+centralized skills index. Browsing does not crawl GitHub or query upstream
+marketplaces live; installation still retrieves the selected skill through
+its source's installer.
+
+### Install from the website
+
+The Skills Hub has an **Install in Hermes** button on each installable card. It opens the
+installed Hermes Desktop app with a URL-encoded, source-qualified skill target:
+for example, `official/...` for optional skills or `clawhub/...` for ClawHub.
+Bundled skills use an explicit repository path rather than an ambiguous bare
+name. When an older snapshot lacks that explicit bundled target, the website
+omits its install link and native Browse disables installation rather than
+resolving an ambiguous name. The next docs publish supplies those targets.
+The same target is used by native Browse and the card's CLI fallback:
+
+```text
+hermes://skill/install?identifier=official%2Fsecurity%2F1password
+```
+
+Hermes shows **Install “skill-name”?** with separate **Source** and **Install to**
+rows. Cancel makes no changes. After confirmation, the same dialog shows
+**Installing…**, then **Installed** and a completion notification. Errors stay
+in the dialog so you can read them and retry. Installation uses the existing
+Skills Hub pipeline, including security scanning, action logs, and installed-list
+refresh. If you switch profile or connection while the confirmation is open,
+reopen the link for the new destination. Changes apply to
+new sessions; a link cannot bypass scanning or select a different profile.
+
+The public links use `hermes://`, not the development-only `hermes-dev://`
+scheme. The `skill/install` route requires an updated Desktop build. If the
+app is missing or the link is not recognized, update Desktop or expand the
+card to copy its CLI install command instead.
+
 ## Starting with a blank slate
 
 By default every profile is seeded with the bundled skill catalog, and each `hermes update` adds any newly bundled skills. If you want a profile with **no bundled skills** — and that stays empty across updates — you have two paths:
@@ -14943,10 +14989,11 @@ plugin; choose a new exact commit explicitly with
 profile-local install metadata contains no config values, environment values,
 secrets, or capability grants.
 
-The same pin is available in Hermes Desktop: **Skills → Plugins → Install from
-Git** has a *Pin to commit* field that takes the full 40-character SHA, and the
-plugins list shows a `pinned @ <sha8>` badge on every pinned install so a team
-can confirm everyone is running the same commit. `hermes plugins list` prints
+The same agent-plugin pin is available in Hermes Desktop: **Capabilities →
+Plugins → Install from Git** has a *Pin to commit* field that takes the full
+40-character SHA, and **Installed** shows a `pinned @ <sha8>` badge on pinned
+agent plugins. This does not guarantee a pinned standalone desktop-plugin
+install. `hermes plugins list` prints
 the pin in its Source column (`git pinned@<sha8>`). Pins work for private
 repositories too, through the same stored credentials described below.
 
@@ -15192,6 +15239,25 @@ Ordinary Hermes application updates preserve user plugin directories, including
 wrapper files and external sidecar links. Explicit plugin updates or removals
 can change those files. See [Package management](../../reference/package-management.md)
 and the [plugin authoring guide](../../developer-guide/plugins/index.md#lazy-install-optional-python-dependencies).
+
+### Installed and Browse in Desktop
+
+Open **Capabilities → Plugins**. **Installed** reads the app's desktop-plugin
+registry and the selected profile's actual agent-plugin state, combining both
+halves in one row where appropriate. It is not a list of catalog entries
+assumed to be installed. **Browse** is a native catalog view, not an embedded
+website; it uses the same **Installed / Browse** tabs as Skills, with search
+at the top and the tab switch and actions on one row.
+
+Desktop and the public [Plugin Catalog](/plugins) consume the same CDN
+snapshot, [`/docs/api/plugins.json`](https://hermes-agent.nousresearch.com/docs/api/plugins.json).
+The public alias serves the same data as Desktop's fetch URL,
+`https://nousresearch.github.io/hermes-agent/docs/api/plugins.json`. The docs
+build generates it from `plugin-catalog/*.yaml` and cached star counts. The
+same publish also supplies the removed-entry list used by the installer.
+Browsing does not query GitHub live or fetch source repos;
+the installer retrieves code only as part of the separate install flow.
+
 ### One-click install links (Desktop)
 
 Hermes Desktop registers the `hermes://` URL scheme, so a website, README, or
@@ -15202,18 +15268,22 @@ hermes://plugin/install?catalog=NAME               # catalog entry, installs the
 hermes://plugin/install?repo=owner/repo            # any git repo
 hermes://plugin/install?repo=owner/repo&enable=1   # enable the agent plugin after install
 hermes://plugin/install?repo=owner/repo&force=1    # replace an existing install
-hermes://plugin/install?catalog=<name>             # reviewed catalog entry at its pinned commit
 ```
 
 The `catalog=<name>` form is what the **Open in Hermes Desktop** button on
 every [Plugin Catalog](./plugin-catalog.md) card uses. Desktop resolves the
-name against the live catalog (the same feed the **Capabilities → Plugins**
-picker shows) and opens the same **reviewed catalog entry** dialog an in-app
+name against the live catalog (the same feed **Capabilities → Plugins → Browse**
+shows) and opens the same **reviewed catalog entry** dialog an in-app
 pick does: the agent half installs at the catalog's pinned commit, never the
 branch tip. The link carries no repo URL, and a name that is not in the
 catalog shows an error toast and nothing else — it is never reinterpreted as a
 git path, so a link cannot smuggle an unreviewed repo behind a
 familiar-looking name.
+
+Use an updated Desktop build for catalog links and the Skills Hub's
+`hermes://skill/install?identifier=...` route. If the app is missing or too old,
+use the card's copyable `hermes plugins install <catalog-name>` command to
+retain catalog resolution.
 
 For a `repo=` link, clicking one opens Hermes and shows a **confirmation dialog** — the repo id,
 a "Before you install" note, and GitHub browse + clone links — then
@@ -15542,7 +15612,7 @@ Plugins
      Context Engine           ▸ compressor
 ```
 
-- **General Plugins section** — checkboxes, toggle with SPACE. Checked = in `plugins.enabled`, unchecked = in `plugins.disabled` (explicit off).
+- **General Plugins section** — checkboxes, toggle with SPACE. A row opens checked when the plugin is active right now: listed in `plugins.enabled`, or a bundled platform, backend or model provider (on without a list entry), or the selected provider of a category. Only rows you flip are written on exit: unticking adds the plugin to `plugins.disabled` (explicit off), ticking adds it to `plugins.enabled` and clears a stale disable. Opening the picker and leaving changes nothing.
 - **Provider Plugins section** — shows current selection. Press ENTER to drill into a radio picker where you choose one active provider.
 - Bundled plugins appear in the same list with a `[bundled]` tag.
 
@@ -18966,7 +19036,7 @@ All routes are mounted under `/api/plugins/kanban/` and protected by the dashboa
 | `DELETE` | `/links?parent_id=…&child_id=…` | Remove a dependency |
 | `POST` | `/dispatch?max=…&dry_run=…` | Nudge the dispatcher — skip the 60 s wait |
 | `GET` | `/config` | Read `dashboard.kanban` preferences from `config.yaml` — `default_tenant`, `lane_by_profile`, `include_archived_by_default`, `render_markdown` |
-| `WS` | `/events?since=<event_id>` | Live stream of `task_events` rows |
+| `WS` | `/events?since=<event_id>` | Live stream of `task_events` rows. Without `since` the stream starts at the board's current tail (the `/board` snapshot already holds the past); pass `since=<latest_event_id>` to catch up from there, or `since=0` to replay history |
 
 Every handler is a thin wrapper — the plugin is ~700 lines of Python (router + WebSocket tail + bulk batcher + config reader) and adds no new business logic. A tiny `_conn()` helper auto-initializes `kanban.db` on every read and write, so a fresh install works whether the user opened the dashboard first, hit the REST API directly, or ran `hermes kanban init`.
 
@@ -37377,7 +37447,7 @@ External UIs can manage Hermes sessions over REST without standing up the dashbo
 | `GET` | `/api/sessions/{id}/messages` | Message history for a session |
 | `POST` | `/api/sessions/{id}/fork` | Branch the session via `SessionDB` lineage (matches CLI `/branch` semantics) |
 | `POST` | `/api/sessions/{id}/chat` | Run one synchronous agent turn |
-| `POST` | `/api/sessions/{id}/chat/stream` | SSE wrapper over a single turn — emits `assistant.delta`, `assistant.commentary` (mid-turn commentary: `message_id`, `text`, `already_streamed`; never folded into `assistant.completed`), `tool.started`, `tool.completed`, then a terminal `run.completed` / `run.failed` / `run.cancelled` event that matches how the turn ended (see [Terminal run status](../../developer-guide/programmatic-integration.md#terminal-run-status)) |
+| `POST` | `/api/sessions/{id}/chat/stream` | SSE wrapper over a single turn — emits `assistant.delta`, `assistant.commentary` (mid-turn commentary: `message_id`, `text`, `already_streamed`; never folded into `assistant.completed`), `tool.started`, `tool.completed`, `tool.failed` (a tool that finished with an error), then a terminal `run.completed` / `run.failed` / `run.cancelled` event that matches how the turn ended (see [Terminal run status](../../developer-guide/programmatic-integration.md#terminal-run-status)) |
 
 `/v1/capabilities` advertises the full surface via `session_*` feature flags and `endpoints.session_*` entries so external UIs can detect support and fall back safely. Inline images are supported in `chat` and `chat/stream` payloads (multimodal-aware path).
 
@@ -67449,6 +67519,11 @@ The desktop workflow takes a `jobs` input with the groups `darwin-arm64`,
 groups, which wait for a real Linux build. Each Mac arch and the Windows bundle
 stage a receipt, and each install arm starts from its own receipt as soon as
 its own bytes are staged. `acceptance` is the one join that blocks publication.
+
+Every gate and every candidate starts straight after `admit`. CI is a gate that
+`acceptance` requires, not a lock the signed builds wait behind, so a slow gate
+cannot delay a bundle; the price is that a broken `main` still pays for signed
+candidates that `acceptance` then refuses.
 The `smoke-win32-universal` job is gone; the per-arch MSIX smokes cover each
 arch, and the Windows install arms install the `.msixbundle` on both arches.
 
@@ -76731,12 +76806,38 @@ When you have two or more [profiles](./profiles.md), the config-backed settings 
 
 The app also surfaces the broader Hermes management surface so you don't have to drop to a terminal:
 
-- **Skills** — browse, install, and manage [skills](./features/skills.md). The Skills tab lists your installed skills with enable/disable toggles, and below them the full built-in optional-skills catalog that ships with Hermes — each entry has a one-click **Install** button that flips the row into the installed list once it finishes.
+- **Skills** — open **Capabilities → Skills** to manage [skills](./features/skills.md). **Installed** shows the selected profile's actual skills and enable/disable state. **Browse** searches the same full published catalog as the public Skills Hub, with native cards and details.
+- **Plugins** — **Capabilities → Plugins** uses the same **Installed / Browse** layout. Installed combines actual app-level desktop plugins with agent plugins from the selected profile; Browse shows the public [Plugin Catalog](./features/plugin-catalog.md). Search stays at the top, and the tab switch and actions share one row on both pages.
 - **Memory graph (Star Map)** — type `/journey` (aliases `/learning`, `/memory-graph`) in chat to open an interactive constellation of learned skills and memories over time, with a playback scrubber. Nodes can be edited or deleted right from the panel (skills are archived, memories removed). See [Learning Journey](./features/memory.md#learning-journey-journey).
 - **Cron** — view and manage [scheduled jobs](../reference/cli-commands.md#hermes-cron). With **All profiles** on, the list aggregates every profile's jobs; a job's run history and actions (pause, resume, edit, delete) always go to the profile that owns the job, whichever profile is active.
 - **Profiles** — switch between [Hermes profiles](./profiles.md) (isolated config/skills/sessions).
 - **Messaging** — set up gateway channels. Telegram has a **Quick setup** card: click **Create with QR**, scan the code (or open the link) in Telegram, and Hermes creates the bot, detects your user ID for the allowlist, saves the credentials, and restarts the gateway for you. Any credential save, clear, or enable toggle keeps a **Restart now** banner on the page until the gateway has actually restarted; if a restart fails, the banner stays so you can retry or restart manually.
 - **Agents** and **Command Center** — orchestration surfaces for multi-agent work.
+
+#### Where Browse gets its data
+
+These are native Desktop views, **not embedded website pages**. Desktop and
+the public website consume the same generated CDN snapshots:
+
+| Catalog | Public docs alias | Desktop fetch URL |
+|---|---|---|
+| Skills | [`/docs/api/skills.json`](https://hermes-agent.nousresearch.com/docs/api/skills.json) | `https://nousresearch.github.io/hermes-agent/docs/api/skills.json` |
+| Plugins | [`/docs/api/plugins.json`](https://hermes-agent.nousresearch.com/docs/api/plugins.json) | `https://nousresearch.github.io/hermes-agent/docs/api/plugins.json` |
+
+The skills snapshot combines `skills/`, `optional-skills/`, and the centralized
+skills index. The plugin snapshot comes from `plugin-catalog/*.yaml` and cached star
+counts; the same publish supplies the installer's removed-entry list. Browsing does not make live
+GitHub API calls or fetch plugin/skill source repositories. **Installed** is
+separate: its state comes from the selected profile's backend and the app's
+desktop-plugin registry, not those public snapshots.
+
+The public hubs' install buttons open `hermes://skill/install?identifier=...`
+or `hermes://plugin/install?catalog=...` links and require confirmation in Desktop.
+Use an updated Desktop build for these routes; the cards retain copyable CLI
+commands if the app is missing or too old. See
+[skill links](./features/skills.md#install-from-the-website) and
+[plugin links](./features/plugins.md#one-click-install-links-desktop) for the
+parameters and review flow.
 
 ### Bot Mode (built in)
 
@@ -76999,25 +77100,25 @@ SHA-pinned) plus an import allowlist — not isolation. A plugin whose
 row; **⌘K → Reload desktop plugins** re-reads every installed `plugin.js`,
 including one an installer replaced in place.
 
-**Capabilities → Plugins** is the one place for everything that extends
-Hermes: **one row per plugin**, with two switch columns.
+**Capabilities → Plugins → Installed** shows the actual installed state:
+**one list entry per plugin**, with Desktop and Agent controls in its detail pane.
 
 - A plugin can extend **this app**, **the agent**, or **both** — the badge on
   each row says which, inferred from what the package contains (`plugin.yaml`
   → agent half, `plugin.js` → desktop half). A plugin with both halves is one
   row, never two.
-- **Desktop column** — the half loaded into this app. It is app-level: the
+- **Desktop control** — the half loaded into this app. It is app-level: the
   same switch, the same value, whichever profile, gateway, or remote machine
   the window is looking at. Desktop code loads from exactly one place,
   `~/.hermes/desktop-plugins/`; the desktop half of a unified agent+desktop
   package is copied there by the app when the package is installed (and
   follows its updates and uninstall), so switching profiles never loads,
   unloads, or re-scopes a pane. Toggles apply live.
-- **Agent column** — the half installed in the selected profile's backend
+- **Agent control** — the half installed in the selected profile's backend
   ([agent plugins](./features/plugins.md): user, git, project, pip and
   portable installs), with an **Update** chip when a catalog pin moved. The
-  profile selector lives in this column's header because it governs only
-  this column; with a single profile there is no selector at all.
+  profile selector governs only the agent half; with a single profile there
+  is no selector at all.
   Repo-bundled built-ins (platform adapters, provider plugins) are not
   listed: they ship enabled and are configured from their own surfaces. The
   exceptions are the bundled lifecycle plugins with no surface of their own
@@ -77042,13 +77143,14 @@ Hermes: **one row per plugin**, with two switch columns.
   button; confirming deletes that folder on this computer and unloads the
   plugin immediately, no gateway involved.
 
-Discovery sits underneath: the live [Plugin Catalog](./features/plugin-catalog.md)
-picker installs reviewed entries at their pinned commit into the selected
-profile, and **Install from Git** takes any other repository through the same
-review-then-install dialog; its optional **Pin to commit** field installs one
-exact 40-character commit SHA (private repos included), and pinned plugins
-carry a `pinned @ <sha8>` badge in the list. Old `Settings → Plugins` links
-redirect here.
+Switch to **Browse** for the native [Plugin Catalog](./features/plugin-catalog.md).
+Both Browse and **Install from Git** open the review-then-install dialog. For
+an agent-plugin catalog install, the backend resolves the catalog name to its
+reviewed pin. Website links carry only that name; Desktop looks up the reviewed
+repository and commit rather than trusting metadata supplied by a link.
+**Install from Git** also offers **Pin to commit** for agent-plugin installs
+(a full 40-character SHA, including private repositories); pinned agent plugins
+show a `pinned @ <sha8>` badge. Old `Settings → Plugins` links redirect here.
 
 ## Troubleshooting
 
@@ -82149,7 +82251,7 @@ hermes plugins install <name>
 Browse it visually at **[/docs/plugins](/plugins)** — entries are shelved by
 category (Memory, Desktop, Platforms, Web & Browser, Tools, Voice, Automation,
 Models), with search, tier filters (Official / Community), capability chips, and
-copyable install commands for every entry.
+**Open in Hermes Desktop** buttons and copyable CLI commands for every entry.
 
 Every entry also has its own page at `/docs/plugins/<name>` (click a card):
 the full description and any disclosure, the pinned commit, tools, hooks and
@@ -82159,6 +82261,12 @@ author** shelf. Authors have a page at `/docs/plugins/by/<maintainer>` listing
 everything they maintain in the catalog. Both are generated at build time from
 the same catalog files, so a merged PR is the only way a page changes.
 
+In Desktop, open **Capabilities → Plugins → Browse** for the native catalog
+view. It is not an embedded website. **Installed** is a separate tab backed
+by the app's desktop-plugin registry and the selected profile's agent-plugin
+state, rather than catalog metadata. Skills uses the same **Installed / Browse**
+layout; search stays at the top and the tab switch and actions share one row.
+
 The catalog complements — it does not replace — the existing
 [plugin system](plugins.md). Anything you can install from the catalog is a
 normal plugin under the hood; the catalog just adds discovery and a review
@@ -82167,6 +82275,20 @@ layer on top.
 During desktop onboarding, the setup guide can also offer catalog plugins and skills through an
 approval card. Each row installs into your `default` profile only when you click Install, at the
 same reviewed commit this page describes.
+
+### Published browse data
+
+The website and Desktop read the same generated CDN snapshot:
+[`https://hermes-agent.nousresearch.com/docs/api/plugins.json`](https://hermes-agent.nousresearch.com/docs/api/plugins.json).
+Desktop fetches it through
+`https://nousresearch.github.io/hermes-agent/docs/api/plugins.json`; the public
+docs alias serves the same data. The docs build reads `plugin-catalog/*.yaml`
+and adds cached repository star counts. It also publishes the installer's
+removed-entry list. Neither Browse view crawls source repositories or queries
+the GitHub API live.
+
+This browse snapshot is distinct from the installer's
+[`plugin-catalog.json`](#live-refresh), which resolves catalog names and pins.
 
 ## What's in an entry
 
@@ -82250,6 +82372,22 @@ repository. Review the code of anything you give credentials to.
 :::
 
 ## Installing from the catalog
+
+On the website, **Open in Hermes Desktop** opens a protocol link of this form:
+
+```text
+hermes://plugin/install?catalog=example-plugin
+```
+
+Desktop resolves the name against the published catalog and asks you to review
+the source, destination and components before confirming. The link does not
+auto-install or supply its own repository or commit. An unknown name or failed
+lookup shows an error; it never falls back to a repository install. For the
+agent-plugin component, the backend resolves the catalog name to its reviewed pin.
+
+Use an updated Desktop build for catalog links and the Skills Hub's
+`hermes://skill/install?identifier=...` route. The cards retain CLI commands,
+so you can install by catalog name without Desktop:
 
 ```bash
 # Install a reviewed catalog entry by name (checks out the pinned SHA)
