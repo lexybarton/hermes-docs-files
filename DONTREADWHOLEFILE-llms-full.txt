@@ -4512,7 +4512,7 @@ The value is the **first rung** of an escalating ladder, not a fixed interval: c
 
 `idle_compact_after_seconds` is an **opt-in, time-based** trigger that complements the size-based `threshold`. Default `0` (disabled). When set above 0, a session that resumes after at least that many seconds of inactivity compacts its accumulated history up front, before the first reply — so a long-lived thread (e.g. a Telegram conversation you come back to hours later) doesn't re-read its full stale context on every subsequent turn. It never fires when the context is already at or below the post-compression target (`threshold × target_ratio`), and it honors the same failure-cooldown, anti-thrash, and per-session lock guards as every automatic compaction. Example: `idle_compact_after_seconds: 1800` compacts after 30 minutes idle.
 
-`proactive_prune_tokens` enables a deterministic, no-LLM prune of old tool-result payloads that runs independently of `threshold`. On large-window models the `threshold` compaction (≈50% of the window) rarely fires, so bulky tool outputs (terminal dumps, file reads, web extracts) ride along in history and get re-sent on every subsequent turn. When re-sent history exceeds `proactive_prune_tokens` (default `0` = off; try `48000` to enable), the prune dedupes identical results, summarizes older oversized ones, and truncates large tool-call arguments — protecting the most recent `protect_last_n` messages and never calling the model. That protection is not absolute: every compaction also runs a *pressure* pass that demotes tool results and truncates tool-call arguments **inside** the protected tail when the tail alone exceeds 1.5× its token budget (it is not gated on `proactive_prune_tokens`). Both passes rewrite only the history copy the model re-reads — a tool call is executed from the provider's live response, never from history, so an already-dispatched call's arguments are never altered by either pass. Full outputs stay recoverable from the session store. `proactive_prune_min_result_chars` (default `8000`, clamped to ≥ 200) sets the size below which a tool result is left untouched. `proactive_prune_min_reclaim_tokens` (default `4096`) prevents a prune from committing unless it reclaims at least that many tokens — a committed prune rewrites already-sent history and invalidates the provider's prompt-cache prefix, so this gate keeps those cache breaks episodic and amortized (one meaningful break, like a compression boundary) instead of firing on every tool iteration. This runs only under the built-in `compressor` engine; other context engines inherit a no-op.
+`proactive_prune_tokens` enables a deterministic, no-LLM prune of old tool-result payloads that runs independently of `threshold`. On large-window models the `threshold` compaction (≈50% of the window) rarely fires, so bulky tool outputs (terminal dumps, file reads, web extracts) ride along in history and get re-sent on every subsequent turn. When re-sent history exceeds `proactive_prune_tokens` (default `0` = off; try `48000` to enable), the prune dedupes identical results and summarizes older oversized tool results, protecting the most recent `protect_last_n` messages and never calling the model. Tool-call arguments are execution records and are never rewritten by pruning; the summary model has a separate bounded serializer for copies included in its prompt. The pressure pass likewise demotes tool-result bodies only. During full semantic compaction the carried head/tail rows keep those tool-result demotions (so an oversized tail can still compress), while tool-call arguments stay byte-exact. The opt-in proactive prune still commits eligible tool-result-body demotions, so `proactive_prune_min_reclaim_tokens` (default `4096`) keeps those cache-breaking commits episodic; `proactive_prune_min_result_chars` (default `8000`, clamped to ≥ 200) sets the size below which a tool result is left untouched. This runs only under the built-in `compressor` engine; other context engines inherit a no-op.
 
 :::tip Gateway hot-reload of compression and context length
 As of recent releases, editing `model.context_length` or any `compression.*` key in `config.yaml` on a running gateway takes effect on the next message — no gateway restart, no `/reset`, no session rotation required. The cached-agent signature includes these keys, so the gateway transparently rebuilds the agent when it sees a change. API keys and tool/skill config still require the usual reload paths.
@@ -7447,6 +7447,8 @@ hermes sessions delete 20250305_091523_a1b2c3d4 --yes
 ```
 
 Deleting a session that is still open in a running chat does not stop that chat: its next save recreates the session under the same id with the full in-memory transcript. Close the chat first if you want the session gone.
+
+Deleting a session while a turn is actively executing or compressing is refused (exits with code 1) to prevent transcript loss under the live agent. Wait for the active turn or compression to complete before deleting.
 
 ### Rename a Session
 
@@ -18453,7 +18455,9 @@ In the Desktop app the board switcher sits in the header row at the top of
 the Kanban page, beside the page title: a **Board** control showing the current board's
 name and task count, with a chevron — hover it for "Switch board". Click
 it to pick another board, or to rename, configure, export, import,
-create, or archive boards. Like the dashboard, the desktop keeps its own
+create, or archive boards. When Kanban is open in a split tile, the same
+**Board** control sits in the board's own header row, after the task count.
+Like the dashboard, the desktop keeps its own
 selection (persisted locally) and does not move the CLI's `current`
 pointer.
 
@@ -44821,7 +44825,8 @@ information across multiple compactions — items move from "In Progress" to "Do
 new progress is added, and obsolete information is removed.
 
 The `_previous_summary` field on the compressor instance stores the last summary
-text for this purpose.
+text for this purpose. A deterministic fallback summary is stored there too, since
+it is the handoff the transcript now carries.
 
 
 ## Before/After Example
@@ -56711,7 +56716,7 @@ Import the area constants from the SDK; each area has its own `data` payload.
 | Sidebar nav | `SIDEBAR_NAV_AREA` | `data: { path, label, codicon }` |
 | Status bar | `STATUSBAR_AREAS.left` / `.right` | `render` (or `data` as `StatusbarItem`) |
 | Title bar | `TITLEBAR_AREAS.left` / `.center` / `.right` | `data` as `TitlebarTool`, or a mount-scoped `<Contribute>` |
-| Page header | `WORKSPACE_PAGE_HEADER_AREA` | `render` via a mount-scoped `<Contribute>` inside your page |
+| Page header | `WORKSPACE_PAGE_HEADER_AREA` | `<WorkspacePageHeaderControl>` inside your page (inline in a split tile) |
 | ⌘K palette | `PALETTE_AREA` | `data: PaletteContribution` |
 | Keybind | `KEYBINDS_AREA` | `data: KeybindContribution` |
 | Theme | `THEMES_AREA` | `data` as a `DesktopTheme` |
@@ -56813,8 +56818,12 @@ mid-navigation.
 
 Controls that belong to ONE page (the Kanban board switcher) go in
 `WORKSPACE_PAGE_HEADER_AREA` instead: it renders in the workspace panel's
-tab-header row while that page is on screen and is empty otherwise. Register it
-with a mount-scoped `<Contribute>` (below) so it leaves with the page.
+tab-header row while that page is on screen and is empty otherwise. Wrap the
+control in `<WorkspacePageHeaderControl>` (below) inside your page's own header
+row. In the workspace pane it projects into the page header; when the page is
+opened in a split route tile, which has no page header, it renders inline where
+you placed it. A raw `<Contribute area={WORKSPACE_PAGE_HEADER_AREA}>` only
+shows up in the workspace pane.
 
 ### Palette commands and keybinds
 
@@ -57294,6 +57303,27 @@ jsx(Contribute, {
 ```
 
 It registers on mount and disposes on unmount automatically.
+
+For a page-header control, use `WorkspacePageHeaderControl` instead. It picks
+the placement from where the page renders: in the workspace pane it
+contributes to `WORKSPACE_PAGE_HEADER_AREA`, and anywhere else (a split route
+tile) it renders its children in place. Put it where the control should sit
+when inline:
+
+```javascript
+import { WorkspacePageHeaderControl } from '@hermes/plugin-sdk'
+
+jsx(WorkspacePageHeaderControl, {
+  id: 'my-page:switcher', // namespace with your slug
+  children: jsx(MySwitcher, {})
+})
+```
+
+`WorkspacePageHeaderControl` is new in this release. Older desktop builds don't
+export it, and a named import of a missing SDK export stops the plugin module
+from loading. A plugin that must also run on older builds either feature-detects
+through a namespace import (`import * as sdk from '@hermes/plugin-sdk'`, then
+`sdk.WorkspacePageHeaderControl ?? …`) or keeps the raw `Contribute` form above.
 
 ### Sidebar nav visibility and order (`SIDEBAR_NAV_PREFS_AREA`)
 
@@ -58033,10 +58063,10 @@ pipeline as a trust boundary.
 | Plugin contract | `HermesPlugin`, `PluginContext`, `PluginContribution`, `PluginStorage`, `PluginOs`, `PluginRestOptions`, `PluginNativeNotificationInput`, `PluginNotificationAction`, `HermesOpenTarget`, `Contribution` |
 | Area constants | `PANES_AREA`, `ROUTES_AREA`, `SIDEBAR_NAV_AREA`, `STATUSBAR_AREAS`, `TITLEBAR_AREAS`, `WORKSPACE_PAGE_HEADER_AREA`, `PALETTE_AREA`, `KEYBINDS_AREA`, `THEMES_AREA`, `COMPOSER_AREAS`, `SESSION_ROW_AREAS`, `SIDEBAR_NAV_PREFS_AREA`, `APPEARANCE_AREAS` |
 | Area payloads | `RouteContribution`, `SidebarNavContribution`, `StatusbarItem`, `TitlebarTool`, `PaletteContribution`, `KeybindContribution`, `ComposerMiddleware`, `ComposerAttachmentProvider`, `SessionRowSlotContribution`, `SidebarNavPrefsContribution` |
-| React / state | `useValue`, `atom`, `computed`, `useQuery`, `useMutation`, `useQueryClient`, `queryClient`, `Contribute` |
+| React / state | `useValue`, `atom`, `computed`, `useQuery`, `useMutation`, `useQueryClient`, `queryClient`, `Contribute`, `WorkspacePageHeaderControl` |
 | Theming | `useTheme`, `requestTheme`, `setAccentOverride`, `$accentOverride`, `retintTheme`, `themeHue`, `DesktopTheme`, `DesktopThemeColors`, plus OKLCH math (`hexToOklch`, `oklchToHex`, `oklchToSrgb255`, `mixOklab`, `maxChroma`, `hueDelta`, `normalizeHex`) and sRGB measures (`contrastRatio` — `number | null`, null for unparseable input — `readableOn`) |
 | UI kit | `Button`, `Input`, `Textarea`, `Select*`, `Switch`, `Checkbox`, `SegmentedControl`, `Tabs*`, `Dialog*`, `ConfirmDialog`, `DropdownMenu*`, `ContextMenu*`, `Popover*`, `Tip`/`Tooltip*`, `Badge`, `Kbd`/`KbdGroup`, `SearchField`, `ScrollArea`, `Separator`, `Skeleton`, `GlyphSpinner`, `Loader`, `EmptyState`, `ErrorState`, `CopyButton`, `StatusDot`, `LogView`, `Codicon`, `DecodeText`, `SandboxedFrame` |
-| Helpers | `cn`, `icons`, `haptic`, `useI18n`, `profileColor`, `profileColorSoft`, `relativeTime`, `fmtDateTime`, `fmtDayTime`, `coarseElapsed`, `evaluateRuntimeReadiness` |
+| Helpers | `cn`, `icons`, `haptic`, `useI18n`, `profileColor`, `profileColorSoft`, `relativeTime`, `fmtDateTime`, `fmtDayTime`, `coarseElapsed`, `evaluateRuntimeReadiness`, `catalogProviderMatches` |
 
 The canonical, always-current export list is `apps/desktop/src/sdk/index.ts`.
 
@@ -84850,7 +84880,7 @@ Full-text search across message content. Query parameter: `q`. Returns matching 
 
 ### DELETE /api/sessions/\{session_id\}
 
-Deletes a session and its message history.
+Deletes a session and its message history. Returns `409 Conflict` if the session has an active turn lease or compression lock.
 
 ### GET /api/logs
 
@@ -90145,7 +90175,7 @@ SIMPLEX_HOME_CHANNEL=<contact-id>
 | Variable | Required | Description |
 |---|---|---|
 | `SIMPLEX_WS_URL` | Yes | WebSocket URL of the simplex-chat daemon |
-| `SIMPLEX_ALLOWED_USERS` | Recommended | Comma-separated allowlist. Each entry can be a numeric `contactId` **or** a display name — both forms work. |
+| `SIMPLEX_ALLOWED_USERS` | Recommended | Comma-separated allowlist of numeric `contactId`s. Display names are **not** accepted — any contact can change theirs. |
 | `SIMPLEX_ALLOW_ALL_USERS` | Optional | Set `true` to allow every contact (use carefully) |
 | `SIMPLEX_AUTO_ACCEPT` | Optional | Auto-accept incoming contact requests (default: `true`) |
 | `SIMPLEX_GROUP_ALLOWED` | Optional | Comma-separated group IDs the bot participates in, or `*` for any group. Omit to ignore group messages entirely |
@@ -90153,15 +90183,15 @@ SIMPLEX_HOME_CHANNEL=<contact-id>
 | `SIMPLEX_HOME_CHANNEL_NAME` | Optional | Human label for the home channel |
 | `HERMES_SIMPLEX_TEXT_BATCH_DELAY` | Optional | Quiet-period seconds (default: `0.8`) used to concatenate rapid-fire inbound text messages into one event |
 
-## Find your contact ID or display name
+## Find your contact ID
 
-After starting the daemon, open a conversation with your agent contact. The numeric `contactId` appears in session logs. If you'd rather use the display name shown in the SimpleX UI, that works too — `SIMPLEX_ALLOWED_USERS` accepts either form.
+After starting the daemon, open a conversation with your agent contact. The numeric `contactId` appears in session logs (or run `/contacts` in the daemon). `SIMPLEX_ALLOWED_USERS` matches only this ID: display names are chosen by the contact and can collide, so they are ignored.
 
 ## Authorization
 
 By default **all contacts are denied**. You must either:
 
-1. Set `SIMPLEX_ALLOWED_USERS` to a comma-separated list of `contactId`s and/or display names (e.g. `SIMPLEX_ALLOWED_USERS=4,alice` matches either contactId 4 or the contact whose display name is "alice"), or
+1. Set `SIMPLEX_ALLOWED_USERS` to a comma-separated list of numeric `contactId`s (e.g. `SIMPLEX_ALLOWED_USERS=4,9`), or
 2. Use **DM pairing** — send any message to the bot and it will reply with a pairing code. Enter that code via `hermes pairing approve simplex <CODE>`.
 
 ## Group chats
@@ -95859,7 +95889,7 @@ No admin rights required. The installer goes to `%LOCALAPPDATA%\hermes\` and add
 | `-Manifest` / `-ProtocolVersion` | Inspect the stage protocol used by the bootstrap GUI. |
 | `-Stage NAME -Json` | Run one stage and emit its result frame. |
 
-The current script does not accept `-NoVenv`, `-SkipSetup`, or `-Tag`.
+The current script does not accept `-NoVenv` or `-Tag`. `-SkipSetup` is still accepted as a deprecated alias for `-NonInteractive` so older install wrappers keep binding.
 To diagnose an unexpected short Windows path, use `-ShowResolvedPaths` first.
 
 ### MSIX / App Installer and Microsoft Store
