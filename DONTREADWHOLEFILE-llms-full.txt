@@ -958,7 +958,7 @@ For an admitted source checkout, `hermes update` runs these phases:
 3. **Post-pull syntax validation + auto-rollback** — after the pull, Hermes compiles the nine critical files every `hermes` invocation imports at startup. If any fails to parse (e.g. an orphan merge-conflict marker, an accidentally truncated file), Hermes runs `git reset --hard <pre-pull-sha>` to roll the install back so your shell stays bootable. Re-run `hermes update` once the upstream fix lands.
 4. **Dependency preparation** — PM provisions required tools and prepares a complete Python environment from the new lock, existing extras, and enabled plugin requirements. It validates that environment before publishing its selection. A plugin never fails the update. A plugin that no longer fits the new core is added to `plugins.disabled` in every profile that enables it (a memory provider has `memory.provider` cleared). That covers a `requires-python` that excludes Hermes's Python, a `manifest_version` newer than this Hermes supports, and dependencies that the resolver proves can't resolve alongside core and earlier plugins in config order, or that fail their own build. A download or network failure gets one retry and is disabled if it fails again. The update prints `⚠ Disabled plugin '<name>' in <home>: <reason>`, records it in the receipt's warnings, and continues. Re-enable it with `hermes plugins enable <name>` once the plugin ships a compatible release, or once the network is back. A `requires_hermes` range the running version misses never disables a plugin, because a source checkout without release tags can read as an older release. That plugin sits out instead (`⚠ Left plugin '<name>' … out of this update`), stays enabled, and rejoins once Hermes reports a version it accepts. A secondary profile whose config cannot be read sits out the same way until the config is fixed. Only a core that cannot build on its own fails this step.
 5. **Config migration** — detects new config options added since your version and prompts you to set them
-6. **Desktop rebuild (stage-and-swap)** — if the Hermes Desktop app was built from this checkout, it is rebuilt so the GUI matches the new code. The rebuild packs into a temporary staging directory next to `apps/desktop/release/`, verifies the staged app, and only then renames it over the previous build (on Windows a real-time scanner briefly holding `release/win-unpacked` is ridden out with a few short retries). A rebuild that fails at any point — corrupt Electron download, missing dependency, disk full — leaves the previous app untouched and launchable; the update fails at that step, and `hermes desktop --build-only --force-build` or the next `hermes update` retries the rebuild. On macOS the rebuilt bundle is then copied (with `ditto`, signature intact) over a stale `/Applications/Hermes.app` or `~/Applications/Hermes.app`, so the copy Finder and the Dock launch matches the backend; an installed copy that is currently running is left alone and the update tells you to quit it and run `hermes update` again.
+6. **Desktop rebuild (stage-and-swap)** — if the Hermes Desktop app was built from this checkout, it is rebuilt so the GUI matches the new code. The rebuild packs into a temporary staging directory next to `apps/desktop/release/`, verifies the staged app, and only then renames it over the previous build (on Windows a real-time scanner briefly holding `release/win-unpacked` is ridden out with a few short retries). A rebuild that fails at any point — corrupt Electron download, missing dependency, disk full — leaves the previous app untouched and launchable; the update fails at that step, and `hermes desktop --build-only --force-build` or the next `hermes update` retries the rebuild. On macOS the rebuilt bundle is then copied (with `ditto`, signature intact) over a stale `/Applications/Hermes.app` or `~/Applications/Hermes.app`, so the copy Finder and the Dock launch matches the backend; an installed copy that is currently running is left alone and the update tells you to quit it and run `hermes update` again. On Windows, when the update finishes from inside the Desktop app it would rebuild (the app completing an interrupted update at launch), the rebuild is skipped with a notice instead: Windows locks a running app's files, and stopping the app would end the update with it. The rest of the update completes; quit Hermes Desktop and run `hermes desktop` from a terminal, or use **Update now** in **Settings → About**, to rebuild and reopen it.
 7. **Gateway auto-restart**: running gateways are refreshed after the update completes. Service-managed gateways (systemd on Linux, launchd on macOS) restart through the service manager. Manual gateways are relaunched when Hermes can map their PID to a profile. Manually launched `hermes serve` / `hermes dashboard` backends are different: the updater leaves them running and asks their owner to restart them. See [Manual backend restart reminders](#manual-backend-restart-reminders). Backends owned by a running Desktop app remain the app's responsibility.
 8. **Multiplex migration (multi-profile installs)** — once the fleet is verified on the new code, an install with two or more profiles that still run **one gateway per profile** is folded into a single multiplexed default gateway when nothing blocks it (same as `hermes gateway migrate --multiplex --yes`); if a blocker exists (a bot token shared by two profiles, a secondary profile binding a port with no `/p/<profile>/` ingress) the update prints the blockers with their fixes and changes nothing. Single-profile installs are never touched. See [Migrating from per-profile gateways](../user-guide/multi-profile-gateways.md#migrating-from-per-profile-gateways).
 
@@ -6032,6 +6032,10 @@ When the cap is reached, Hermes returns a direct limit message naming which
 surfaces hold the slots. Existing active sessions keep their normal behavior.
 Run `hermes status` to see the current slot usage and every holder.
 
+This is the only cap on concurrent gateway turns: the gateway runs each turn body
+on its own thread, so with the default (unset) every accepted turn starts
+immediately instead of queuing behind other running turns.
+
 The canonical key is top-level `max_concurrent_sessions`. Hermes also accepts
 `gateway.max_concurrent_sessions` as a fallback, but the top-level key wins when
 both are set.
@@ -7442,6 +7446,8 @@ hermes sessions delete 20250305_091523_a1b2c3d4
 hermes sessions delete 20250305_091523_a1b2c3d4 --yes
 ```
 
+Deleting a session that is still open in a running chat does not stop that chat: its next save recreates the session under the same id with the full in-memory transcript. Close the chat first if you want the session gone.
+
 ### Rename a Session
 
 ```bash
@@ -7543,6 +7549,7 @@ delete them too.
 
 :::info
 Pruning only deletes **ended** sessions (sessions that have been explicitly ended or auto-reset). Active sessions are never pruned.
+A conversation that compression split into several sessions is pruned as a unit: its older segments stay while any later segment does.
 :::
 
 ### Bulk-Archive Sessions
@@ -7629,6 +7636,54 @@ second history, choosing which thread it continues is your call. The stranded
 conversation stays readable via `/resume` and session search either way —
 routing is the only thing the repair changes. Back up first
 (`cp ~/.hermes/state.db ~/.hermes/state.db.bak`).
+
+### Repair Degraded Stored Prompts
+
+Older builds affected by #122822 could let gateway hygiene or gateway `/compress`
+persist a detached maintenance agent's reduced-toolset system prompt over the
+live session. After the root fix in PR #122825 is installed, use
+`hermes sessions repair-prompts` to find rows that were already degraded.
+
+The scan is conservative: it only proposes a repair when the stored prompt is
+missing the `## Skill Safety` guidance **and** the persisted `tools[]` pin
+contains `skill_manage` (which always emits that guidance). Rows with no
+readable pin, or with a `memory`-only pin (which is also a legitimate
+`toolsets: [memory]` setup), are reported as **unverifiable** and are not
+changed by this scan; clear them explicitly by `SESSION_ID` if needed. A
+memory-only row also becomes repairable on its own: once the session is resumed, its
+`tools[]` pin re-pins the full tool surface, after which a scan sees
+`skill_manage` without the Skill Safety guidance and clears it.
+
+```bash
+# Report verified candidates and unverifiable rows; writes nothing
+hermes sessions repair-prompts
+
+# Clear verified degraded prompts after confirmation
+hermes sessions repair-prompts --apply
+
+# Machine-readable report
+hermes sessions repair-prompts --json
+
+# Non-interactive automation: apply and report the ids actually cleared
+hermes sessions repair-prompts --apply --json
+
+# Explicit destructive override for one session (id or unique prefix).
+# This clears the stored prompt even when it is healthy.
+hermes sessions repair-prompts SESSION_ID --apply
+```
+
+Clearing the prompt intentionally stores NULL; the next turn rebuilds and persists healthy bytes,
+which causes one expected
+`Stored system prompt ... is null; rebuilding from scratch` warning for each
+repaired session. That warning is the consequence of this explicit repair, not
+evidence of a new corruption.
+
+Run the repair only after the #122822 root fix is present; otherwise a later
+maintenance compaction can degrade the row again.
+
+A running gateway keeps each cached session's old prompt in memory, so restart
+the gateway after `--apply` (`hermes gateway restart`) for repaired rows to
+take effect.
 
 ### Repair State Crossed Between Profiles
 
@@ -8001,7 +8056,9 @@ Only **ended** sessions are ever deleted. Active sessions are never auto-pruned,
 regardless of age. Ended sessions are aged from their last activity — the
 freshest of live activity, latest message, or session start — so a long-lived
 conversation used recently is not deleted merely because it began before the
-retention window.
+retention window. The same holds for a conversation that compression split into
+several sessions: its older segments are kept while any later segment is, and
+are pruned together with it once the whole conversation qualifies.
 
 **Stale open sessions from automation.** Some producers — cron jobs, kanban
 workers, subagents, one-shot CLI runs — can die without ever marking their
@@ -17467,6 +17524,8 @@ Job definitions are plain JSON on disk: they survive `hermes update`, gateway re
 Ask the agent to manage jobs through the `cronjob_manage` tool, `hermes cron edit`, or `/cron` — not by patching `jobs.json` directly. Direct edits can fail silently when [file write safety](../security.md#file-write-safety) blocks the path (for example when `HERMES_WRITE_SAFE_ROOT` is set), and the [file-mutation verifier](../configuration.md#file-mutation-verifier) footer is the authoritative signal that nothing was saved.
 :::
 
+If a hand edit leaves `jobs.json` malformed, the scheduler repairs it on the next load instead of stopping: entries in the `jobs` list that are not JSON objects are dropped, and a `repeat.completed` that is not a non-negative integer is reset to a valid count (0 when it can't be read). Each repair is logged as a warning (value types only, never contents).
+
 Jobs may store `model` and `provider` as `null`. When those fields are omitted, Hermes resolves them at execution time from the global configuration. They only appear in the job record when a per-job override is set.
 
 The storage uses atomic file writes so interrupted writes do not leave a partially written job file behind.
@@ -19574,6 +19633,7 @@ Every transition appends a row to `task_events`. Each row carries an optional `r
 | Kind | Payload | When |
 |---|---|---|
 | `spawned` | `{pid}` | Dispatcher successfully started a worker process. |
+| `worker_registered` | `{pid, started_at}` | The dispatcher died after starting the worker but before recording its pid, so the worker recorded it itself before its first model call. Liveness checks then see it and an expired claim is extended instead of spawning a second worker. A worker whose run was reclaimed before it got that far exits without working the card. |
 | `heartbeat` | `{note?}` | Worker called `hermes kanban heartbeat $TASK` to signal liveness during long operations. |
 | `reclaimed` | `{stale_lock}` | Claim TTL expired without a completion; task goes back to `ready`. An automatic reclaim counts as one non-successful attempt toward the `gave_up` breaker (a claim that never spawned a worker would otherwise loop claim → reclaim → claim forever); an operator `reclaim` resets the counter instead. |
 | `crashed` | `{pid, claimer, exit_kind?, exit_code?, worker_output?}` | Worker PID no longer alive but TTL hadn't expired yet. `worker_output` is the tail of the worker's own log (its final response or the rendered provider error, chrome stripped, ≤ 400 chars) and is also appended to the task's `last_failure_error`, so the board shows *why* instead of only the exit code. |
@@ -26303,7 +26363,7 @@ display:
 | `all` | Running-output updates **and** the final status message with the output tail |
 | `result` | Only the final status message with the output tail (regardless of exit code) |
 | `error` | Only the final status message with the output tail when the exit code is non-zero |
-| `off` | No process watcher messages at all |
+| `off` | No process watcher messages at all. Also honored by the CLI, TUI and Desktop: background-process completions and heartbeats no longer wake the agent (subagent results still do) |
 
 You can also set this via environment variable:
 
@@ -26415,7 +26475,7 @@ The plist sets `RunAtLoad`, so loading it starts the gateway. `hermes gateway in
 :::
 
 :::info Local Network access (LAN devices fail with "No route to host")
-macOS Local Network Privacy attributes a socket to the executable launchd spawned for the job. A bare venv Python has no application identity, so a launchd-run gateway could not reach LAN hosts (Home Assistant, local model servers) — every connect failed with `errno 65 No route to host` while the same URL worked from Terminal, and no prompt was ever shown to grant it. The generated plist therefore runs the gateway through `/usr/bin/osascript` (`do shell script "exec …"`), whose children macOS treats as osascript's own — an Apple platform binary, exempt from the check. `ps` shows `osascript → stderr_timestamp → gateway run`; stop/restart/KeepAlive behave exactly as before. A plist installed by an older Hermes is refreshed by `hermes gateway install` (or on the next `hermes gateway start`).
+macOS Local Network Privacy attributes a socket to the executable launchd spawned for the job. A bare venv Python has no application identity, so a launchd-run gateway could not reach LAN hosts (Home Assistant, local model servers) — every connect failed with `errno 65 No route to host` while the same URL worked from Terminal, and no prompt was ever shown to grant it. The generated plist therefore runs the gateway through `/usr/bin/osascript`; a JXA `system()` call starts the gateway without an interactive event-polling loop, and macOS treats its children as osascript's own — an Apple platform binary, exempt from the check. `ps` shows `osascript → stderr_timestamp → gateway run`; stop/restart/KeepAlive behave exactly as before. A plist installed by an older Hermes is refreshed by `hermes gateway install` (or on the next `hermes gateway start`).
 :::
 
 :::tip Picking up new credentials after `hermes auth add` / `hermes auth reset`
@@ -44378,7 +44438,14 @@ attempt anyway:
   deterministic fallback; the warning names the overload
   (`failure_class=summary_overload_failure`) and `/compress` retries once
   capacity recovers. Auth/quota, network and empty-content failures already
-  abort the same way.
+  abort the same way. *Sustained* overload escalates (#123167): after 3
+  consecutive overload aborts in one session the overload stops counting as
+  terminal and compress() commits the deterministic fallback
+  (`failure_class=summary_overload_degraded`) — a bounded middle-window loss
+  instead of letting the transcript grow into `compression_exhausted` and a
+  gateway auto-reset that discards the whole session. A successful summary
+  resets the budget; `abort_on_summary_failure: true` still hard-aborts every
+  attempt.
 - **Provider-proven overflow** — when the provider itself rejects the request
   with a context-length error, the recovery pass ignores the cooldown for one
   bounded attempt (`max_compression_attempts`) without clearing it. Deferring
@@ -44433,7 +44500,7 @@ auxiliary:
 | `codex_gpt55_autoraise` | `true` | bool | Raise the trigger to 85% for gpt-5.4/5.5/5.6 and gpt-6 Astra on the ChatGPT Codex OAuth route (see below). Set `false` to keep the global `threshold` |
 | `codex_gpt55_autoraise_notice` | `true` | bool | Show the one-time Codex gpt-5.5 autoraise notice. Set `false` to keep the 85% autoraise but suppress the banner |
 | `codex_app_server_auto` | `native` | `native`, `hermes`, `off` | Thread-compaction mode for Codex app-server sessions (see below) |
-| `codex_responses_native` | `false` | bool | Opt in to OpenAI's server-side compaction on the Responses API. Engages for gpt-5.6-family models on the direct OpenAI API or a ChatGPT Codex subscription, and exact `gpt-6-astra` on official Codex OAuth (see below) |
+| `codex_responses_native` | `false` | bool | Opt in to OpenAI's server-side compaction on the Responses API. Engages for gpt-5.6-family models on the direct OpenAI API or a ChatGPT Codex subscription, and `gpt-6-astra` (including its `-900k` picker alias) on official Codex OAuth (see below) |
 | `codex_responses_compact_threshold` | `null` | `null` or positive integer | Server-side compaction trigger, read **only when `codex_responses_native: true`** — it never changes when local compression fires; the local trigger is `threshold` (ratio) capped by `threshold_tokens`. `null` follows the resolved local compression trigger with an 8,192 token safety margin. A positive integer remains absolute and only clamps downward when required. Invalid values use automatic behavior. Automatic mode falls back to `200000` when no usable local trigger exists |
 | `in_place` | `true` | bool | Compact on the same session id instead of rotating to a new one (see below) |
 
@@ -44596,9 +44663,9 @@ client-side summary pass, and ZDR-friendly (`store: false`, no
 Opt in with `compression.codex_responses_native: true`. The gate is deliberately
 narrow, re-checked on every request:
 
-- **Models:** the gpt-5.6 family, plus exact `gpt-6-astra` on official Codex
-  subscription OAuth. Astra on the direct API, Astra variants and other GPT-6
-  models are excluded. gpt-5.1/5.2 return HTTP 500 or stall the stream when the
+- **Models:** the gpt-5.6 family, plus `gpt-6-astra` (and its `-900k` picker
+  alias) on official Codex subscription OAuth. Astra on the direct API, other
+  Astra variants and other GPT-6 models are excluded. gpt-5.1/5.2 return HTTP 500 or stall the stream when the
   field is present (no structured rejection to downgrade on, verified live Aug 2026).
 - **Routes:** `api.openai.com` (OpenAI API key) or the ChatGPT Codex backend
   (Codex subscription OAuth) only. xAI, GitHub/Copilot, OpenRouter, relays, and
@@ -44662,6 +44729,12 @@ Old tool results (>200 chars) outside the protected tail are replaced with:
 
 This is a cheap pre-pass that saves significant tokens from verbose tool
 outputs (file contents, terminal output, search results).
+
+A tool round the model has not answered yet (compaction fired right after it ran, with or
+without `/steer` messages delivered after it) keeps its text results verbatim and its image
+results intact in the tail, so the model can use the output it requested. A round that alone
+exceeds 20% of the input budget (the context window minus the output reservation) can be
+summarized, and its older images are retired so compaction can still make room.
 
 ### Phase 2: Determine Boundaries
 
@@ -49881,6 +49954,7 @@ Subcommands:
 | `optimize-storage` | Migrate the full-text search index to the compact v23 external-content layout; on large databases this reclaims a large fraction of `state.db`. |
 | `repair` | Repair a malformed `state.db` schema (e.g. `table messages_fts already exists`) so hidden sessions reappear; a backup is made first. |
 | `repair-routing` | Re-attach gateway conversations stranded in session rows that lost their routing identity (a chat "jumping back in time" after a restart). Dry-run by default; `--apply` performs the adoptions (stop the gateway first); `--max-gap-seconds N` tunes the contiguity window. Only unambiguous cases are repaired. See [Sessions → Repair Stranded Gateway Sessions](../user-guide/sessions.md#repair-stranded-gateway-sessions). |
+| `repair-prompts` | Report stored system prompts provably degraded by the pre-#122822 maintenance-compaction bug. Report-only by default; `--apply` clears verified rows so the next turn rebuilds them, `--json` is machine-readable (and non-interactive when combined with `--apply`), and an explicit `session_id` is a destructive override that can clear even a healthy prompt. Rows without a readable tools[] pin, or with a memory-only pin, are reported as unverifiable and left unchanged by the scan (a resumed memory-only session re-pins its full tool surface, after which a scan can clear it). Restart a running gateway after `--apply` so repaired rows take effect. See [Sessions → Repair Degraded Stored Prompts](../user-guide/sessions.md#repair-degraded-stored-prompts). |
 | `repair-profiles` | Settle session, routing, Telegram-topic and voice-mode state that landed under the wrong profile (rows in another profile's store, labels disagreeing with the session key, parent links crossing profiles, index rows for deleted profiles). Dry-run by default; `--apply` performs the repairs after snapshotting every store (stop the gateway first); `--legacy-main rekey\|move` decides what `agent:main` rows inside a named profile's store are; `--json` for automation. See [Sessions → Repair State Crossed Between Profiles](../user-guide/sessions.md#repair-state-crossed-between-profiles). |
 | `recover` | Offline, non-destructive recovery of a damaged `state.db` into a separate clean database. |
 | `retitle-skills` | Regenerate titles for sessions opened with a `/skill`, using what the user actually typed; lists changes unless `--apply` is passed. |
@@ -51000,9 +51074,12 @@ distribution_owned:   # optional; defaults to SOUL.md, config.yaml,
 version (treated as `>=`). Install fails with a clear error if the current
 Hermes version doesn't satisfy the spec.
 
-`distribution_owned` is optional. If set, only those paths are replaced on
-update; anything else in the profile stays user-owned. If omitted, the
-defaults above apply.
+`distribution_owned` is optional. If set, only those paths are updated;
+anything else in the profile stays user-owned. A directory of skills, such as
+`skills/` or a category like `skills/research/`, is merged per skill: the skills
+the distribution ships are replaced, and skills you added there stay. A skill
+the author later drops from the distribution is left in place on update, as
+with top-level `skills/`. If omitted, the defaults above apply.
 
 ### Publishing a distribution
 
@@ -51096,7 +51173,7 @@ Hermes reads environment variables from the process environment and, for user-ma
 | `NOUS_INFERENCE_BASE_URL` | Override Nous inference endpoint directly |
 | `AI_GATEWAY_API_KEY` | Vercel AI Gateway API key ([ai-gateway.vercel.sh](https://ai-gateway.vercel.sh)) |
 | `AI_GATEWAY_BASE_URL` | Override AI Gateway base URL (default: `https://ai-gateway.vercel.sh/v1`) |
-| `OPENAI_API_KEY` | API key for custom OpenAI-compatible endpoints (used with `OPENAI_BASE_URL`) |
+| `OPENAI_API_KEY` | OpenAI API key (`openai-api` provider), or the key for a custom OpenAI-compatible endpoint when `OPENAI_BASE_URL` is set. Counts as an OpenRouter key only when it starts with `sk-or-`; put OpenRouter keys in `OPENROUTER_API_KEY` |
 | `OPENAI_BASE_URL` | Base URL for custom endpoint (VLLM, SGLang, etc.) |
 | `HERMES_CODEX_BASE_URL` | Route the `openai-codex` (ChatGPT subscription) provider through a proxy instead of the default Codex backend. Applies everywhere the credential is used: pool resolution, auxiliary/raw clients, and 401/429 credential rotation. `model.base_url` under `model.provider: openai-codex` is the secondary override when this is unset. |
 | `LM_API_KEY` | API key for LM Studio (`lmstudio` provider). Often a placeholder for local servers |
@@ -51655,7 +51732,7 @@ Three dashboard-auth providers ship in the box. For a remote Hermes Desktop conn
 | `HERMES_DESKTOP_REMOTE_URL` | (Desktop side) Base URL of the remote backend, e.g. `http://host:9119`. When set, overrides the in-app Gateway URL; you still sign in from the Gateway settings panel (OAuth redirect or username/password, whichever the backend advertises). |
 | `HERMES_DESKTOP_HERMES` | Desktop backend command override. Used by packagers/Nix or troubleshooting to point Electron at a specific `hermes` executable before checking the mutable managed install. |
 | `HERMES_DESKTOP_HERMES_ROOT` | Desktop source-checkout override used by `hermes desktop --hermes-root`; checked before the packaged first-launch install or an existing `hermes` on `PATH`. |
-| `HERMES_DESKTOP_IGNORE_EXISTING` | Set to `1` to make Desktop ignore an existing `hermes` on `PATH` during backend resolution. Equivalent to `hermes desktop --ignore-existing`. |
+| `HERMES_DESKTOP_IGNORE_EXISTING` | Set to `1` to make Desktop skip the installed runtime (`~/.hermes/hermes-agent`, or `%LOCALAPPDATA%\hermes\hermes-agent` on Windows) during backend resolution, so no local backend starts and Desktop shows the connect-or-install choice. The bundled runtime, `HERMES_DESKTOP_HERMES_ROOT`, an unpackaged source checkout, and `HERMES_DESKTOP_HERMES` still win. A runtime installed during this launch is used. Equivalent to `hermes desktop --ignore-existing`. |
 | `HERMES_DESKTOP_CWD` | Initial project directory for Desktop chat sessions. Set by `hermes desktop --cwd`. |
 | `HERMES_DESKTOP_PYTHON` | Absolute path to a Python interpreter for the backend, checked before Electron auto-resolves one for the source checkout. Used by worktree dev helpers (see [TUI & Desktop from Worktrees](../developer-guide/worktree-ui-dev.md)) to reuse a shared venv. |
 | `HERMES_DESKTOP_DEV_SERVER` | Vite dev-server URL the Electron shell loads instead of the packaged bundle (e.g. `http://127.0.0.1:5174`). Set automatically by `npm run dev`; only relevant when hacking on the app. |
@@ -52258,7 +52335,7 @@ Granted only to sessions of the desktop setup profile (`role: setup` in its `pro
 | Tool | Description | Requires environment |
 |------|-------------|----------------------|
 | `process_manage` | Manage background processes started with terminal(background=true). Actions: 'list' (show all), 'poll' (check status + new output), 'log' (full output with pagination), 'wait' (block until done or timeout), 'kill' (terminate), 'write' (sen… | — |
-| `terminal` | Execute shell commands on a Linux environment. Filesystem persists between calls. Set `background=true` for long-running servers. Set `notify_on_complete=true` (with `background=true`) to get an automatic notification when the process finishes — no polling needed. Add `heartbeat=N` (seconds, min 60) to also receive a periodic notification carrying the output produced since the previous one — for long bounded jobs such as a merge train or a full test suite, so a failure is seen within N seconds instead of at exit. Do NOT use cat/head/tail — use read_file. Do NOT use grep/rg/find — use search_files. | — |
+| `terminal` | Execute shell commands on a Linux environment. Filesystem persists between calls. Set `background=true` for long-running servers. Set `notify_on_complete=true` (with `background=true`) to get an automatic notification when the process finishes — no polling needed. Add `heartbeat=N` (seconds, min 60) to also receive a periodic notification carrying the output produced since the previous one — for long bounded jobs such as a merge train or a full test suite, so a failure is seen within N seconds instead of at exit; a tick with no new output is skipped, and the wake is hidden from the transcript on Desktop/TUI (only the agent's reply shows). Do NOT use cat/head/tail — use read_file. Do NOT use grep/rg/find — use search_files. | — |
 
 ## `desktop_ui` toolset
 
@@ -53390,6 +53467,8 @@ hermes skills uninstall <skill-name>
 | [**auteur**](../user-guide/skills/optional/creative/creative-auteur.md) | Design and build cinematic, award-level web pages. |
 | [**baoyu-article-illustrator**](../user-guide/skills/optional/creative/creative-baoyu-article-illustrator.md) | Article illustrations: type × style × palette consistency. |
 | [**baoyu-comic**](../user-guide/skills/optional/creative/creative-baoyu-comic.md) | Knowledge comics (知识漫画): educational, biography, tutorial. |
+| [**brag**](../user-guide/skills/optional/creative/creative-brag.md) | Project launch video via Hyperframes, upstream-maintained. |
+| [**brag-slim**](../user-guide/skills/optional/creative/creative-brag-slim.md) | Launch video from a project or URL, upstream-maintained. |
 | [**comfyui**](../user-guide/skills/optional/creative/creative-comfyui.md) | Generate images, video, and audio via diffusion workflows. |
 | [**concept-diagrams**](../user-guide/skills/optional/creative/creative-concept-diagrams.md) | Generate flat, minimal educational SVG visuals as HTML. |
 | [**creative-ideation**](../user-guide/skills/optional/creative/creative-creative-ideation.md) | Generate ideas via named methods from creative practice. |
@@ -69353,6 +69432,11 @@ PRs will be accepted to fix issues with them, but they will take precedence belo
 The native bundle pipeline includes Intel macOS (`x64`) as well as Apple Silicon.
 It also defines signed-package update acceptance for both architectures.
 That coverage does not change the Tier 1 priority assigned to Apple Silicon.
+The `Hermes-Setup.dmg` bootstrap installer is the exception: it is built for
+Apple Silicon (`arm64`) only, so on an Intel Mac it reports "not supported on
+this Mac". Intel Macs use the `darwin-x64` desktop bundle instead, or install
+the [CLI](./installation.md#linux--macos--wsl2--android-termux) and run
+`hermes desktop`.
 Linux desktop packaging is disabled in the release workflow, although local
 AppImage builds and native Linux PM bundle checks exist.
 
@@ -76736,7 +76820,7 @@ Talk to Hermes and hear it back, the same [voice mode](./features/voice-mode.md)
 
 #### Linux / Wayland
 
-Electron 20+ already runs as a native Wayland client on a Wayland session. Drag, click-through, and resize work on that path.
+On a local Wayland session (`XDG_SESSION_TYPE=wayland`, or `WAYLAND_DISPLAY` set) Hermes launches with `--ozone-platform=wayland` so Electron does not fall back to XWayland. The platform has to be on the process command line before application JavaScript loads. An explicit `--ozone-platform`, `desktop.ozone_platform_hint: x11`, or an ozone platform in `desktop.electron_flags` still wins. Drag, click-through, and resize work on the native Wayland path.
 
 On **Hyprland** (including Omarchy) the HUD is floated and pinned through the compositor's IPC after it maps — otherwise Hyprland tiles it like any other window, `always-on-top` is ignored, and compositor drag does nothing. No extra window rule is required.
 
@@ -76980,7 +77064,7 @@ When you start Hermes from the application grid or menu (the launcher sets `DESK
 | `--source`           | Launch via `electron .` against `apps/desktop/dist` instead of the packaged app           |
 | `--cwd PATH`         | Initial project directory for desktop chat sessions (sets `HERMES_DESKTOP_CWD`)           |
 | `--hermes-root PATH` | Override the Hermes source root the app uses (sets `HERMES_DESKTOP_HERMES_ROOT`)          |
-| `--ignore-existing`  | Force the app to ignore any `hermes` CLI already on `PATH` during backend resolution      |
+| `--ignore-existing`  | Skip the installed Hermes runtime so no local backend starts; offer connect or install    |
 | `--fake-boot`        | Enable deterministic boot delays for validating the startup UI                            |
 
 ## How it works
@@ -79490,6 +79574,30 @@ Override the driver binary path (tests / CI / local builds):
 ```
 HERMES_CUA_DRIVER_CMD=/path/to/your/cua-driver
 ```
+
+### Windows auto-start (opt-in)
+
+On Windows, cua-driver can run from a per-boot Scheduled Task
+(`cua-driver-serve`) so it is already listening when Hermes needs it. This
+task is **opt-in**: by default Computer Use starts the driver on demand,
+per session — exactly as on macOS and Linux — and no scheduled task is
+registered when you install or enable the toolset (#97389).
+
+Set this in `config.yaml` to opt in (the task is registered — or repaired —
+the next time the driver is installed or the toolset is enabled):
+
+```yaml
+computer_use:
+  autostart: true   # default: false (on-demand; no scheduled task)
+```
+
+You need this when driving Windows over SSH: Session 0 has no interactive
+desktop, so an on-demand driver cannot reach one
+([windows-ssh](https://cua.ai/docs/how-to-guides/driver/windows-ssh) has the
+recipe). If the task exists but you want it gone, remove it with
+`cua-driver autostart disable` (or `schtasks /Delete /TN cua-driver-serve`)
+from an elevated shell — Hermes does not re-register it once
+`computer_use.autostart` is false.
 
 Swap the backend entirely (for testing):
 
@@ -82436,6 +82544,19 @@ catalog moved (via a reviewed PR), prepares and dependency-validates the new SHA
 before publishing it. Your
 enabled/disabled state is preserved, and so are files the plugin's repo does
 not track (the `config.yaml` created from its `.example`, data files, `.env`).
+Symlinks among those untracked files are never followed into the new code: the
+update stops before publishing and names them, so replace each with a regular file.
+Dependency and cache directories (`.venv/`, `venv/`, `node_modules/`, tool caches)
+are not carried at all, links included; the updated plugin rebuilds its dependencies.
+For monorepo/subdirectory installs, which do not carry a local Git checkout,
+update preserves user-state files the new revision does not ship. Plugin code and
+control surfaces remain revision-owned and are not resurrected from the old install:
+source files (Python, JavaScript/TypeScript including `.mjs`/`.cjs`/`.jsx`/`.tsx`,
+shell, Ruby, Perl, PHP), the top-level `dashboard/`, `desktop/`, `skills/`,
+`sidecar/` and `node_modules/` directories, the plugin manifest, `mcp.json` and
+dependency metadata (`pyproject.toml`, `package.json`, lockfiles). If a user-state
+path conflicts with the new tree's file/directory layout, the update stops before
+publication so the installed copy — and the user's data — remain intact.
 Edits you made to *tracked* files are not carried onto the new code; copies are
 saved under `~/.hermes/plugins-backup/<name>-<sha>/` and the update warns you.
 If the new pin renames the plugin's manifest, the old directory is removed and
@@ -95916,6 +96037,7 @@ What happens under the hood:
 
 1. `schtasks /Create /SC ONLOGON /RL LIMITED /TN Hermes_Gateway` — registers a task that runs at your login with standard (non-elevated) permissions. No UAC prompt.
 2. If schtasks is blocked by group policy, falls back to writing a small `Hermes_Gateway.vbs` launcher (run hidden via `wscript.exe`) into `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup`. Same effect, slightly cruder. A VBScript is used rather than a `cmd.exe` shortcut because a console allocated at logon can receive a close event that kills the gateway before it finishes starting.
+   Only one of the two is ever kept: a successful task install removes any Startup-folder entry (including a legacy `Hermes_Gateway.cmd`), the fallback is skipped while a task is still registered, and `hermes update` / `hermes doctor --fix` clean up older installs that have both, since both would launch the gateway at logon.
 3. Spawns the gateway **detached via `pythonw.exe`** — not `python.exe`. `pythonw.exe` has no console attached, which immunizes it against `CTRL_C_EVENT` broadcasts from sibling processes (a real issue that used to kill the gateway when you Ctrl+C'd anything in the same process group).
 
 Flags used when spawning: `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB`.
