@@ -72,15 +72,19 @@ The desktop/server scripts are not the Termux installation path.
 The scripts clone the source, bootstrap uv, and delegate dependency preparation
 to PM. PM provides pinned Python, Node.js, npm, ripgrep, and FFmpeg. The source
 installation selects the `all` Python extra, not every optional extra.
-PM also installs the browser tools (`agent-browser` and its pinned Chromium) by
-default. If that download fails, the install still completes and prints the
-command to retry. Other optional tools use their feature-specific installation
-paths.
+PM also installs the browser and computer-use tools by default: `agent-browser`
+and its pinned Chromium, and `cua-driver` (the computer-use driver, on macOS,
+Windows and glibc Linux). If a download fails, the install still completes and
+prints the command to retry. The default browser driver (browser-harness, the
+engine of the Browser Use CLI) is a regular Python dependency, so every install,
+the Desktop app included, already has it.
+Other optional tools use their feature-specific installation paths.
 
 To leave the browser tools out, pass `--skip-browser` on POSIX or `-SkipBrowser`
-on Windows. Hermes remembers this choice: later installs and `hermes update` do
-not add them back. Run `hermes pm install agent-browser` to install them and
-undo the choice.
+on Windows; for the computer-use driver, `--skip-computer-use` /
+`-SkipComputerUse`. Hermes remembers these choices: later installs and
+`hermes update` do not add them back. Run `hermes pm install agent-browser` or
+`hermes pm install cua-driver` to install them and undo the choice.
 
 The scripts create a launcher and prepare the data directory. Interactive runs
 also invoke setup and gateway configuration. `--non-interactive` on POSIX, or
@@ -152,7 +156,7 @@ You don't need to rebuild your setup from scratch. Restore a full backup with `h
 
 For the POSIX source script, provide Git, curl, tar, and SHA-256 utilities.
 Windows can bootstrap its pinned Git for Windows archive when Git is absent.
-An existing uv can bootstrap PM; otherwise the script downloads its verified pin.
+The script always downloads its verified uv pin; a uv already on your PATH is never used.
 
 Current first-party installations run on **Python 3.14**. The broader
 `>=3.11,<3.15` range in `pyproject.toml` lets older Python installations
@@ -955,7 +959,7 @@ For an admitted source checkout, `hermes update` runs these phases:
 
 1. **Pre-update snapshot** — Hermes saves selected state files for every profile in that profile's `state-snapshots/` directory. These include pairing data, cron jobs, `config.yaml`, `.env`, and `auth.json`. Automatic quick snapshots skip individual files larger than 1 GiB. `updates.pre_update_backup` selects `quick`, `full`, or `off`. Full archives use the [backup exclusions](../reference/faq.md#hermes-backup-vs-hermes-profile-export). Recovery uses [Snapshots and rollback](../user-guide/checkpoints-and-rollback.md). Quick snapshots recover state files, not application code. The snapshot is best-effort: if it fails, the update prints a `⚠ Pre-update snapshot FAILED` warning and continues, and the receipt records `pre_update_backup` as a failed step (a deliberate `off`/`--no-backup` lands in the receipt's skips with its reason instead).
 2. **Code update** — applies the configured source branch or stable release tag and updates submodules.
-3. **Post-pull syntax validation + auto-rollback** — after the pull, Hermes compiles the nine critical files every `hermes` invocation imports at startup. If any fails to parse (e.g. an orphan merge-conflict marker, an accidentally truncated file), Hermes runs `git reset --hard <pre-pull-sha>` to roll the install back so your shell stays bootable. Re-run `hermes update` once the upstream fix lands.
+3. **Post-pull syntax validation + auto-rollback** — after the pull, Hermes compiles the nine critical files every `hermes` invocation imports at startup. If any fails to parse (e.g. an orphan merge-conflict marker, an accidentally truncated file), Hermes rolls the install back so your shell stays bootable: it resets the checkout to the commit it ran before the pull (`git reset --hard <pre-pull-sha>`), or, when the update switched away from a detached checkout or a parked feature branch, returns there with `git checkout --detach <sha>` / `git checkout <branch>` (a branch it cannot check out again is restored detached at the same commit). Re-run `hermes update` once the upstream fix lands.
 4. **Dependency preparation** — PM provisions required tools and prepares a complete Python environment from the new lock, existing extras, and enabled plugin requirements. It validates that environment before publishing its selection. A plugin never fails the update. A plugin that no longer fits the new core is added to `plugins.disabled` in every profile that enables it (a memory provider has `memory.provider` cleared). That covers a `requires-python` that excludes Hermes's Python, a `manifest_version` newer than this Hermes supports, and dependencies that the resolver proves can't resolve alongside core and earlier plugins in config order, or that fail their own build. A download or network failure gets one retry and is disabled if it fails again. The update prints `⚠ Disabled plugin '<name>' in <home>: <reason>`, records it in the receipt's warnings, and continues. Re-enable it with `hermes plugins enable <name>` once the plugin ships a compatible release, or once the network is back. A `requires_hermes` range the running version misses never disables a plugin, because a source checkout without release tags can read as an older release. That plugin sits out instead (`⚠ Left plugin '<name>' … out of this update`), stays enabled, and rejoins once Hermes reports a version it accepts. A secondary profile whose config cannot be read sits out the same way until the config is fixed. Only a core that cannot build on its own fails this step.
 5. **Config migration** — detects new config options added since your version and prompts you to set them
 6. **Desktop rebuild (stage-and-swap)** — if the Hermes Desktop app was built from this checkout, it is rebuilt so the GUI matches the new code. The rebuild packs into a temporary staging directory next to `apps/desktop/release/`, verifies the staged app, and only then renames it over the previous build (on Windows a real-time scanner briefly holding `release/win-unpacked` is ridden out with a few short retries). A rebuild that fails at any point — corrupt Electron download, missing dependency, disk full — leaves the previous app untouched and launchable; the update fails at that step, and `hermes desktop --build-only --force-build` or the next `hermes update` retries the rebuild. On macOS the rebuilt bundle is then copied (with `ditto`, signature intact) over a stale `/Applications/Hermes.app` or `~/Applications/Hermes.app`, so the copy Finder and the Dock launch matches the backend; an installed copy that is currently running is left alone and the update tells you to quit it and run `hermes update` again. On Windows, when the update finishes from inside the Desktop app it would rebuild (the app completing an interrupted update at launch), the rebuild is skipped with a notice instead: Windows locks a running app's files, and stopping the app would end the update with it. The rest of the update completes; quit Hermes Desktop and run `hermes desktop` from a terminal, or use **Update now** in **Settings → About**, to rebuild and reopen it.
@@ -3695,9 +3699,9 @@ terminal:
   home_mode: auto   # auto | real | profile — subprocess HOME policy
   env_passthrough: []  # Env var names to forward to sandboxed execution (terminal + execute_code)
   sync_back_max_bytes: 2147483648  # Remote backends: refuse to extract a state archive larger than this (bytes)
-  singularity_image: "docker://nikolaik/python-nodejs:python3.11-nodejs20"  # Container image for Singularity backend
-  modal_image: "nikolaik/python-nodejs:python3.11-nodejs20"                 # Container image for Modal backend
-  daytona_image: "nikolaik/python-nodejs:python3.11-nodejs20"               # Container image for Daytona backend
+  singularity_image: "docker://nousresearch/hermes-sandbox:desktop"  # Container image for Singularity backend
+  modal_image: "nousresearch/hermes-sandbox:desktop"                 # Container image for Modal backend
+  daytona_image: "nousresearch/hermes-sandbox:desktop"               # Container image for Daytona backend
 ```
 
 `terminal.temp_dir` controls where Hermes puts session temp artifacts on the
@@ -3817,7 +3821,12 @@ Runs commands inside a Docker container with security hardening (all capabilitie
 ```yaml
 terminal:
   backend: docker
-  docker_image: "nikolaik/python-nodejs:python3.11-nodejs20"
+  # Default: nikolaik/python-nodejs (Python 3.13 / Node 26) plus a display stack, so Bot Screen,
+  # computer_use and the browser run INSIDE this sandbox (Bot Screen → "Where the screen runs").
+  # Any other image works for shell work; the screen then needs bot_desktop.placement: gateway.
+  # Writing this key is a decision: a persisted container on another image is recreated on the next
+  # terminal call. Left unset, an existing container is kept and the CLI / Screen pane ask first.
+  docker_image: "nousresearch/hermes-sandbox:desktop"
   docker_mount_cwd_to_workspace: false  # Mount launch dir into /workspace
   docker_run_as_host_user: false   # See "Running container as host user" below
   docker_snap_compat: false        # See "Snap-packaged Docker (AppArmor)" below
@@ -4046,7 +4055,7 @@ Runs commands in a [Singularity/Apptainer](https://apptainer.org) container. Des
 ```yaml
 terminal:
   backend: singularity
-  singularity_image: "docker://nikolaik/python-nodejs:python3.11-nodejs20"
+  singularity_image: "docker://nousresearch/hermes-sandbox:desktop"
   container_cpu: 1                 # CPU cores
   container_memory: 5120           # MB
   container_persistent: true       # Writable overlay persists across sessions
@@ -4454,7 +4463,7 @@ compression:
   enabled: true                                     # Toggle compression on/off
   progress_notices: false                           # Opt-in: deliver routine compression progress notices to chat platforms — see below
   threshold: 0.50                                   # Compress at this % of context limit
-  threshold_tokens: 256000                          # Absolute token cap — takes lower of ratio vs absolute
+  threshold_tokens: null                            # Absolute token cap (optional) — takes lower of ratio vs absolute
   target_ratio: 0.20                                # Fraction of threshold to preserve as recent tail
   tail_mode: lean                                   # Tail retention: "lean" (default — clamped 2.5% tail, 10K-25K, never above 20% of the window, with a detailed session log + anchor index + session_search recovery pointers in the summary, all from ONE auxiliary summarizer call; ~3x fewer retained tokens after compaction) or "legacy" (0.20×threshold verbatim tail)
   protect_last_n: 20                                # Min recent messages to keep uncompressed
@@ -4508,7 +4517,7 @@ The value is the **first rung** of an escalating ladder, not a fixed interval: c
 
 `in_place` (default `true`) controls what happens to the session identity when compaction fires. When `true`, compaction rewrites the message list and rebuilds the system prompt **without rotating the session id** — the conversation keeps one durable id for its whole life (no `parent_session_id` chain, no `name #2` / `#3` renumbering in session lists). Compaction is non-destructive: the live context is compacted, but the pre-compaction turns are soft-archived under the same id (marked inactive/compacted) — still searchable via `session_search` and recoverable, not deleted. Hooks see the mode via the `in_place` field on the `session:compress` event. Set `in_place: false` to restore the legacy behavior where each compaction rotates to a new session id linked to the old one.
 
-`threshold_tokens` sets an **absolute token cap** for the compression trigger. Compression fires at the lower of the ratio-based `threshold` and this absolute count, so large-window models cannot silently defer compaction to hundreds of thousands of tokens. The default is `256000`: it bounds a 1M model's default 50% trigger at 256K, while any lower proportional trigger still wins (including the 272K Codex window). The cap survives model switches and fallback activations and is clamped to the model's context length. Set it to `null` to restore ratio-only behavior, or choose a different positive count for your workload.
+`threshold_tokens` sets an optional **absolute token cap** for the compression trigger. When set, compression fires at the lower of the ratio-based `threshold` and this absolute count, so compaction never fires later than that token count regardless of which model is active. Use it when you want a fixed cost ceiling per call, for example `threshold_tokens: 256000` to compact a 1M-window model at 256K instead of 500K. The cap is clamped to the model's context length, so a value above the window is a no-op. Default `null` (disabled — ratio-based threshold only). The cap survives model switches and fallback activations.
 
 `idle_compact_after_seconds` is an **opt-in, time-based** trigger that complements the size-based `threshold`. Default `0` (disabled). When set above 0, a session that resumes after at least that many seconds of inactivity compacts its accumulated history up front, before the first reply — so a long-lived thread (e.g. a Telegram conversation you come back to hours later) doesn't re-read its full stale context on every subsequent turn. It never fires when the context is already at or below the post-compression target (`threshold × target_ratio`), and it honors the same failure-cooldown, anti-thrash, and per-session lock guards as every automatic compaction. Example: `idle_compact_after_seconds: 1800` compacts after 30 minutes idle.
 
@@ -7932,8 +7941,11 @@ That reverts groups/channels to a single shared session per room, which preserve
 
 Gateway conversations do not reset after inactivity or at a daily boundary. Use `/new`
 or `/reset` for an explicit new conversation; context compression remains automatic.
-Legacy `session_reset` settings, reset-policy overrides and reset-timer environment
-variables are ignored. Cached agents may be released to reclaim resources without
+Core ignores legacy `session_reset` settings, reset-policy overrides and reset-timer
+environment variables. If your config still sets `session_reset.mode` to `idle`, `daily`
+or `both`, gateway startup and `hermes doctor` warn about it. To keep time-based resets,
+install the catalog plugin that reads the same block unchanged:
+`hermes plugins install hermes-session-reset-policy`. Cached agents may be released to reclaim resources without
 replacing the durable conversation. Restart-recovery freshness limits automatic
 continuation, not the history loaded when you send a message.
 
@@ -8465,7 +8477,7 @@ fails that step for the whole install — see
 ```bash
 hermes profile list           # show all profiles with status
 hermes profile show coder     # detailed info for one profile
-hermes profile rename coder dev-bot   # rename (updates alias + service)
+hermes profile rename coder dev-bot   # rename (updates alias; removes the old name's gateway service)
 hermes profile migrate-identity coder dev-bot   # retry a rename's identity migration
 hermes profile purge-identity dev-bot   # retry a delete's identity purge
 hermes profile export coder   # pack into coder.tar.gz (shareable; keys stripped)
@@ -10286,7 +10298,7 @@ Container resources are configurable in `~/.hermes/config.yaml`:
 ```yaml
 terminal:
   backend: docker
-  docker_image: "nikolaik/python-nodejs:python3.11-nodejs20"
+  docker_image: "nousresearch/hermes-sandbox:desktop"
   docker_forward_env: []  # Explicit allowlist only; empty keeps secrets out of the container
   container_cpu: 1        # CPU cores
   container_memory: 5120  # MB (default 5GB)
@@ -17081,7 +17093,7 @@ Semantics:
 - `{"wakeAgent": false}` on the last line → silent tick (same gate LLM jobs use).
 - No tokens, no model, no provider fallback — the job never touches the inference layer.
 
-`.sh` / `.bash` files run under `bash` from `PATH` when available, otherwise `/bin/bash` (important on Windows Git Bash). Anything else runs under the current Python interpreter (`sys.executable`). Scripts must resolve inside `$HERMES_HOME/scripts/` — relative names, absolute paths, and `~`-prefixed paths are accepted when the resolved target stays in that directory; paths that escape it are rejected. Subprocess env is sanitized (`_sanitize_subprocess_env`): provider API credentials and other Hermes-managed secrets are **not** inherited by cron scripts.
+`.sh` / `.bash` files run under `bash` from `PATH` when available, otherwise `/bin/bash` (important on Windows Git Bash). Anything else runs under the current Python interpreter (`sys.executable`). Scripts must resolve inside `$HERMES_HOME/scripts/` — relative names, absolute paths, and `~`-prefixed paths are accepted when the resolved target stays in that directory; paths that escape it are rejected. A Python `script` or `monitor_script` can also pin a user-managed venv (for packages the Hermes runtime doesn't carry) by passing `--interpreter ~/venvs/.../bin/python` at create/edit time — see [Using your own Python environment](../../guides/cron-script-only.md#using-your-own-python-environment). The Hermes-managed venv stays Hermes-owned; nothing is installed or restored automatically. The subprocess environment is sanitized, so provider API credentials and other Hermes-managed secrets are **not** inherited by cron scripts.
 
 #### Giving a script a credential
 
@@ -18211,7 +18223,7 @@ delegation:
 
 When `base_url` points at an Anthropic-compatible endpoint — for example a path ending in `/anthropic`, an Azure Foundry Claude route, or a MiniMax `/anthropic` proxy — `api_mode` is auto-detected as `anthropic_messages` so the subagent uses the right wire format without you setting anything. Set `api_mode` explicitly when the auto-detection guess is wrong (rare).
 
-Subagents compact where their parent does — the lower of `compression.threshold` × window and the global `compression.threshold_tokens` cap (256K on a 1M model by default). `delegation.compression_threshold_tokens` (default `0`, off) adds an optional absolute cap on a child's compaction *trigger*, applied as the lower of it and the ratio threshold; it never touches the request payload or the parent. A token count of at least 16000 enables it; `true` or `"200k"` are config errors that are warned and ignored. It stays off by default because a replay of a 1,393-agent run put 200K–400K caps within 5% of each other in cost once cache prefixes are intact, and every compaction is a chance to lose detail.
+Subagents compact where their parent does: at `compression.threshold` × window (0.50 by default), or the global `compression.threshold_tokens` cap when one is set and lower. `delegation.compression_threshold_tokens` (default `0`, off) adds an optional absolute cap on a child's compaction *trigger*, applied as the lower of it and the ratio threshold; it never touches the request payload or the parent. A token count of at least 16000 enables it; `true` or `"200k"` are config errors that are warned and ignored. It stays off by default because a replay of a 1,393-agent run put 200K–400K caps within 5% of each other in cost once cache prefixes are intact, and every compaction is a chance to lose detail.
 
 `delegation.request_overrides` works on **all three** resolution branches — direct `base_url`, named `provider`, and pure inherit — so it always takes effect. Top-level keys are API kwargs (e.g. `service_tier`); an `extra_body` sub-dict is merged into the request's `extra_body`. Explicit values merge **over** runtime- or parent-derived overrides: explicit top-level keys win, and `extra_body` is deep-merged one level, so a provider's own request personality (e.g. `thinking: {type: disabled}`) survives unless your key redefines it. See [Configuration → Delegation](../configuration.md#delegation) for details.
 
@@ -18285,6 +18297,18 @@ neutral **required** evidence cannot complete the card. Neither can zero-run
 acceptance, unreadable policy or GitHub API failures. A repository without required
 checks needs a local-only contract. `gh` must be authenticated with read access to
 the repository's checks and rules; no remote writes are performed by this gate.
+Acceptance reads run as the **assignee profile's** `gh` login — its `GH_TOKEN` /
+`GH_CONFIG_DIR` from the profile's own `.env`, never the ambient login of the
+process completing the card. On multi-profile hosts (one GitHub identity per
+org), sign `gh` in per profile (`GH_CONFIG_DIR` in that profile's `.env`). The
+token must live in the profile's `.env` (or a configured secret source): a
+`GH_TOKEN` merely exported in the shell or a systemd unit is scrubbed from the
+`gh` child and never re-added. An assignee profile with no `gh` login of its
+own — or one that no longer exists — is refused `not logged in` rather than
+falling through to `~/.config/gh`; unassigned cards still use the ambient
+login. A login that cannot see the repository is rejected with
+`classification=auth`, naming the profile and repository, instead of a
+retryable infra failure.
 
 Rejection retains the active card and workspace. Durable `pr_acceptance` events
 store PR URL, SHA, required contexts, check IDs/URLs, classifications and recovery
@@ -19646,8 +19670,9 @@ Every transition appends a row to `task_events`. Each row carries an optional `r
 | `reconciled` | `{reason, claim_lock, claim_expires, worker_pid}` | Orphaned-card reconciliation: the card was `running` with broken claim bookkeeping (`claim_lock` or `claim_expires` NULL — crash mid-claim, manual SQL, DB restore) and no live worker, so none of the TTL/crash/stale paths could ever recover it. The dispatcher requeued it to `ready` with an explanatory comment. Gated by `kanban.reconcile_orphans` in config.yaml (default `true`). |
 | `respawn_guarded` | `{reason}` | Dispatcher refused to re-spawn this ready task this tick. Reasons: `infrastructure_cooldown` (the host refused the last spawn — no restart-safe systemd scope — and the cooldown has not elapsed; never counted against the card), `rate_limit_cooldown` (the last run hit a quota wall; same cooldown, never counted), `blocker_auth` (last failure was a quota/auth/429 error — wait for the rate window to reset), `recent_success` (a completed run happened in the last hour — wait for review before re-running), `active_pr` (a GitHub PR URL appears in a recent comment — a prior worker already opened a PR). The task stays in `ready`; the next tick gets another chance to spawn. If the underlying condition persists, the normal `consecutive_failures` circuit breaker will auto-block via `gave_up` after `failure_limit` failures. |
 | `spawn_failed` | `{error, failures}` | One spawn attempt failed (missing PATH, workspace unmountable, …). Counter increments; task returns to `ready` for retry. |
+| `skipped_nonspawnable` | `{assignee}` | Dispatcher refused to spawn because the assignee profile does not exist in this home (or is not in `kanban.dispatch_profiles`). Written once per card — repeated only when another event landed in between — so `show`/`tail` name the missing profile without a row per tick. The card stays in `ready`; reassign it or install the profile. |
 | `protocol_violation` | `{pid, claimer, exit_code, protocol_violation, worker_output?}` | Worker exited successfully while the task was still `running`, usually because it answered without a terminal board call (`kanban_complete`, `kanban_request_review` or `kanban_block`). Emitted on every violation (the payload's `protocol_violation: true` marker is copied into the run metadata and feeds the violation-only retry budget). Below the budget — up to `_PROTOCOL_VIOLATION_FAILURE_LIMIT` (default 3) *consecutive* violations, per-task `max_retries` overriding — the task simply returns to `ready` for another attempt; when the streak reaches the bound the dispatcher also emits `gave_up` and auto-blocks. `worker_output` carries the worker's own last printed text (usually its explanation of why it stopped), also folded into `last_failure_error` and shown to the retry worker as the prior-attempt error. |
-| `gave_up` | `{failures, effective_limit, limit_source, error, terminal_provider?}` | Circuit breaker fired after N consecutive non-successful attempts. Task auto-blocks with the last error. The effective limit resolves as task `max_retries`, then dispatcher `failure_limit` / `kanban.failure_limit`, then the built-in default. `terminal_provider: true` means the worker exited `78` on a provider error a retry cannot fix (credential revoked, model gone) and the breaker fired on that first attempt, sticky, regardless of the limit. |
+| `gave_up` | `{failures, effective_limit, limit_source, error, terminal_provider?}` | Circuit breaker fired after N consecutive non-successful attempts. Task auto-blocks with the last error. The effective limit resolves as task `max_retries`, then dispatcher `failure_limit` / `kanban.failure_limit`, then the built-in default. `terminal_provider: true` means the worker exited `78` on a provider error a retry cannot fix (credential revoked, model gone) — including a startup credential failure that explicitly requires re-login (`hermes auth` / `setup`), which exits `78` before the first turn; other startup failures exit `1` — and the breaker fired on that first attempt, sticky, regardless of the limit. |
 
 `hermes kanban tail <id>` shows these for a single task. `hermes kanban watch` streams them board-wide.
 
@@ -23546,7 +23571,7 @@ The `.env` keys above supply **credentials only**. The active cloud browser is c
 
 Browser Use mode uses the [Browser Use CLI 3.0](https://github.com/browser-use/browser-use) instead of the built-in browser tools. The agent writes and executes Python in the browser to click, type, drag, scrape, and interact with webpages.
 
-**This is the default browser mode**: when `browser.backend` is unset and the `browser-use` CLI is runnable (installed, or available through `uvx`), the agent gets the single `browser_exec` tool. If the CLI can't run, Hermes falls back to the built-in browser tools automatically.
+**This is the default browser mode**: when `browser.backend` is unset, the agent gets the single `browser_exec` tool. Its engine is browser-harness (the Browser Use CLI is a thin wrapper around it), a regular Python dependency of Hermes, so every install ships it, including the Desktop app, with no separate download. If it is ever missing from Hermes's environment, Hermes falls back to the built-in browser tools and `hermes update` restores it.
 
 The mode is a **driver** that composes with your configured browser backend: it drives Hermes' own headless Chromium, a Nous-subscription cloud browser, Browserbase, Firecrawl, or Browser Use cloud browsers — whichever browser source is selected in `hermes tools` → Browser Automation. The one exception is Camofox, which has no CDP endpoint for the harness to attach to; Camofox setups automatically keep the built-in browser tools.
 
@@ -23564,7 +23589,7 @@ browser:
 
 (`backend: "browser-use"` remains valid to force the mode explicitly.)
 
-Browser Use's own cloud browsers need `browser-use auth login` or `BROWSER_USE_API_KEY`; other browser sources use their existing credentials unchanged.
+Browser Use's own cloud browsers need `BROWSER_USE_API_KEY`; other browser sources use their existing credentials unchanged.
 
 :::note
 Because Browser Use mode executes model-written Python on your machine, the
@@ -26117,8 +26142,11 @@ old behavior: in-flight responses are lost on crash).
 
 Gateway conversations do not reset after inactivity or at a daily boundary. Use `/new`
 or `/reset` for an explicit new conversation; context compression remains automatic.
-Legacy `session_reset` settings, reset-policy overrides and reset-timer environment
-variables are ignored. Cached agents may be released to reclaim resources without
+Core ignores legacy `session_reset` settings, reset-policy overrides and reset-timer
+environment variables. If your config still sets `session_reset.mode` to `idle`, `daily`
+or `both`, gateway startup and `hermes doctor` warn about it. To keep time-based resets,
+install the catalog plugin that reads the same block unchanged:
+`hermes plugins install hermes-session-reset-policy`. Cached agents may be released to reclaim resources without
 replacing the durable conversation. Restart-recovery freshness limits automatic
 continuation, not the history loaded when you send a message.
 
@@ -37514,7 +37542,7 @@ External UIs can manage Hermes sessions over REST without standing up the dashbo
 | `GET` | `/api/sessions/{id}` | Read session metadata |
 | `PATCH` | `/api/sessions/{id}` | Update title or `end_reason` |
 | `DELETE` | `/api/sessions/{id}` | Delete a session |
-| `GET` | `/api/sessions/{id}/messages` | Message history for a session |
+| `GET` | `/api/sessions/{id}/messages` | Message history for a session. `inline_images=false` renders image attachments as `[image]` placeholders instead of inline data URIs — the transcript travels in kilobytes, for clients reading over a network |
 | `POST` | `/api/sessions/{id}/fork` | Branch the session via `SessionDB` lineage (matches CLI `/branch` semantics) |
 | `POST` | `/api/sessions/{id}/chat` | Run one synchronous agent turn |
 | `POST` | `/api/sessions/{id}/chat/stream` | SSE wrapper over a single turn — emits `assistant.delta`, `assistant.commentary` (mid-turn commentary: `message_id`, `text`, `already_streamed`; never folded into `assistant.completed`), `tool.started`, `tool.completed`, `tool.failed` (a tool that finished with an error), then a terminal `run.completed` / `run.failed` / `run.cancelled` event that matches how the turn ended (see [Terminal run status](../../developer-guide/programmatic-integration.md#terminal-run-status)) |
@@ -40228,7 +40256,7 @@ On a shared team bot, use Docker as the terminal backend so agent commands run i
 ```bash
 # In ~/.hermes/.env
 TERMINAL_ENV=docker
-TERMINAL_DOCKER_IMAGE=nikolaik/python-nodejs:python3.11-nodejs20
+TERMINAL_DOCKER_IMAGE=nousresearch/hermes-sandbox:desktop
 ```
 
 Or in `~/.hermes/config.yaml`:
@@ -44264,8 +44292,8 @@ The static fallback for `xai.grok-4.6` (including `global.` and `us.` inference
 profiles) is 500,000 tokens, per the
 [AWS model card](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-xai-grok-4-6.html).
 This is Bedrock-specific, not the direct xAI API window. Existing compression
-rules still apply: without output reservation, the small-window 75% threshold floor
-yields 375,000 at this window, which the default `threshold_tokens` cap (256,000) then lowers.
+rules still apply: without output reservation or an explicit token cap, the
+small-window 75% threshold floor yields a 375,000-token trigger at this window.
 
 ## Pluggable Context Engine
 
@@ -44493,10 +44521,10 @@ auxiliary:
 | Parameter | Default | Range | Description |
 |-----------|---------|-------|-------------|
 | `threshold` | `0.50` | 0.0-1.0 | Compression triggers when prompt tokens ≥ `threshold × context_length` (floored at 0.75 below 512K windows) |
-| `threshold_tokens` | `256000` | int or `null` | Absolute cap on the trigger: compaction fires at the lower of the ratio trigger and this count, so a 1M window compacts at 256K instead of 500K. `null` = ratio-only |
+| `threshold_tokens` | `null` | int or `null` | Optional absolute cap on the trigger: when set, compaction fires at the lower of the ratio trigger and this count. `null` = ratio-only |
 | `model_thresholds` | `{}` | map | Per-model overrides of `threshold`. Keys are substring-matched against the model name (longest match wins); `"<provider>:<substring>"` keys apply only on that provider. The small-context floor still applies on top (see below) |
 | `target_ratio` | `0.20` | 0.10-0.80 | Controls tail protection token budget: `threshold_tokens × target_ratio` (legacy mode only — `lean` uses its own clamp) |
-| `tail_mode` | `lean` | `lean`, `legacy` | Tail retention policy. `legacy` keeps a `target_ratio`-sized verbatim tail (~100K+ tokens on big-window models without the `threshold_tokens` cap). `lean` keeps a clamped tail of `2.5% × context window` (10K floor, 25K cap) and instead carries continuity in the summary: a detailed identifier-preserving session log (produced by the same single summary request — lean compaction makes exactly one auxiliary LLM call per attempt), a mechanically extracted anchor index (PR numbers, SHAs, paths, error strings — regex, never paraphrased), every real user message quoted verbatim (newest-first budget), and a `session_search` recovery pointer so the agent can re-access anything summarized away. Oversized regions are evenly sampled into the summarizer input (with explicit elision markers) rather than triggering extra calls. Result on 500K-token real sessions: ~49K retained vs ~162K, with higher recall when paired with recovery (see `evals/compaction/results/`). Old tool results inside the lean tail are demoted to one-line stubs carrying a recovery pointer |
+| `tail_mode` | `lean` | `lean`, `legacy` | Tail retention policy. `legacy` keeps a `target_ratio`-sized verbatim tail (~100K+ tokens on big-window models). `lean` keeps a clamped tail of `2.5% × context window` (10K floor, 25K cap) and instead carries continuity in the summary: a detailed identifier-preserving session log (produced by the same single summary request — lean compaction makes exactly one auxiliary LLM call per attempt), a mechanically extracted anchor index (PR numbers, SHAs, paths, error strings — regex, never paraphrased), every real user message quoted verbatim (newest-first budget), and a `session_search` recovery pointer so the agent can re-access anything summarized away. Oversized regions are evenly sampled into the summarizer input (with explicit elision markers) rather than triggering extra calls. Result on 500K-token real sessions: ~49K retained vs ~162K, with higher recall when paired with recovery (see `evals/compaction/results/`). Old tool results inside the lean tail are demoted to one-line stubs carrying a recovery pointer |
 | `protect_last_n` | `20` | ≥1 | Minimum number of recent messages always preserved |
 | `min_tail_user_messages` | `1` | ≥1 | Minimum number of REAL (actionable) user messages guaranteed to survive in the uncompressed tail. `1` = the existing single last-user anchor (behavior-preserving default). Raise to e.g. `3` to keep the last 3 real user turns verbatim even when bulky tool outputs fill the tail token budget. Blank platform echoes, compaction handoffs, and synthetic continuation rows never count toward N. The guarantee wins over the tail token budget — the tail may exceed the budget when the anchor pulls the cut back |
 | `protect_first_n` | `3` | (hardcoded) | System prompt + first exchange always preserved |
@@ -44526,7 +44554,7 @@ changing the selected tail policy. In `lean` mode the selection budget remains b
 on the **main model's context window**: 2.5%, clamped to 10K–25K tokens, and never more
 than 20% of that window (the 10K floor alone is 61% of a 16K local window, so without the cap a
 small model's "protected" tail was the whole request and compaction reclaimed nothing). For example,
-a 1M main model (`threshold_tokens: null`) with a 512K auxiliary model retains a 25K
+a 1M main model with a 512K auxiliary model retains a 25K
 selection budget even when feasibility lowers its trigger from 850K to 512K. Explicit `legacy` mode instead
 recomputes `threshold_tokens × target_ratio` (102,400 tokens at 512K × 0.20).
 These are tail-selection budgets, not strict limits on the entire compacted context:
@@ -44709,7 +44737,7 @@ max_summary_tokens   = min(200,000 × 0.05, 12,000) = 10,000
 ```
 
 :::note Threshold is derived from the MAIN model's context window
-`threshold_tokens` is `threshold × context_length` (then capped by `compression.threshold_tokens`), where `context_length`
+`threshold_tokens` is `threshold × context_length` (then capped by `compression.threshold_tokens` when set), where `context_length`
 is the **main agent model's** context window — never the auxiliary/summary
 model's. On a 262,144-token model at the default `0.50`, the threshold is
 `262,144 × 0.50 = 131,072`. That number being close to a common "128K context"
@@ -50800,7 +50828,11 @@ hermes profile alias work --remove
 hermes profile rename <old-name> <new-name>
 ```
 
-Renames a profile. Updates the directory and shell alias.
+Renames a profile. Updates the directory and shell alias. A gateway service installed under the
+old name (`hermes -p <old-name> gateway install`) is removed, whether or not the gateway is
+running, because it would start the old name at the next login; reinstall it with
+`hermes -p <new-name> gateway install`. Inside the Docker image the s6 gateway slot moves to the
+new name.
 
 | Argument | Description |
 |----------|-------------|
@@ -51407,7 +51439,7 @@ These variables configure the [Tool Gateway](../user-guide/features/tool-gateway
 |----------|-------------|
 | `TERMINAL_ENV` | Backend: `local`, `docker`, `ssh`, `singularity`, `modal`, `daytona`, `vercel_sandbox` |
 | `HERMES_DOCKER_BINARY` | Override the container binary Hermes shells out to (e.g. `podman`, `/usr/local/bin/docker`). When unset, Hermes auto-discovers `docker` or `podman` on `PATH`. Needed when both are installed and you want the non-default, or when the binary lives outside `PATH`. |
-| `TERMINAL_DOCKER_IMAGE` | Docker image (default: `nikolaik/python-nodejs:python3.11-nodejs20`) |
+| `TERMINAL_DOCKER_IMAGE` | Docker image (default: `nousresearch/hermes-sandbox:desktop`) |
 | `TERMINAL_DOCKER_FORWARD_ENV` | JSON array of env var names to explicitly forward into Docker terminal sessions. Note: skill-declared `required_environment_variables` are forwarded automatically — you only need this for vars not declared by any skill. |
 | `TERMINAL_DOCKER_VOLUMES` | Additional Docker volume mounts (comma-separated `host:container` pairs) |
 | `TERMINAL_DOCKER_ENV` | JSON object of extra env vars to set inside Docker terminal sessions (e.g. `{"FOO":"bar"}`) |
@@ -51742,6 +51774,7 @@ Three dashboard-auth providers ship in the box. For a remote Hermes Desktop conn
 | `HERMES_DESKTOP_PYTHON` | Absolute path to a Python interpreter for the backend, checked before Electron auto-resolves one for the source checkout. Used by worktree dev helpers (see [TUI & Desktop from Worktrees](../developer-guide/worktree-ui-dev.md)) to reuse a shared venv. |
 | `HERMES_DESKTOP_DEV_SERVER` | Vite dev-server URL the Electron shell loads instead of the packaged bundle (e.g. `http://127.0.0.1:5174`). Set automatically by `npm run dev`; only relevant when hacking on the app. |
 | `HERMES_DESKTOP_CDP_PORT` | Overrides the Chrome DevTools Protocol port the renderer exposes on `127.0.0.1` for DOM/CSS inspection tooling (default `9222`). Dev-server runs (`npm run dev`, `hgui`) open it automatically; a packaged app never does, and no value here changes that. Set to `off` to disable it on a dev run. Anything that can reach the port can execute code in the renderer. |
+| `HERMES_DESKTOP_NVIDIA_SWIFTSHADER` | (Desktop on Linux, NVIDIA only) Override for the EGL fallback that routes rendering through SwiftShader on driver series with a broken EGL probe (`580.x`, #40077): `1` forces the fallback on — the recovery hatch if a future series reintroduces the crash but is not yet in the closed list; `0` opts out and uses the native GPU path at your own risk. Force-on does not apply where another gate already disabled the GPU (remote display, WSLg, `HERMES_DESKTOP_DISABLE_GPU=0`). |
 | `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY` | (Desktop side) The in-app update check (`Help → Check for Updates…` and the passive update banner) reaches `api.github.com` through the proxy these standard variables name, with `NO_PROXY` exemptions honoured — the same convention `curl`, `npm` and `git` follow. Unset, the check connects directly. |
 
 ### Microsoft Graph (Teams Meetings)
@@ -70936,7 +70969,7 @@ Hermes calls this **no-agent mode**. It's the cron system minus the LLM.
 
 - **No LLM call.** Zero tokens, zero agent loop, zero model spend.
 - **Script is the job.** The script decides whether to alert. Emit output → message gets sent. Emit nothing → silent tick.
-- **Bash or Python.** `.sh` / `.bash` files run under `bash` from `PATH` when available, otherwise `/bin/bash`; any other extension runs under the current Python interpreter. Paths must resolve inside `~/.hermes/scripts/` (relative, absolute, or `~` forms are OK if they stay in that directory). Cron scripts do **not** inherit provider credentials from the Hermes process environment.
+- **Bash or Python.** `.sh` / `.bash` files run under `bash` from `PATH` when available, otherwise `/bin/bash`; any other extension runs under the current Python interpreter. A Python script can also pin a **user-managed venv** via `--interpreter` (see [Using your own Python environment](#using-your-own-python-environment)). Paths must resolve inside `~/.hermes/scripts/` (relative, absolute, or `~` forms are OK if they stay in that directory). Cron scripts do **not** inherit provider credentials from the Hermes process environment.
 - **Same scheduler.** Lives in `cronjob` alongside LLM jobs — pausing, resuming, listing, logs, and delivery targeting all work the same way.
 
 ## When to Use It
@@ -71059,16 +71092,47 @@ The "silent when empty" behavior is the key to the classic watchdog pattern: the
 
 ## Script Rules
 
-Scripts must live in `~/.hermes/scripts/`. This is enforced at both job-creation time and run time — absolute paths, `~/` expansion, and path-traversal patterns (`../`) are rejected. The same directory is shared with the pre-check script gate used by LLM jobs.
+Scripts must resolve inside `~/.hermes/scripts/`. This is enforced at run time — relative names, absolute paths, and `~`-prefixed paths are accepted when the resolved target stays in that directory; path traversal and symlink escapes are rejected. The same directory is shared with the pre-check script gate used by LLM jobs.
 
 Interpreter choice is by file extension:
 
 | Extension | Interpreter |
 |-----------|-------------|
 | `.sh`, `.bash` | `bash` from `PATH` (fallback `/bin/bash`) |
-| anything else | `sys.executable` (current Python) |
+| anything else | `sys.executable` (current Python), or a [configured interpreter](#using-your-own-python-environment) |
 
 We intentionally do NOT honour `#!/...` shebangs — keeping the interpreter set explicit and small reduces the surface the scheduler trusts.
+
+### Using your own Python environment
+
+By default a Python cron script runs under Hermes' own Python environment, which only carries Hermes' own dependencies — so a script that imports `openpyxl`, a database driver, or any other package you installed would fail with `ModuleNotFoundError`.
+
+You can point the job at a **user-managed venv** instead with `--interpreter`:
+
+```bash
+# 1. Create a venv you own — it survives Hermes reinstalls/rebuilds.
+uv venv ~/venvs/hermes-reporting --python 3.11
+uv pip install --python ~/venvs/hermes-reporting/bin/python openpyxl
+
+# 2. Schedule the job with that interpreter.
+hermes cron create "0 8 * * *" \
+  --no-agent \
+  --script daily-report.py \
+  --interpreter ~/venvs/hermes-reporting/bin/python \
+  --deliver telegram
+```
+
+Like `--model`, this is a user-owned setting: set it with `hermes cron create/edit`; the agent's `cronjob` tool can't.
+
+Rules:
+
+- The venv is **user-managed**. Hermes does not create, freeze, restore, or install packages into it — it just invokes the path you give.
+- The path must be **absolute or `~`-prefixed** (e.g. `~/venvs/reporting/bin/python3`). Bare names like `python3` are rejected, because they are not stable across `PATH` changes.
+- It must be a **Python executable** (`python`, `python3`, `python3.12`, …), including a symlink's target — `/bin/bash` or other interpreters are refused.
+- Applies **only to Python scripts**. `.sh` / `.bash` always run under bash regardless.
+- The job-level setting applies to both `script` and `monitor_script` when they are Python files.
+- It is validated **at run time**, not at creation — a cron job is long-lived, and the venv may be rebuilt or moved between when you create the job and when it fires. A missing or non-executable interpreter produces a clear script failure that is delivered like any other error.
+- To clear it later: `hermes cron edit <job_id> --interpreter ""`.
 
 ## Schedule Syntax
 
@@ -74368,7 +74432,7 @@ The strongest isolation is not running commands on your machine at all. The term
 ```yaml
 terminal:
   backend: docker
-  docker_image: "nikolaik/python-nodejs:python3.11-nodejs20"
+  docker_image: "nousresearch/hermes-sandbox:desktop"
   docker_forward_env: []  # Explicit allowlist only; empty keeps secrets out of the container
 ```
 
@@ -76210,8 +76274,8 @@ hermes pm install chromium
 
 | Command | Effect |
 |---|---|
-| `pm install [names...]` | Install named packages. With no names, provision required tools plus Python, put those tools on PATH, and then sync the `all` extra. A bare install also installs the default optional tools (`agent-browser` and Chromium); a failed download of these prints a warning and does not fail the install. Naming a package you declined earlier undoes that choice. |
-| `pm install --without NAME` | Do a bare install without the default optional package `NAME` (only `agent-browser`), and record that choice. Later bare installs and `hermes update` also leave it out. The installers' `--skip-browser` / `-SkipBrowser` use this. |
+| `pm install [names...]` | Install named packages. With no names, provision required tools plus Python, put those tools on PATH, and then sync the `all` extra. A bare install also installs the default optional tools (`agent-browser` and Chromium, `cua-driver`); a failed download of these prints a warning and does not fail the install. Naming a package you declined earlier undoes that choice. |
+| `pm install --without NAME` | Do a bare install without the default optional package `NAME` (`agent-browser` or `cua-driver`), and record that choice. Later bare installs and `hermes update` also leave it out. The installers' `--skip-browser` / `-SkipBrowser` and `--skip-computer-use` / `-SkipComputerUse` use this. |
 | `pm install --tools-only` | Install that tool closure and put it on PATH, then stop. The venv sync does not run. |
 | `pm env [names...]` | Print installed packages' PM-contributed environment values as JSON. It does not install missing packages, though a cold Hermes launch may prepare its own Python runtime first. |
 | `pm doctor` | Check installed tool identities, files, and digests against the lock. |
@@ -77018,7 +77082,7 @@ chats decide who replies: [Bot Mode: A Roster of Agents](./bot-mode.md).
 ### Keyboard & navigation
 
 - **Command palette** — press **Cmd+K** or **Cmd+P** (Ctrl+K / Ctrl+P on Windows/Linux) to jump to actions and navigate the app from the keyboard: open any page or settings section, jump to a session by title or id, switch model/theme/color mode, spawn a terminal, restart the gateway, update Hermes, and more.
-- **Rebindable shortcuts** — **Settings → Keyboard Shortcuts** (or **Cmd/Ctrl+/**) opens the shortcuts panel where you can remap almost every binding — profile switching, session navigation, view toggles, and any shortcuts contributed by desktop plugins. Duplicate assignments are flagged as conflicts. A few defaults worth knowing: **Cmd/Ctrl+N** new session, **Cmd/Ctrl+.** Command Center, **Cmd/Ctrl+,** Settings, **Cmd/Ctrl+Shift+F** search sessions, **Cmd/Ctrl+1–9** switch profiles, **Shift+X** toggle light/dark.
+- **Rebindable shortcuts** — **Settings → Keyboard Shortcuts** (or **Cmd/Ctrl+/**) opens the shortcuts panel where you can remap almost every binding — profile switching, session navigation, view toggles, and any shortcuts contributed by desktop plugins. Duplicate assignments are flagged as conflicts. A few defaults worth knowing: **Cmd/Ctrl+N** new session, **Cmd/Ctrl+.** Command Center, **Cmd/Ctrl+,** Settings, **Cmd/Ctrl+Shift+F** search sessions, **Cmd/Ctrl+1–9** switch to the Nth tab of the pane under the pointer (or the focused pane) and switch profiles when no pane has a tab strip, **Shift+X** toggle light/dark.
 - **Custom zoom shortcuts** — zoom the interface in half-step increments for finer control over text size.
 - **UI language switcher** — change the app's interface language in-app: English, Simplified Chinese (zh-Hans), Traditional Chinese (zh-Hant), Japanese, Arabic (RTL), and Russian.
 
@@ -78304,7 +78368,11 @@ browser act on, streamed live into Hermes Desktop. Watch what the bot does,
 **take over** when it hits a login, 2FA prompt, CAPTCHA or payment step, then
 **hand control back** and let it continue with the session you just signed in
 to. The bot keeps working after you close the app or turn off your laptop; the
-screen lives on the gateway host, not on your machine.
+screen lives on the gateway host, not on your machine. If the gateway runs its
+`terminal` in a sandbox (`terminal.backend: docker`, `ssh` or `singularity`),
+the screen lives **inside that sandbox** instead, alongside the shell, so the
+bot's `computer_use` and browser never act outside the boundary you drew (see
+[Where the screen runs](#where-the-screen-runs)).
 
 Every Hermes profile ("bot") has its own screen, its own browser profile and
 its own cookies. Screens are work surfaces, not security boundaries: the bots
@@ -78515,6 +78583,109 @@ hermes computer-use screen install [-y]    # apt/dnf/pacman the packages
 hermes -p research computer-use screen start   # another bot's screen
 ```
 
+## Where the screen runs
+
+`computer_use`, the bot's browser and the screen they act on always run in the
+same place. `bot_desktop.placement` decides where:
+
+| `terminal.backend` | `placement: auto` (default) | What that means |
+|---|---|---|
+| `local` | gateway host | The terminal, the screen, the browser and `computer_use` all share the machine running the gateway. |
+| `docker`, `ssh`, `singularity` | **inside the sandbox** | Xvnc + Xfce, Chromium and cua-driver run in the container / on the SSH host, spawned through the same `docker exec` / `ssh` channel the terminal uses. The pane streams the sandbox's screen; nothing of the host desktop is reachable. |
+| `modal`, `daytona`, `vercel_sandbox` | **refused** | These backends cannot host a display yet. Rather than quietly running the screen on the host beside the sandbox you chose for the agent, `Start` explains and points at `placement: gateway`. |
+
+`placement: gateway` forces the pre-existing behaviour (screen on the gateway
+host even with a sandboxed terminal) as an explicit opt-in; `placement:
+terminal` forces the sandbox and errors when it cannot host one (with a
+`local` backend the terminal *is* the gateway host, so it resolves there).
+
+Placement is policy, not a snapshot of what happens to be running. When the
+screen is placed in the sandbox, the first browser or `computer_use` call
+brings it up there on demand (no `auto_start` opt-in needed: the sandbox is
+the boundary you chose, and a screen inside it touches nothing outside it),
+and when it cannot come up the call fails with the reason. The host is never
+the fallback for a sandbox whose screen is down. A gateway restart does not
+lose the screen either: the host-side marker records which container owns
+it, so the restarted gateway re-attaches to a still-running sandbox, and
+`Stop` takes down the screen where it actually runs even if you changed
+`placement` in the meantime.
+
+### The sandbox image
+
+The sandbox needs the desktop stack. `nousresearch/hermes-sandbox:desktop` is
+the default image for every container backend (Docker, Modal, Daytona,
+Singularity): the `nikolaik/python-nodejs` base (Python 3.13 / Node 26) plus
+TigerVNC, the Xfce components, a headed Chromium, `agent-browser`, `cua-driver`
+and the everyday tools that base lacked (jq, ripgrep, fd, tmux, rsync, sudo for
+the image's `pn` user). Its default user is root, like the old default, so
+shell workflows do not change. An image you pinned yourself is left alone, and
+the screen then tells you it needs this image or `bot_desktop.placement: gateway`:
+
+```yaml
+terminal:
+  backend: docker
+  docker_image: nousresearch/hermes-sandbox:desktop
+```
+
+With a plain image the Screen pane reports the missing binaries and names
+this tag.
+
+Under Singularity/Apptainer the same image is converted to a SIF
+(`docker://nousresearch/hermes-sandbox:desktop`); Dockerfile `ENV` survives the
+conversion, the image's `USER` does not: everything runs as you, so the browser
+profile lands in your `$HOME` inside the container, which is the persistent
+overlay by default. The instance runs `--containall`, so its temp dir (where the
+screen's runtime state lives) is Apptainer's session tmpfs, 64 MiB unless your
+admin raised `sessiondir max size`. This path is verified against the Apptainer
+documentation, not exercised live.
+
+An SSH host is whatever you point the backend at, so it carries the stack
+itself: the same binaries (TigerVNC, Xfce, `cua-driver`, `agent-browser` with a
+Chromium it can find), reachable from a **non-interactive login session**. That
+last part is where a host built from the desktop image differs from `docker exec`:
+a Dockerfile `ENV` never reaches an ssh session, so the image also writes
+`PLAYWRIGHT_BROWSERS_PATH` to `/etc/environment` for PAM to apply. A host of
+your own needs the equivalent, or `agent-browser` reports "Chrome not found"
+over ssh while working in a local shell.
+
+**Upgrading from the previous default.** A Docker sandbox you already have is
+kept, not replaced: when `docker_image` is unset and a persisted container runs
+another image (the old default, `nikolaik/python-nodejs:python3.11-nodejs20`),
+the terminal keeps using that container and you decide the switch. The
+interactive CLI asks once at startup; the Screen pane shows the same choice
+with **Switch image** / **Keep current image**; `hermes config set
+terminal.docker_image nousresearch/hermes-sandbox:desktop` is the same answer
+from any shell. Either answer writes `terminal.docker_image`, and a written
+image is a decision: the container is recreated on the next terminal call only
+when you chose the new image, and only once the new image has been pulled (a
+private or misspelled tag, or a registry outage, keeps your current container
+running instead of leaving you with nothing). What a switch means: files under `/root` and
+`/workspace` stay (they are host directories under `~/.hermes/sandboxes/`),
+packages installed inside the container with `apt`/`pip`/`npm -g` are
+reinstalled on demand, and Python 3.11 virtualenvs need a rebuild on 3.13.
+Gateways and cron never decide; they keep the sandbox and log the notice.
+Configs that literally held the old default were unset on upgrade (that value
+was the template copied, not a pin). Modal restores its snapshot and Daytona
+reuses its labeled sandbox regardless of the configured image, so an existing
+sandbox there is untouched and only a fresh one gets the new image. Desktop processes run as the image's unprivileged `pn` (uid 1000);
+Chromium gets `--no-sandbox` inside containers (Docker's seccomp profile
+denies the user namespaces its own sandbox needs; the container is the
+sandbox).
+
+Runtime state inside the sandbox (X socket, cookie, launcher log) lives under
+`<sandbox tmp>/hermes-bot-desktop/<profile>/`; the host keeps only a marker under
+`<HERMES_HOME>/bot-desktop/`. The browser profile (logins, cookies) lives in the
+desktop user's home inside the sandbox, `~/.hermes/bot-desktop/browser-profile`,
+shared by the agent's browser and the dock's **Browser** icon. It follows the
+container's own persistence: kept across stops and restarts of a persisted
+container, gone with an ephemeral one or when you approve an image switch (the
+container's writable layer is what a switch replaces). It is deliberately not
+under the container's temp dir, which Docker mounts as a small tmpfs that is emptied on every stop.
+Screenshots the browser tools take are copied back to the host so `MEDIA:`
+paths keep working, the pane's thumbnail is grabbed inside the sandbox, and
+`browser_exec` / the vault autofill reach the sandbox's Chromium through a port
+forwarded over the same `docker exec` / `ssh` channel.
+
 ## Configuration
 
 ```yaml
@@ -78523,6 +78694,7 @@ bot_desktop:
   auto_start: false         # set true to start on the first computer_use call or headed browser use
   min_free_memory_mb: 1536  # refuse to start below this much free memory (0 = never check)
   idle_stop_minutes: 30     # stop a screen nobody used for this long (0 = keep it up)
+  placement: auto           # auto | terminal | gateway — see "Where the screen runs"
 ```
 
 `auto_start` is off by default. Start the screen from the Desktop's Screen
@@ -79162,12 +79334,30 @@ For the underlying contract — *why* background mode matters, the
 no-foreground invariant, click-dispatch internals — see
 **[cua.ai/docs/explanation/the-no-foreground-contract](https://cua.ai/docs/explanation/the-no-foreground-contract)**.
 
+## Which machine it drives
+
+`computer_use` acts on the same machine the bot's screen lives on, never on
+the machine running Hermes Desktop. On a gateway with `terminal.backend:
+local` that is the gateway host. With a sandboxed terminal (`docker`, `ssh`,
+`singularity`) the driver runs **inside the sandbox** on the sandbox's own
+display, so it can only ever touch what the terminal can; the sandbox image
+must carry `cua-driver` (`nousresearch/hermes-sandbox:desktop` does). Modal,
+Daytona and Vercel sandboxes cannot host a display yet, so with those
+backends `computer_use` refuses unless `bot_desktop.placement: gateway` opts
+into driving the host. Details: [Bot Screen → Where the screen
+runs](./bot-screen.md#where-the-screen-runs).
+
 ## Enabling
 
-**The driver is a PM-managed tool.** `cua-driver` is pinned in
-`pm/lock.json`; the installer does not fetch it up front (there is no
-`--skip-computer-use` / `-SkipComputerUse` flag), and it is prepared the
-first time something enables Computer Use:
+**The driver ships with Hermes.** `cua-driver` is pinned in `pm/lock.json`
+and is a default PM package: the installers, a bare `hermes pm install`, and
+`hermes update` install it on every macOS, Windows, and glibc Linux target
+(cua-driver publishes no musl or Android build). The desktop app's bundle
+carries it too. To leave it out, pass `--skip-computer-use` on POSIX or
+`-SkipComputerUse` on Windows (or run `hermes pm install --without cua-driver`);
+Hermes remembers the choice, and `hermes pm install cua-driver` undoes it.
+
+If the download failed or you opted out earlier, any of these installs it:
 
 - **`hermes tools`** → pick `🖱️  Computer Use` — installs the driver
   automatically if it's still missing.
@@ -92620,7 +92810,7 @@ that live on one gateway.
 - Selecting a gateway restores the last profile used there. The home pill
   returns to its default profile and the layers pill shows **All profiles on
   this gateway**. **Cmd/Ctrl+1–9** continue to switch profiles within the
-  active gateway.
+  active gateway whenever no pane has a tab strip to claim them.
 - With several gateways the profile rail is a **fleet rail**: every registered
   gateway's profiles sit on the one strip, each group headed by that gateway's
   kind glyph (device, network, terminal, cloud) — the same glyph the gateway
@@ -93106,7 +93296,10 @@ A standalone profile's adapters, cron, webhook ingress and Kanban
 notifications run only while its own gateway runs, not under the host
 multiplexer or `hermes serve`. Point webhook clients at the standalone
 gateway's own listener; the host's `/p/<profile>/` ingress no longer serves
-it. The cron destination picker still lists standalone profiles as
+it. That listener resolves its port from the profile's own `.env` or
+`config.yaml`, so when both it and the host gateway enable the API server or
+webhook ingress, give the profile its own `API_SERVER_PORT` / `WEBHOOK_PORT`;
+two gateways left on the defaults both try to bind them. The cron destination picker still lists standalone profiles as
 `bot-chat:<name>` targets, but the host cannot deliver to those targets.
 
 `hermes -p coder gateway status` prints `standalone by config
@@ -94035,7 +94228,8 @@ single failed apply so that no profile is left without a gateway.
 
 Not covered automatically: s6-supervised containers — they converge on the next
 container start (the per-profile slots are registered down and the root gateway
-multiplexes). Windows Scheduled Tasks are folded by the command. The dashboard's
+multiplexes; a `gateway.standalone: true` profile boots its own slot from its own
+run intent instead). Windows Scheduled Tasks are folded by the command. The dashboard's
 System page offers the same migration as a button when the preflight finds an
 eligible install.
 
