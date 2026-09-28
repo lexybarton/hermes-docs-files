@@ -962,7 +962,7 @@ For an admitted source checkout, `hermes update` runs these phases:
 3. **Post-pull syntax validation + auto-rollback** — after the pull, Hermes compiles the nine critical files every `hermes` invocation imports at startup. If any fails to parse (e.g. an orphan merge-conflict marker, an accidentally truncated file), Hermes rolls the install back so your shell stays bootable: it resets the checkout to the commit it ran before the pull (`git reset --hard <pre-pull-sha>`), or, when the update switched away from a detached checkout or a parked feature branch, returns there with `git checkout --detach <sha>` / `git checkout <branch>` (a branch it cannot check out again is restored detached at the same commit). Re-run `hermes update` once the upstream fix lands.
 4. **Dependency preparation** — PM provisions required tools and prepares a complete Python environment from the new lock, existing extras, and enabled plugin requirements. It validates that environment before publishing its selection. A plugin never fails the update. A plugin that no longer fits the new core is added to `plugins.disabled` in every profile that enables it (a memory provider has `memory.provider` cleared). That covers a `requires-python` that excludes Hermes's Python, a `manifest_version` newer than this Hermes supports, and dependencies that the resolver proves can't resolve alongside core and earlier plugins in config order, or that fail their own build. A download or network failure gets one retry and is disabled if it fails again. The update prints `⚠ Disabled plugin '<name>' in <home>: <reason>`, records it in the receipt's warnings, and continues. Re-enable it with `hermes plugins enable <name>` once the plugin ships a compatible release, or once the network is back. A `requires_hermes` range the running version misses never disables a plugin, because a source checkout without release tags can read as an older release. That plugin sits out instead (`⚠ Left plugin '<name>' … out of this update`), stays enabled, and rejoins once Hermes reports a version it accepts. A secondary profile whose config cannot be read sits out the same way until the config is fixed. Only a core that cannot build on its own fails this step.
 5. **Config migration** — detects new config options added since your version and prompts you to set them
-6. **Desktop rebuild (stage-and-swap)** — if the Hermes Desktop app was built from this checkout, it is rebuilt so the GUI matches the new code. The rebuild packs into a temporary staging directory next to `apps/desktop/release/`, verifies the staged app, and only then renames it over the previous build (on Windows a real-time scanner briefly holding `release/win-unpacked` is ridden out with a few short retries). A rebuild that fails at any point — corrupt Electron download, missing dependency, disk full — leaves the previous app untouched and launchable; the update fails at that step, and `hermes desktop --build-only --force-build` or the next `hermes update` retries the rebuild. On macOS the rebuilt bundle is then copied (with `ditto`, signature intact) over a stale `/Applications/Hermes.app` or `~/Applications/Hermes.app`, so the copy Finder and the Dock launch matches the backend; an installed copy that is currently running is left alone and the update tells you to quit it and run `hermes update` again. On Windows, when the update finishes from inside the Desktop app it would rebuild (the app completing an interrupted update at launch), the rebuild is skipped with a notice instead: Windows locks a running app's files, and stopping the app would end the update with it. The rest of the update completes; quit Hermes Desktop and run `hermes desktop` from a terminal, or use **Update now** in **Settings → About**, to rebuild and reopen it.
+6. **Desktop rebuild (stage-and-swap)** — if the Hermes Desktop app was built from this checkout, it is rebuilt so the GUI matches the new code. The rebuild packs into a temporary staging directory next to `apps/desktop/release/`, verifies the staged app, and only then renames it over the previous build (on Windows a real-time scanner briefly holding `release/win-unpacked` is ridden out with a few short retries). A rebuild that fails at any point — corrupt Electron download, missing dependency, disk full — leaves the previous app untouched and launchable; the update fails at that step, and `hermes desktop --build-only --force-build` or the next `hermes update` retries the rebuild. On macOS the rebuilt bundle is then copied (with `ditto`, signature intact) over a stale `/Applications/Hermes.app` or `~/Applications/Hermes.app`, so the copy Finder and the Dock launch matches the backend; an installed copy that is currently running is left alone and the update tells you to quit it and run `hermes update` again. If a copy an earlier update installed has since been removed (including dragged to the Trash), the update rebuilds it if needed, puts it back and says so, so Finder, the Dock and Spotlight find Hermes again; `hermes uninstall` removes the app for good. On Windows, when the update finishes from inside the Desktop app it would rebuild (the app completing an interrupted update at launch), the rebuild is skipped with a notice instead: Windows locks a running app's files, and stopping the app would end the update with it. The rest of the update completes; quit Hermes Desktop and run `hermes desktop` from a terminal, or use **Update now** in **Settings → About**, to rebuild and reopen it.
 7. **Gateway auto-restart**: running gateways are refreshed after the update completes. Service-managed gateways (systemd on Linux, launchd on macOS) restart through the service manager. Manual gateways are relaunched when Hermes can map their PID to a profile. Manually launched `hermes serve` / `hermes dashboard` backends are different: the updater leaves them running and asks their owner to restart them. See [Manual backend restart reminders](#manual-backend-restart-reminders). Backends owned by a running Desktop app remain the app's responsibility.
 8. **Multiplex migration (multi-profile installs)** — once the fleet is verified on the new code, an install with two or more profiles that still run **one gateway per profile** is folded into a single multiplexed default gateway when nothing blocks it (same as `hermes gateway migrate --multiplex --yes`); if a blocker exists (a bot token shared by two profiles, a secondary profile binding a port with no `/p/<profile>/` ingress) the update prints the blockers with their fixes and changes nothing. Single-profile installs are never touched. See [Migrating from per-profile gateways](../user-guide/multi-profile-gateways.md#migrating-from-per-profile-gateways).
 
@@ -3982,7 +3982,7 @@ terminal:
 
 **Required:** Either `MODAL_TOKEN_ID` + `MODAL_TOKEN_SECRET` environment variables, or a `~/.modal.toml` config file.
 
-**Persistence:** When enabled, the sandbox filesystem is snapshotted on cleanup and restored on next session. Snapshots are tracked in `~/.hermes/modal_snapshots.json`. This preserves filesystem state, not live processes, PID space, or background jobs.
+**Persistence:** When enabled, the sandbox filesystem is snapshotted on cleanup and restored on next session. Snapshots are tracked in `~/.hermes/modal_snapshots.json` and are retained until you delete them (Hermes opts out of the Modal SDK's 30-day snapshot expiry). This preserves filesystem state, not live processes, PID space, or background jobs.
 
 **Credential files:** Automatically mounted from `~/.hermes/` (OAuth tokens, etc.) and synced before each command.
 
@@ -4012,7 +4012,7 @@ Runs commands in a [Vercel Sandbox](https://vercel.com/docs/vercel-sandbox) clou
 ```yaml
 terminal:
   backend: vercel_sandbox
-  vercel_runtime: node24          # node24 | node22 | python3.13
+  vercel_image: vercel/sandbox/universal:latest   # Vercel managed image or a VCR repository[:tag]
   cwd: /vercel/sandbox            # default workspace root
   container_persistent: true      # Snapshot/restore filesystem
   container_disk: 51200           # Shared default only; custom disk is unsupported
@@ -4040,7 +4040,7 @@ VERCEL_OIDC_TOKEN="$(vc project token)" hermes chat
 
 OIDC tokens are short-lived and should not be used as the documented deployment path.
 
-**Runtime:** `terminal.vercel_runtime` supports `node24`, `node22`, and `python3.13`. If unset, Hermes defaults to `node24`.
+**Image:** `terminal.vercel_image` picks the container image for fresh sandboxes: a [Vercel managed image](https://vercel.com/docs/sandbox/concepts/images) such as `vercel/sandbox/universal:latest` (the default: Ubuntu, Node.js 24, Python 3.14), `vercel/sandbox/node:26` or `vercel/sandbox/python:3.14`, or a repository from your project's Vercel Container Registry (a bare name resolves to `latest`; a tag or digest pins it). The older `terminal.vercel_runtime` presets (`node24`, `node22`, `python3.13`) are [deprecated by Vercel](https://vercel.com/docs/sandbox/concepts/runtimes); a pinned runtime still works and overrides the image, but the two cannot be combined. Snapshot restores carry their own filesystem and send neither.
 
 **Persistence:** When `container_persistent: true`, Hermes snapshots the sandbox filesystem during cleanup and restores a later sandbox for the same task from that snapshot. Snapshot contents can include Hermes-synced credentials, skills, and cache files that were copied into the sandbox. This preserves filesystem state only; it does not preserve live sandbox identity, PID space, shell state, or running background processes.
 
@@ -5736,7 +5736,9 @@ If writes to Hermes state (cron jobs, skills, scripts under `~/.hermes/`) are fa
 
 The `display.language` setting translates a small set of static user-facing messages — the CLI approval prompt, a handful of gateway slash-command replies (e.g. restart-drain notices, "approval expired", "goal cleared"). It does **not** translate agent responses, log lines, tool output, error tracebacks, or slash-command descriptions — those stay in English. If you want the agent itself to reply in another language, just tell it in your prompt or system message.
 
-Supported values: `en` (default), `zh` (Simplified Chinese), `zh-hant` (Traditional Chinese), `ja` (Japanese), `de` (German), `es` (Spanish), `fr` (French), `tr` (Turkish), `uk` (Ukrainian), `af` (Afrikaans), `ko` (Korean), `it` (Italian), `ga` (Irish), `pt` (Portuguese), `ru` (Russian), `hu` (Hungarian). Unknown values fall back to English.
+Bundled values: `en` (default), `zh` (Simplified Chinese), `zh-hant` (Traditional Chinese), `ja` (Japanese), `de` (German), `es` (Spanish), `fr` (French), `tr` (Turkish), `uk` (Ukrainian), `af` (Afrikaans), `ko` (Korean), `it` (Italian), `ga` (Irish), `pt` (Portuguese), `ru` (Russian), `hu` (Hungarian), `ar` (Arabic).
+
+The list is **pluggable**: a [language pack](features/language-packs.md) plugin (`provides_locales`) or a partial `<HERMES_HOME>/locales/<lang>.yaml` overlay adds a language or overrides wording, and `hermes config set display.language <id>` accepts any id a bundled catalog, your overlay, or an installed pack provides. Unknown ids are refused with the list of available languages; at runtime an unresolvable value falls back to English.
 
 You can also set this per-session with the `HERMES_LANGUAGE` env var, which overrides the config value.
 
@@ -10429,7 +10431,7 @@ With the switch off Hermes never reads or refreshes those files: the `claude_cod
 - Credential files are mounted **read-only** into Docker containers
 - Skills Guard scans skill content for suspicious env access patterns before installation
 - Missing/unset vars are never registered (you can't leak what doesn't exist)
-- Hermes infrastructure secrets (provider API keys, gateway tokens) should never be added to `env_passthrough` — they have dedicated mechanisms
+- Hermes infrastructure secrets (provider API keys, gateway tokens) should never be added to `env_passthrough` — they have dedicated mechanisms. Such a name is refused when declared, and a declared name that a platform adapter claims later (a plugin adapter registering after the skill loaded) stops being forwarded from then on
 
 ## MCP Credential Handling
 
@@ -11275,10 +11277,10 @@ hermes config set terminal.backend modal
 ```bash
 python -c "import pm; pm.sync_venv(['vercel'], explicit=True)"
 hermes config set terminal.backend vercel_sandbox
-hermes config set terminal.vercel_runtime node24
+hermes config set terminal.vercel_image vercel/sandbox/universal:latest
 ```
 
-Authenticate with all three of `VERCEL_TOKEN`, `VERCEL_PROJECT_ID`, and `VERCEL_TEAM_ID`. This access-token setup is the supported path for deployments and normal long-running Hermes processes on Render, Railway, Docker, and similar hosts. Supported runtimes are `node24`, `node22`, and `python3.13`; Hermes defaults to `/vercel/sandbox` as the remote workspace root.
+Authenticate with all three of `VERCEL_TOKEN`, `VERCEL_PROJECT_ID`, and `VERCEL_TEAM_ID`. This access-token setup is the supported path for deployments and normal long-running Hermes processes on Render, Railway, Docker, and similar hosts. Fresh sandboxes start from `terminal.vercel_image` (default `vercel/sandbox/universal:latest`; the legacy `vercel_runtime` presets are deprecated by Vercel); Hermes defaults to `/vercel/sandbox` as the remote workspace root.
 
 For one-off local development, Hermes also accepts short-lived Vercel OIDC tokens:
 
@@ -13754,6 +13756,12 @@ OpenViking server settings live in `ov.conf` (`--config`,
 `OPENVIKING_CONFIG_FILE`, or `~/.openviking/ov.conf`). Client connection values
 live in `ovcli.conf` (`OPENVIKING_CLI_CONFIG_FILE` or
 `~/.openviking/ovcli.conf`).
+
+When the endpoint is local and nothing is listening, Hermes starts
+`openviking-server` in the background. That server gets your model-provider
+keys (for its embedding and VLM models), your `HOME` and
+`OPENVIKING_CONFIG_FILE`, but never bot, gateway or relay tokens, and not
+Hermes's `PYTHONPATH`. Put anything else the server needs in `ov.conf`.
 
 **Key features:**
 - Tiered context loading: L0 (~100 tokens) → L1 (~2k) → L2 (full)
@@ -45537,7 +45545,8 @@ later.
 
 Abridged — the full schema also includes `effect_disposition`,
 `platform_message_id`, `observed`, `active`, `compacted`, `api_content`,
-`display_kind`, and `display_metadata`:
+`display_kind`, `display_metadata`, `message_uid`, `absorbed_message_uids`,
+`tool_call_uids`, and `tool_call_uid`:
 
 ```sql
 CREATE TABLE IF NOT EXISTS messages (
@@ -45572,6 +45581,9 @@ Notes:
 - A reasoning-only clean stop (empty `content`, `finish_reason=stop`, reasoning present) is answered with the reasoning text, but the assistant row is never written with that text as `content`: `content` stays empty, the text lives in `reasoning`/`reasoning_content`, and `api_content` carries it so the next request replays the answer byte-identically. History surfaces therefore show it as reasoning, not as a reply.
 - `api_content` is a byte-fidelity sidecar: the exact content string sent to the API for this message when it differs from `content` (ephemeral memory/plugin injections, persist overrides). It preserves the wire bytes for prompt-cache-stable replay — stored as sent, except lone surrogates, which sqlite3 cannot bind and which the conversation loop scrubs from every outgoing payload anyway. `NULL` means `content` was sent verbatim.
 - Timestamps are Unix epoch floats (`time.time()`)
+- `message_uid` is the durable per-message id (32 hex, `uuid4().hex`): minted once at a row's first insert and copied by every clone (in-place compaction generations, rotation children, concurrent-tail clones, `replace_messages` re-issues, export/import), so one logical message keeps one uid while its physical `id` changes. Row-addressed rewrites leave it alone. It is restored on every projection (`get_messages_as_conversation` sets it unconditionally; `_row_id` stays opt-in) and stripped from provider requests. Context engines key their own per-message state on it — see [Context Engine Plugins](./context-engine-plugin.md#stable-message-identity-message_uid).
+- `absorbed_message_uids` is the merge witness: a JSON list of the `message_uid`s the host folded into this row (alternation repair's user and assistant merges, the compressor's in-flight restatement and anchor folds, micro-compaction's adjacent-user merge; the composite keeps the first constituent's uid). Written when the survivor is flushed, rewritten with it, restored as the live `_absorbed_message_uids`, `NULL` on rows that absorbed nothing.
+- `tool_call_uids` (assistant rows) is a JSON `{tool_call_id: uid}` map giving each entry of `tool_calls` a per-occurrence id, because provider tool-call ids repeat (calls repeating an id inside one response share its uid; after two assistant turns are folded, an id both name maps to a list of uids, one per occurrence in call order); `tool_call_uid` (tool rows) is the matching value for the result. The `tool_calls` JSON itself is never modified. Minted at the assistant row's first insert, paired onto the result at flush or, when the column is `NULL`, derived on restore from the preceding assistant row; restored as the live `_tool_call_uids` / `_tool_call_uid`.
 
 ### FTS5 Full-Text Search
 
@@ -45594,7 +45606,7 @@ indexed columns — see `SCHEMA_SQL` in `hermes_state_common.py` for the exact S
 
 ## Schema Version and Migrations
 
-Current schema version: **23**
+Current schema version: **31**
 
 The `schema_version` table stores a single integer. Simple column additions are handled declaratively by `_reconcile_columns()` (which diffs live columns against `SCHEMA_SQL` and ADDs any missing ones). The version-gated chain is reserved for data migrations and index/FTS changes that can't be expressed declaratively:
 
@@ -45618,6 +45630,7 @@ The `schema_version` table stores a single integer. Simple column additions are 
 | 23 | FTS storage redesign — external-content FTS tables replacing the v11 inline-mode copies (opt-in transition for existing DBs) |
 | 29 | Cron sessions leave the trigram (substring/CJK) index; `messages_fts_trigram_src` view + triggers filter on `sessions.source`, one-time rebuild purges historical rows |
 | 30 | Delegate-child (subagent) sessions leave the trigram index too — `source='subagent'` or the `$._delegate_from` marker (`FTS_TRIGRAM_SESSION_SQL`). Rows stay in `messages` and the standard `messages_fts` word index, so `session_search` still finds them; only the ~2.6× trigram shadow tables shrink. Same one-time rebuild as v29 |
+| 31 | `messages.message_uid`, `absorbed_message_uids`, `tool_call_uids`, `tool_call_uid` (declarative column adds), a backfill of a fresh `message_uid` onto every row that predates the column (2,000-id chunks, each its own short write; one open spends about a second past its first chunk and resumes from the `message_uid_backfill_id` meta cursor on the next open, until the `message_uid_backfill` marker ends it, so a large store never holds the write lock for the whole table), and the `messages_message_uid_insert` trigger that mints one for any row inserted without it (an older build writing into the store), so a v31 store hands every row to consumers with an id (tool-call uids are minted when a row is next written; results are paired on restore) |
 
 Versions not listed above were declarative column additions handled by `_reconcile_columns()` (version bump only, no data migration).
 
@@ -55957,6 +55970,88 @@ Contract:
 - **Ordering / cache stability.** The hook runs **before** prompt cache-control and every request sanitizer, so (a) a replacement still passes the same validation as any request, and (b) the no-op default leaves the request byte-identical — prompt-cache behaviour is unchanged for non-implementing engines. An engine that replaces the list changes only its own cache prefix. Evaluated per provider request (re-runs on retries).
 - **`on_turn_complete()`** is post-turn observation only; treat `messages` as read-only. **Coverage is best-effort:** it fires from the standard turn-finalization seam. Some abnormal early-return paths in the loop (e.g. a content-policy block or a provider terminal failure) persist and return without routing through finalization, so they do not currently emit this hook — treat it as a best-effort observation for completed turns, not a guaranteed callback for every early exit. Unifying all terminal paths behind one finalization seam is a separate follow-up.
 
+### Stable message identity: `message_uid`
+
+Every message the host has persisted carries `message_uid`: a 32-hex id
+(`uuid4().hex`) minted once, at the row's first insert, and stored in
+`messages.message_uid`. It is the key to use when an engine keeps its own
+per-message state (a verbatim store, a summary DAG, per-message embeddings)
+and needs to recognise a message it has already seen. The physical row id
+(`_row_id`) is not that key: it is re-issued by every copy and only present on
+some restore paths.
+
+What the host guarantees:
+
+- **Present on every engine surface** once a row exists: the `compress()`
+  input list, `on_turn_complete()` clones, `post_llm_call`'s
+  `conversation_history`, `on_session_end()` messages, and every restored
+  history (CLI, TUI, ACP, gateway, compression's durable-snapshot adoption). It
+  is restored unconditionally, unlike `_row_id`. The one exception is a row
+  written before the column existed: on a large store the upgrade mints those
+  over the next few opens, so a legacy row can briefly arrive without one.
+  Treat a missing uid as "no identity yet", never as an error.
+- **Kept across every host copy of the same logical message:** in-place
+  compaction generations and their concurrent-tail clones, rotation-child
+  handoff copies and foreign-tail clones, `replace_messages` re-issues,
+  rewind, export/import, and `/branch` / Desktop branch copies (the child
+  session's copied rows keep the parent's uids).
+- **Kept across content rewrites of the same row:** the persist override, the
+  sanitizer's row-addressed rewrite, the interrupted-stream fill. Treat
+  `(message_uid, content)` as a *version* of the message; never fail closed on
+  a content change under a known uid.
+- **Merges keep the first constituent's uid and record the rest.** Whenever
+  the host folds one durable message into another (alternation repair's
+  consecutive-user and consecutive-assistant merges, the compressor restating
+  an in-flight task onto its summary carrier, the real user anchor folded into
+  a trailing scaffolding turn, micro-compaction's adjacent-user merge), the
+  composite keeps the uid of the constituent whose text comes first and
+  records the others in `_absorbed_message_uids` (text order). The list is
+  persisted on the survivor's row (`messages.absorbed_message_uids`) and
+  restored with it, so after a restart an engine still sees that `A\n\nB` is
+  the host's fold of `A` and `B` rather than a new message. Merges made while
+  restoring a history (`repair_alternation=True`) record the witness the same
+  way. A row the host discards rather than folds (a provisional verification
+  candidate superseded by the final answer, or an assistant turn whose text
+  sits beside multimodal content, which is never joined) is not recorded: the
+  witness names text that lives on in the composite, nothing else.
+- **Engine-authored rows keep the uid the engine sets.** If your `compress()`
+  output pre-stamps `message_uid` on a summary carrier (or any row it emits),
+  the host writes that value through the commit, both in place and on
+  rotation, and every later restore and copy returns it; rows without one are
+  minted at insert. An engine can therefore recognise its own rows by uid.
+- **A uid names one logical message, not one row.** Copies of a message share
+  it by design, and a host path that re-appends an edited or merged message
+  next to a still-active earlier row (a persist override on a restored list,
+  a merged survivor flushed as a new row) leaves two active rows with one uid.
+  Never assume per-row uniqueness in the active set; key your own state on
+  the uid and treat the later row as the current version.
+- **Tool calls get per-occurrence ids too.** Provider tool-call ids repeat
+  (Hermes mints deterministic `call_<12hex>` ids for identical calls, and models
+  reuse ids), so an assistant message carries `_tool_call_uids`, a
+  `{tool_call_id: uid}` map for its `tool_calls`, and each tool-result message
+  carries the matching `_tool_call_uid`. Calls that repeat a provider id inside
+  one response share one uid (every result carries it, so no call looks
+  unanswered). When a fold leaves one message holding calls from two turns
+  that share an id, that id maps to a list of uids, one per occurrence in
+  `tool_calls` order. The provider-facing `id` inside
+  `tool_calls` is untouched. Both are minted at the assistant row's first
+  insert, paired onto the result when it is flushed (same batch, or from the
+  live list when the result lands in a later flush) and on restore (from the
+  preceding assistant row), persisted (`messages.tool_call_uids`,
+  `messages.tool_call_uid`), and kept across the same copy and rewrite paths
+  as `message_uid`. A result whose call was never persisted with a uid has none.
+- **Never on the wire.** `message_uid`, `_absorbed_message_uids`,
+  `_tool_call_uids` and `_tool_call_uid` are in
+  `PERSISTENCE_ONLY_MESSAGE_FIELDS`: stripped from every outgoing provider
+  copy and ignored by the token estimator. Engines that never read them are
+  unaffected.
+- **Absent only before the row exists.** The current turn's user message has
+  no uid during a preflight `compress()` that runs before the turn-start
+  flush; the same dict object receives it at that flush. Stores upgraded from
+  an older schema backfill a uid onto every existing row once (schema v31),
+  and an insert trigger mints one for any row an older build writes into a
+  v31 store afterwards (that build's live dicts still lack it until restored).
+
 ### When to use these hooks — and when NOT to
 
 - **Implement `select_context()` only when your engine must *replace* the
@@ -57493,6 +57588,8 @@ host.toolsets.list(profile?)               // toolsets + enabled state
 host.toolsets.setEnabled(name, on, profile?)// enable/disable a toolset
 host.profiles.list(scope?: ProfileScope)   // the profile list the profile rail reads
 host.pluginDecisions                       // READ-ONLY atom: this window's plugin on/off decisions (frozen copies)
+host.i18n.registerAppLocale(id, { endonym?, rtl?, translations? })  // add a whole UI language (language pack); returns disposer
+host.i18n.languageOptions()                // [{ id, endonym, rtl, source }] — what the language switcher lists
 ```
 
 `host.request` is the same JSON-RPC the app itself uses (sessions, config, skills,
@@ -57744,6 +57841,59 @@ JSON.parse(localStorage.getItem(                           host.pluginDecisions.
 localStorage.setItem('hermes.desktop.pluginDecisions.v2')  // declined — host.navigate('/capabilities?tab=plugins')
 row.querySelector('[data-slot="switch"]').click()          // same: the app's Plugins tab owns the toggle
 ```
+
+### Language packs — `host.i18n.registerAppLocale` / `ctx.i18n.registerAppLocale`
+
+`ctx.i18n.register` localizes YOUR plugin's strings. A **language pack** does the
+opposite: it adds (or extends) a language for the WHOLE app — every core label,
+dialog and tip — so a Polish user sees a Polish desktop. Registration is a
+partial catalog merged over the bundled catalog for that id (or English for a
+new language); anything the pack leaves out falls back per key, never to a raw
+key. The switcher lists the language by its endonym at once (no flags — languages
+are not countries), `<html dir>` follows `rtl`, and `display.language` stays
+whatever the user chose: registering is not selecting.
+
+```ts
+export default {
+  id: 'hermes-lang-pl',
+  register(ctx) {
+    // Attributed to this plugin and dropped on unload/disable.
+    ctx.i18n.registerAppLocale('pl', {
+      endonym: 'Polski',
+      englishName: 'Polish',        // search-only
+      rtl: false,
+      translations: {
+        // Nested like en.ts…
+        common: { save: 'Zapisz', cancel: 'Anuluj' },
+        // …or flat dotted keys (what a .desktop.yaml pack flattens to).
+        'catalog.results': '{0} wyników'
+      }
+    })
+  }
+}
+```
+
+```ts
+host.i18n.registerAppLocale(id, { endonym?, englishName?, rtl?, translations? }): () => void
+host.i18n.languageOptions(): LanguageOption[]   // bundled ∪ registered ∪ backend i18n.languages
+```
+
+Where English has a **function** entry (``results: n => `${n} results` ``), a pack
+gives a plain string with POSITIONAL placeholders — `{0}`, `{1}` in argument
+order — and the merge wraps it into the same call shape. The full key set is
+published in `locales/_keys.desktop.json` (regenerate with `npm run i18n:keys`
+in `apps/desktop` and commit it; CI pins the file to `en.ts`), which is what `hermes plugins
+validate` checks a pack's `<lang>.desktop.yaml` against.
+
+`host.i18n.registerAppLocale` is the same call for code with no `ctx` in reach;
+it returns the disposer — hand it to `ctx.onDispose`. Prefer the `ctx` form.
+
+A pack that also ships core (Python) and TUI strings needs **no desktop code**
+at all: declare `provides_locales: [pl]` in `plugin.yaml` with
+`locales/pl.yaml`, `pl.tui.yaml`, `pl.desktop.yaml`, and the gateway serves the
+desktop file over `i18n.catalog {lang, surface: 'desktop'}`; the app pulls it
+into the same registry (source `backend`) when `display.language` names it and
+re-pulls on a profile switch.
 
 ## Data layer — React Query + nanostores
 
@@ -59070,8 +59220,7 @@ gateway at runtime, preserving prompt caching (the system prompt doesn't change 
 
 Inactivity and wall-clock time never rotate a conversation. `/new` and `/reset`
 create an explicit boundary; context compression continues to manage long histories.
-Legacy timer configuration is ignored. The existing `SessionResetPolicy` datatype
-is inert compatibility data, not a runtime policy.
+Legacy timer configuration is ignored.
 
 Explicit suspension still creates a boundary on the next inbound turn. Recovery
 respects explicit and historical finalized boundaries rather than reopening them.
@@ -63075,20 +63224,17 @@ from an isolated `HERMES_HOME`. Those tests load and invoke the plugin through
 `PluginManager`; they assert real registration and callback outcomes rather
 than internal symbol lists or source-code shape.
 
-### Sep 2026 module decomposition: old import paths end 2026-09-14
+### Sep 2026 module decomposition: old import paths removed
 
 Hermes's internals were split into `<stem>_<topic>` sibling modules in Sep 2026 (PR #102117). **Internal
-import paths were never part of the plugin contract** above, but many plugins used them. Every moved name
-still resolves from its old module until **2026-09-14**, then the compatibility layer is removed.
+import paths were never part of the plugin contract** above. A temporary compatibility layer kept the old
+paths resolving until 2026-09-14; it has been removed, so a plugin that still imports an old path fails to
+load with an `ImportError` (the reason shows in `hermes plugins list`).
 
-- **Check your plugin:** `hermes plugins compat /path/to/your/plugin` lists every `file:line` with the
-  old path and the new one, and exits 1 while any remain. `COMPAT_MANIFEST.md` in the repo is the full map.
-- **What users see:** a notice under the CLI banner, in `hermes doctor` and after `hermes update`, and a
-  one-time Desktop dialog naming the plugin. Each resolution through an old path also emits a
-  `HermesPluginCompatWarning` once per process.
-- **From 2026-09-14:** plugins that still import old paths are **not loaded** (the reason shows in
-  `hermes plugins list`). Users can force-load with `plugins.allow_deprecated_imports: true` until the
-  layer is actually removed, at which point the old paths raise `ImportError`.
+To fix such a plugin, import the name from the module that defines it now, or better, use `ctx` and the
+documented ABCs instead of internals. The full old-to-new map is the
+[`COMPAT_MANIFEST.md`](https://github.com/NousResearch/hermes-agent/blob/5912ed81ed9/COMPAT_MANIFEST.md)
+from the last commit that shipped the layer.
 
 ## What you're building
 
@@ -63219,6 +63365,7 @@ this Hermes understands still loads with a warning.
 | `license` | str | SPDX-style license id (e.g. `MIT`). |
 | `homepage` | str | Project URL. |
 | `tags` | list of str | Free-form discovery tags (e.g. `[gateway, telegram]`). |
+| `provides_locales` | list | Language pack declaration: ids (`- pl`) or `{id, endonym, rtl}` mappings whose `locales/<id>[.tui\|.desktop].yaml` the loader registers automatically — see [Ship a language pack](#ship-a-language-pack). |
 
 ```yaml
 # plugin.yaml — manifest v2 example
@@ -63766,6 +63913,55 @@ skill_view("my-workflow")              # → built-in version (unchanged)
 :::tip Legacy pattern
 The old `shutil.copy2` pattern (copying a skill into `~/.hermes/skills/`) still works but creates name collision risk with built-in skills. Prefer `ctx.register_skill()` for new plugins.
 :::
+
+### Ship a language pack
+
+A plugin can add a UI language or override the wording of an existing one for every surface at once —
+Python (`agent.i18n.t()`: approval prompts, gateway replies, tool verbs, tips), the `hermes --tui`
+interface and the Desktop app. Declare `provides_locales` and ship the YAML; **no Python is needed**:
+
+```
+~/.hermes/plugins/hermes-lang-pl/
+├── plugin.yaml
+└── locales/
+    ├── pl.yaml            # core (Python) strings — same key tree as the bundled locales/en.yaml
+    ├── pl.tui.yaml        # optional: TUI strings (keys in locales/_keys.tui.json)
+    └── pl.desktop.yaml    # optional: Desktop strings (keys in locales/_keys.desktop.json)
+```
+
+```yaml
+name: hermes-lang-pl
+version: 1.0.0
+description: Polish language pack
+provides_locales:
+  - id: pl              # lowercase BCP-47-style id: pl, pt-br, zh-hant
+    endonym: Polski     # what language switchers show
+    rtl: false
+```
+
+When `provides_locales` is declared the loader calls `ctx.register_locale_dir(<plugin>/locales)` before
+`register()` (a manifest-only pack with no `__init__.py` loads like a manifest-only Desktop plugin).
+Catalogs are **layered and partial**: pack → user overlay (`<HERMES_HOME>/locales/`) → bundled →
+English → key; a pack only needs the keys it changes, and the last pack loaded wins per key.
+Core values keep English's named `{placeholders}`; TUI/Desktop entries whose English value is a
+function are written as strings with positional `{0}`, `{1}` placeholders.
+
+Plugins with code can register programmatically — the handles are `PluginRegistration`s, so unloading
+the plugin removes the layer, and registration never changes `display.language`:
+
+```python
+def register(ctx):
+    here = Path(__file__).parent
+    ctx.register_locale("pl", here / "locales" / "pl.yaml", endonym="Polski")        # YAML path
+    ctx.register_locale("pl", {"approval": {"denied": "      ✗ Odrzucono"}})          # mapping, nested or flat
+    ctx.register_locale("pl", here / "locales" / "pl.tui.yaml", surface="tui")       # core | tui | desktop
+    ctx.register_locale_dir(here / "locales")                                         # every <lang>[.surface].yaml
+```
+
+`hermes plugins validate` checks each declared id has a parseable, text-only `locales/<id>.yaml`
+(a non-text leaf is an error) and **warns** with the names of keys absent from the English catalog of
+that surface. Renderers fetch the pack layer through the `i18n.languages` / `i18n.catalog` RPCs.
+User-facing guide: [Language Packs](../../user-guide/features/language-packs.md).
 
 ### Gate on environment variables
 
@@ -66384,9 +66580,14 @@ provider route that Hermes used for the logical call, such as
 `nvidia/nemotron-3-ultra` through `openrouter`. These identifiers are
 lowercased and structurally bounded, but they are not normalized through a
 checked-in model catalog. Pricing and model-family classification belong to
-the metrics backend. Prompts, responses, endpoints, errors, session IDs, task
-IDs, and request IDs are not included in the metrics event or package.
-New calls use `hermes.model_route.count`. The previous
+the metrics backend. Prompts, responses, endpoints, error text, session IDs,
+task IDs, and request IDs are not included in the metrics event or package.
+New calls use `hermes.model_route.count`. Since package schema v3 each route row
+also carries `call_role` (`primary` or `auxiliary`), `outcome` (`success`,
+`failed`, `cancelled`) and `error_class`: the error classifier's own
+`FailoverReason` value (`rate_limit`, `auth`, `context_overflow`, ...) for the
+last failed attempt of that logical call, or `none`. A `success` row with a
+non-`none` class is a call that recovered after that error. The previous
 `hermes.model_call.count` contract remains readable only so pending local
 counters created by older builds can be exported without losing data.
 
@@ -66401,9 +66602,21 @@ mark again, but the subscriber suppresses it until the rolling window expires.
 
 Each task run is a Relay `Function` scope named `hermes.task_run`, parented to
 the owning Hermes session. The start counter contains only bounded execution
-surface and entrypoint values. The terminal counter contains bounded outcome,
-end reason, termination status, duration, logical model-call count, terminal
-tool-call count, and provider-retry count buckets. Retries are additional
+surface and entrypoint values plus, for gateway tasks, the built-in messaging
+`platform` (`telegram`, `discord`, `slack`, ...; platforms Hermes ships under
+`plugins/platforms/` by name, a `plugin-catalog/` platform by its catalog entry
+name only when the installer's own record proves a catalog install, every other
+plugin platform `plugin`, every other surface `none`). The terminal counter
+(`hermes.task_run.finished`) contains the start fields plus bounded outcome, end
+reason, termination status, and a `failure_class` for failed tasks: the provider
+`FailoverReason` when the turn died on a classified API error, otherwise a local
+class (`empty_response`, `context_compression`, `repeated_errors`, `exception`,
+`other`, ...). The same end event feeds `hermes.task_run.duration` with execution
+surface, outcome, duration bucket and provider-retry count bucket. Package v2
+carried duration, retries and per-task model/tool call counts on the terminal row
+itself, which made almost every task its own row; call counts per turn live on
+`hermes.task_cost.count`. Raw exit
+reasons never leave the machine. Retries are additional
 provider attempts for the same Hermes API request ID; they do not inflate the
 logical model-call count. Tool calls are deduplicated by their Hermes tool-call
 ID after a terminal tool result is observed. The outer `AIAgent` execution
@@ -66413,29 +66626,250 @@ conversation session during context compression.
 
 Each tool invocation is represented by a Relay tool lifecycle named
 `hermes.tool_call`. The terminal counter contains only bounded tool category,
-outcome, approval outcome, latency, and explicit retry-count buckets. Hermes
+outcome and approval outcome; the same event feeds `hermes.tool_call.latency`
+with tool category, latency bucket and explicit retry-count bucket (package v2
+carried latency and retries on the terminal row, one row per few calls). Hermes
 derives the category from the toolset already declared in its runtime registry;
 custom and unrecognized toolsets collapse to `other` rather than exporting
-tool or plugin names. Hermes does not infer retries from repeated tool names or
+tool or plugin names. The same terminal event also feeds
+`hermes.tool.usage.count` with `tool_name`, `outcome` and `error_class`.
+`tool_name` is exported only for tools declared in the repository's static
+`toolsets.TOOLSETS` (`toolsets.BUILTIN_TOOL_NAMES`, captured before any runtime
+custom toolset is created); MCP tools report `mcp` and every plugin or custom
+tool reports `plugin`. `error_class` maps Hermes's own `error_type` values
+(`tool_error`, `timeout`, `interrupted`, `invalid_arguments`, `blocked`,
+`contract_violation`); any other value, such as an exception class name,
+collapses to `exception`. Hermes does not infer retries from repeated tool names or
 adjacent calls; when the
 hook does not provide an explicit retry relationship, the retry bucket is
 `unknown`. Approval decisions are emitted as `hermes.tool_approval` marks and
-recorded as attributed to a tool call or explicitly `unattributed`. Tool names,
-call IDs, arguments, results, commands, descriptions, and error text are not
-included in shared-metrics events or packages. A started tool that is still
+recorded as attributed to a tool call or explicitly `unattributed`. Non-built-in
+tool names, call IDs, arguments, results, commands, descriptions, and error
+text are not included in shared-metrics events or packages. A started tool that is still
 open when its task terminates is closed as failed, timed out, or cancelled and
 remains in the task's tool-count bucket.
 
 Successful skill mutations emit `hermes.skill.lifecycle` marks with only a
 bounded action and provenance. Successful loads emit `hermes.skill.load`
 marks with bounded provenance, first-use or reuse state, reuse-after-patch
-state, and a use-count bucket. Hermes derives reuse and patch-generation
-continuity transactionally in its existing `skills/.usage.json` state; skill
-names and exact counts or generations never enter Relay metrics events,
-SQLite dimensions, or packages. A use after a new patch is counted once as
+state, a use-count bucket and `skill_name`: the skill's name only when it is a
+skill Hermes ships (`skills/` or `optional-skills/`), otherwise `custom`. Hermes
+derives reuse and patch-generation continuity transactionally in its existing
+`skills/.usage.json` state; local or agent-created skill names and exact counts
+or generations never enter Relay metrics events, SQLite dimensions, or packages. A use after a new patch is counted once as
 `reused_after_patch`; later uses remain ordinary reuse until another patch.
 Task-outcome attribution after a patch remains deferred until its window and
 multi-skill semantics are defined.
+
+Once per rolling 24 hours, the first activation also emits a
+`hermes.install.snapshot` mark describing how the profile is configured: the
+memory provider (a bundled provider name, `builtin`, or `plugin`), bucketed
+counts of MCP servers, enabled plugins, installed skills, enabled cron jobs,
+profiles and connected messaging platforms, the main provider id, the terminal
+backend (`local`, `docker`, `ssh`, ... or `other`), the display language (a
+shipped locale or `other`) and `install_age_bucket`: how long ago the profile's
+first-ever session started. Install age is what lets the backend tell a new user
+from an existing one who just opted in. Server, plugin, skill, job and profile
+names are never read into the event. The same compare-and-set latch as `hermes.client.active` keeps it to one
+row per install per day, and the producer checks the latch before walking the
+skills tree.
+
+<!-- ---- v4 install ---- -->
+The snapshot also carries six version-lag, channel and hardware fields, all read
+offline (no network call, no subprocess):
+
+- `release_channel` (`stable`, `main`, `dev`, `unknown`): a packaged build's baked
+  channel (canary builds of main read `main`), a source install's channel record,
+  else the checkout's branch (`main` for main/master, `dev` for any other branch).
+  The git remote URL and branch names are never read into the event.
+- `version_age_bucket` (`lt_7d` … `gte_90d`, `unknown`): age of the *installed*
+  version, from its own commit date in the install stamp or checkout.
+- `behind_bucket` (`0`, `1`, `2`, `3_to_5`, `6_to_10`, `gte_11`, `unknown`): commits
+  or releases behind, only from the update check's cached result for this exact
+  revision and under 7 days old; otherwise `unknown`.
+- `ram_bucket` (`lt_8g` … `gte_128g`, `unknown`): installed memory rounded to its
+  nominal size (the OS total scaled by 1.1 for firmware reservations).
+- `gpu_class` (`nvidia`, `amd`, `intel`, `apple_silicon`, `none`, `unknown`): the
+  highest-priority GPU vendor from `/proc/driver/nvidia` or DRM PCI vendor ids on
+  Linux, the display-adapter registry class on Windows, native arm64 on macOS.
+  Never a model name, driver version or VRAM size.
+- `local_model_provider_used` (`yes`/`no`): whether the main model or any
+  auxiliary task runs on a local or self-hosted server (a local provider id such
+  as Ollama/LM Studio/llama.cpp, or a loopback/private-network base URL). The
+  URL itself stays local.
+
+### Decision-data metrics
+
+These answer product questions the activity counters cannot: what makes people
+stay, where new users drop off, which surfaces and models carry real usage, and
+which extensions are worth investing in. Every dimension is a closed enum, a
+bucket, a provider/model identifier (as on model routes) or a public name Nous
+itself ships.
+
+| Metric | Dimensions | Question it answers |
+|---|---|---|
+| `hermes.session.count` | entrypoint, surface, platform, turn/failed-turn buckets, active-duration bucket, last outcome, message / model-call / tool-call count buckets (`0` … `101_to_250`, `251_to_1000`, `gte_1001`) | How deep is real usage per surface; do sessions end right after a failure? One row per conversation, written when the surface closes it: the session ids a compression rotation hands it to merge into one row (the retired id closes as soon as its in-flight turn ends); a gateway reset, idle expiry, `/new` or `/branch` starts a new conversation even though it records the old session as its parent. Background review forks that reuse the session id add no turns, calls or messages. Messages are user turns + primary-model replies + tool results; model calls are logical primary API requests (retries excluded). |
+| `hermes.install.milestone` | milestone, install age bucket | How long from install to first success, first gateway message, first cron run, first delegation, first created skill (one Hermes' background review created does not count), first long session? Recorded once per install. |
+| `hermes.setup.completed` | surface (`cli`/`desktop`), provider | Which providers people choose at setup, and on which surface. |
+| `hermes.model_tokens.sum` | call role, model, provider, auxiliary task, token type | Token volume per model/provider, prompt-cache share, and what auxiliary work (compression, titles, vision, ...) costs. The value is a token sum, not an event count. |
+| `hermes.model_route.count` `ttft_bucket` | time to first token | Perceived latency per provider/model. |
+| `hermes.compression.count` | trigger, outcome, context-fill bucket | How often compaction runs, how full contexts get, and whether it fails. |
+| `hermes.model_switch.count` | from/to provider, surface | Which providers people leave and move to. |
+| `hermes.fallback.count` | from/to provider, error class | How often fallback providers rescue a turn, and from what. |
+| `hermes.slash_command.count` | command, surface | Which built-in commands are used (`/retry`, `/undo`, `/new` are friction signals). Skill and plugin commands report `skill`/`plugin`. |
+| `hermes.extension.install.count` | kind, source, name, outcome | Which catalog skills, MCP servers and plugins get installed. `name` is a bundled/optional skill, `optional-mcps/` or `plugin-catalog/` entry, otherwise `custom`. |
+| `hermes.memory.op.count` | op (`add`/`replace`/`remove`/`read`/`search`/`other`), provider (`builtin`, a bundled memory plugin, else `plugin`), origin (`foreground`/`background_review`), outcome (`success`/`failed`/`rejected`) | Is the learning loop writing memory, who asks for it (the user's turn or the background review), and how often writes are refused or fail. Never the memory text. |
+| `hermes.curator.run.count` | trigger (`scheduled`/`manual`), outcome (`success`/`failed`/`skipped`), archived/merged/patched/created buckets | Does the skill curator run, and does it actually consolidate anything. Dry runs report `skipped`; a scheduled check that finds another process already running the pass records nothing. Never skill names. |
+| `hermes.delegation.run.count` | subagent-count bucket, depth (`1`–`3`, `gte_4`), mode (`foreground`/`background`), outcome (`success`/`partial`/`failed`/`cancelled`) | How wide and deep delegate_task fan-outs go and how often every child finishes. One row per call, however many completion units it splits into. |
+| `hermes.execution_backend.count` | kind (`terminal`/`browser`/`code`), backend, outcome, error class | Which sandboxes carry real work and how reliable each is. Terminal backends are the `terminal.backend` values (else `other`); browser backends are `local`, `lightpanda`, `cdp`, `camofox`, `extension` or a bundled cloud provider (else `other`); execute_code is `local` or `remote`. A command's own nonzero exit is still a backend success, but a foreground command that hits its timeout is `failed`/`timeout`; terminal and execute_code calls a guard refuses before they reach the backend, Hermes' own listings for TUI/Desktop path completion, and calls made by the background review and curator forks are not counted. |
+| `hermes.platform.health` | platform, event (`connect_ok`/`connect_failed`/`reconnect`/`disconnect`), error class (`auth`/`network`/`rate_limited`/`config`/`other`) | Which messaging platforms fail to connect or drop, and why. Classified from exception types, HTTP statuses and Hermes's own fatal codes, never error text. |
+| `hermes.platform.delivery` | platform, outcome (`sent`/`failed`), failure class (`rate_limited`/`too_long`/`auth`/`network`/`forbidden`/`other`) | How often replies fail to reach the user per platform (one count per logical reply, retries included). |
+| `hermes.gateway.reply_latency` | platform, first-response bucket (`lt_2s` … `gte_60s`) | Time from an accepted inbound message to the first visible reply text (stream first chunk or final message). |
+| `hermes.cron.run` | outcome (`success`/`failed`/`missed`/`skipped`), delivery kind (`local`/`platform`/`webhook`/`none`/`other`), duration bucket | Do scheduled jobs run, fail, get skipped by a gate or overlap, or get missed while Hermes was down. Job names, prompts, schedules and targets are never included. |
+| `hermes.startup.latency` | surface (`cli`, `tui`, `desktop_attach`, `gateway_boot`, `serve_boot`), latency bucket (`lt_500ms` … `gte_10s`) | How long each surface takes from launch to usable, so startup regressions show per surface and release. One row per process start: CLI = process start to first rendered prompt (or a `-q` query dispatched; Kanban workers excluded), TUI = Ink process start to gateway ready, Desktop = app start to backend attached, gateway = process start to adapters connected, `hermes serve` = process start to listening. Not counted: a process re-exec'd in place (e.g. `hermes sessions browse` resuming a session) and each dashboard Chat-tab terminal; a TUI/Desktop reconnect to the same backend never re-counts. |
+| `hermes.update.run` | kind, outcome, failed_stage, duration_bucket, from_version_age_bucket, apply_mode | Whether updates succeed, how long they take, where they fail, and how stale the version being updated from was. `hermes update` rows are derived from the final update receipt, once per run (`kind` is `desktop` when Desktop's source-checkout hand-off ran it); a run the pre-update interpreter finishes is parked locally with only these fields, only while collection is on, and counted by the next start; Desktop packaged self-updates (`apply_mode=package`) are reported once by the app, after the restart that applies them. |
+| `hermes.update.stage` | stage, outcome, duration_bucket | Per-stage result and wall time of `hermes update` (plan, snapshot, apply, deps, build, restart, verify), from the receipt's stage timestamps. |
+| `hermes.process.exit` | process_kind, exit_kind, crash_class | How CLI / TUI / gateway / serve / cron-tick processes end (`clean`, `crash` with an exception family only, `killed`, `watchdog`), reported by the next start in the same profile from a local marker (a start with collection off deletes these markers, and pending `provider_setup` ones, unreported). Turns aborted by a turn watchdog also count as `exit_kind=watchdog`. |
+
+Replies the relay connector carries report the platform the conversation lives
+on (the inbound's platform, else the platform the connector fronts when it
+fronts exactly one), never `relay`; `relay` remains only when neither is known.
+A turn whose inbound the connector did not stamp is still a gateway message
+(`execution_surface=gateway`, task/session `platform=relay`). `hermes.platform.health`
+for the relay connector stays `relay`: its one socket fronts several platforms,
+so a connect or drop belongs to none of them alone.
+
+<!-- ---- v5 desktop ---- -->
+#### Desktop app: what gets used, what gets in the way, what gets turned off
+
+Recorded by the Desktop app into the focused profile's store, only while that
+profile's collection switch is on. With it off the app keeps no local record
+(switching it off deletes what was kept) and sends nothing. The app keeps one
+local record per gateway connection and profile, shared by that profile's
+windows; after a profile switch nothing is kept or sent until the new profile's
+switch has been read, and the switch is re-read whenever a window regains focus
+(so an opt-out from the CLI or another window takes effect there). There is no rating
+prompt or other new UI; each fact comes from an interaction the app already has.
+Every value is a closed id defined in the app's code (area, action, notice, flow,
+toggle, step), a published config key, or a bucket. Message text, toast text,
+session/bot/profile names, paths and setting values never leave.
+
+| Metric | Dimensions | Question it answers |
+|---|---|---|
+| `hermes.desktop.feature_use` | area (panes, command palette, model/session pickers, voice, Bot Mode, skins, projects, each settings page, full pages, `other`) | Which Desktop areas are used at all, counted at most once per area per UTC day per profile (latched in the profile's local database, so a second window or a backend restart never re-counts). |
+| `hermes.desktop.action_use` | action (the app's built-in command/keybinding ids plus a few named buttons; plugin commands and numbered slot shortcuts are `other`, collapsed in the app before anything is kept), via (`click`/`shortcut`/`palette`/`menu`), count bucket | Which buttons and commands people press, and how: aggregated in the app per profile and reported once per finished day (no per-press rows). The row lands in the period of the day it describes, not the day it was sent; each day is recorded once per profile however many windows or backend restarts report it, and a day older than 8 days is dropped. |
+| `hermes.desktop.mode_use` | mode (`sessions`/`bots`), active-minutes bucket, messages-sent bucket, bot-count bucket | How Desktop time splits between Bot Mode and regular Sessions. One row per mode used that day, in that day's period (same once-per-profile-per-day latch as `action_use`); active time sums gaps between interactions of up to 5 minutes. |
+| `hermes.desktop.friction` | kind (`notice_dismissed`, `error_toast`, `renderer_crash`, `backend_disconnect`, `slow_frame`), detail (notice id, error category, crash reason, drop reason, frame-duration bucket) | What gets in the way. Error toasts carry only their code-defined category; renderer crashes are recorded by the app shell only when the crashed window's own profile collects, and reported by a window of that profile after it comes back; slow frames are long frames while the window is visible, capped per day. |
+| `hermes.desktop.dislike` | signal (`quick_close`, `cancelled`, `setting_off_default`, `rage_click`, `undo`, `feature_disabled`), target, setting, direction | Signals that a feature is unwanted: a pane closed within 5s of opening, a dialog/flow backed out of, a setting moved to or away from its default (the key only; the backend compares the saved value to the default itself), three clicks on one control within a second, an undo, a shipped feature switched off. Capped per signal per day. |
+| `hermes.desktop.onboarding` | step (first-run steps: provider picker, sign-in, API key, local endpoint, model pick, choose later, free-tier screen, guided setup cards, consent, first message), event (`reached`/`completed`/`abandoned`) | Where first run stops. Each step event once per profile (latched in a small per-profile file); `abandoned` is a step still open when the app next starts. First run happens before the consent question, so until it is answered the app holds the step events in memory only (never on disk, never sent) and records them if the user opts in during that app session; a "no" or quitting first discards them. Switching collection off in the Desktop deletes those latches with the app's own copy. |
+
+Sessions are summarized when they close (finalize, reset or process exit);
+delegated child sessions are not counted separately. Milestones latch in the
+local database, so each fires once per install however many processes reach it.
+
+#### Per-model quality, friction and context pressure
+
+Provider and model follow the model-route rules: a provider Hermes ships (built in,
+an in-tree `plugins/model-providers/` profile or a public models.dev id) and its
+model id; custom endpoints, provider plugins installed under
+`$HERMES_HOME/plugins/model-providers/` or from pip (names and aliases included),
+the local-server aliases of `custom` (`ollama`, `local`, `vllm`, `llamacpp`,
+`llama-cpp`, `llama.cpp`) and loopback servers read `custom`. A shipped provider
+whose endpoint is a loopback server (`lmstudio`, under any of its aliases) keeps its
+name, but its model reads `custom`. A model whose provider is unknown, or whose id is a URL, a file path or a
+network address (`host:port`, an IP address, `localhost`) or an AWS ARN (it carries the account
+id), reads `custom`. On Azure providers the model id is a deployment name its owner
+chose, so it passes only when it is a public model id (Hermes' model catalogs or
+the local models.dev cache, e.g. `gpt-4o`); `acme-legal-prod` reads `custom`. The local
+subscriber re-runs these rules on the provider/model fields of every mark and drops a
+row they would rewrite.
+
+| Metric | Dimensions | Question it answers |
+|---|---|---|
+| `hermes.model_tool_quality.count` | provider, model, call role, issue (`none`, `invalid_json`, `unknown_tool`, `schema_mismatch`, `empty_arguments`, `repaired`) | Which models emit broken tool calls, and how often Hermes had to repair them. Every emitted call counts once (clean ones as `none`), so the value is a rate denominator. `empty_arguments` only counts for tools with required parameters; `repaired` means Hermes fixed the tool name or the argument JSON and ran the call. |
+| `hermes.model_friction.count` | provider, model, signal (`retry`, `undo`, `interrupt`, `quick_abandon`, `switch_away`) | Which models users fight with. Attributed to the model that produced the turn: `/retry` and `/undo` where they execute, a user interrupt of an interactive turn, a session that ends within 60 seconds of a failed turn, and `/model` switching away from the model. |
+| `hermes.context_peak.count` | provider, model, peak fill bucket, window bucket (`lt_32k` … `gte_1m`), limit hit (`yes`/`no`) | How close sessions get to each model's context window, and how often they overflow it. One row per closed conversation: the session ids a compression rotation hands it to report once, with the fullest segment; `limit_hit` means a primary call was rejected as too large (context overflow or HTTP 413), the rejections Hermes answers with a forced compression. |
+
+<!-- ---- v5 harness ---- -->
+#### Agent-harness accuracy
+
+These tune the agent loop itself. Hermes' own background review and curator
+loops never count; delegated subagents do (their tool calls, loops and replies
+are model behaviour too). Command text, file paths, tool arguments and reply text never
+leave — only the closed values below.
+
+| Metric | Dimensions | Question it answers |
+|---|---|---|
+| `hermes.file_edit.count` | tool (`patch`, `write_file`), mode (`replace`, `v4a`, `whole_file`), outcome (`applied`, `already_applied`, `no_match`, `ambiguous`, `failed`), match strategy (the patch tool's fuzzy-match chain: `exact`, `line_trimmed`, `whitespace_normalized`, `indentation_flexible`, `escape_normalized`, `trimmed_boundary`, `unicode_normalized`, `block_anchor`, `context_aware`; `none` when nothing was matched) | Which fuzzy-match strategies earn their keep, and how often edits miss or are ambiguous. One row per edit tool call; a multi-hunk V4A patch reports the loosest strategy any hunk needed. |
+| `hermes.loop_guard.count` | provider, model, signal (`repeated_tool_call`, `loop_detected`, `iteration_cap`), detector (`exact_failure`, `idempotent_no_progress`, `same_tool_failure`, `identical_call_streak`, `identical_cycle`, `web_search_cap`, `subagent_cap`, `iteration_budget`) | How often each stuck-loop guard fires, per model. `repeated_tool_call` is a warning the call still ran with, `loop_detected` a block or halt, `iteration_cap` a turn that spent its iteration budget. At most once per turn per signal and detector. |
+| `hermes.tool_recovery.count` | provider, model, tool (built-in name, else `mcp` / `plugin`), next tool (`same`, `different`, `none`), next outcome (`success`, `error`, `no_tool_call`, `gave_up`) | Whether models recover after a failed tool call. One row per failed call, resolved against the model's next round: its next call to the same tool, else its first call; `no_tool_call` when it answered in text instead, `gave_up` when the turn ended without its reply (halted, budget spent, interrupted, errored). |
+| `hermes.terminal.outcome.count` | backend (the terminal backends), command kind (`git`, `package_manager`, `build`, `test_runner`, `python`, `node`, `shell_builtin`, `shell`, `file_ops`, `network`, `container`, `other`), outcome (`ok`, `nonzero`, `timeout`, `killed`) | Which kinds of commands fail or time out, per backend. The kind comes from a fixed table of the first program word (after env assignments and `sudo`-style wrappers). One row per foreground command that reached an exit status; `timeout` / `killed` come from Hermes' own deadline and interrupt flags, so a command's own `exit 124` is `nonzero`. `hermes.execution_backend.count` counts the same calls by whether the backend served them — disjoint dimensions, not a second count of outcomes. |
+| `hermes.model_reply_issue.count` | provider, model, issue (`none`, `empty`, `reasoning_only`, `refusal`, `truncated_length`) | Which models return unusable replies. One row per primary model response (usable ones as `none`, the rate denominator). `refusal` and `truncated_length` come only from the structured finish reason (`content_filter`, `length`); `empty` is a valid response with no visible text, tool call or reasoning. |
+<!-- ---- end v5 harness ---- -->
+
+<!-- ---- v5 efficiency ---- -->
+#### Efficiency: turn cost, waste, tool overhead and prompt-cache breaks
+
+Provider and model follow the model-route rules above. A "user turn" is one user
+message through its final reply; Hermes-owned work (background memory/skill review,
+the curator, delegated subagents' own turns) is not a user turn. `cache_break` and
+`tool_output_truncation` describe model and tool behaviour, so delegated
+subagents count there; background review and the curator never do.
+
+| Metric | Dimensions | Question it answers |
+|---|---|---|
+| `hermes.task_cost.count` | provider, model, tokens bucket (`lt_2k` … `gte_1m`, `unknown`), tool calls bucket, API calls bucket (`0` … `51_to_100`, `gte_101`), outcome (`completed`, `interrupted`, `failed`) | What a user turn costs per model. Tokens are prompt (cache reads/writes included) plus completion over the turn's primary calls; `unknown` when the provider reported no usage. One row per interactive turn the user saw end (a session-close abort is not a turn). |
+| `hermes.wasted_tokens.count` | provider, model, reason (`interrupt`, `retry`, `undo`), tokens bucket | How many tokens users throw away. One row per turn an interrupt, `/retry` or `/undo` discarded (`/undo N` counts N turns), attributed to the model that produced that turn; a turn interrupted and then undone counts once. `unknown` when this process never saw the turn (restart, remote host). |
+| `hermes.tool_output_truncation.count` | tool (shipped tool name, else `mcp` / `plugin`), truncated (`yes`/`no`), original size bucket (characters: `lt_1k` … `gte_500k`) | Which tools produce output too large to keep inline. One row per tool result; `yes` when the tool cut its own output (terminal, `execute_code` and MCP head/tail truncation; the size is then the original) or the per-result cap or per-turn budget spilled it to disk. |
+| `hermes.tool_overhead.count` | enabled tool count bucket, tool schema tokens bucket (`0`, `lt_2k` … `gte_40k`), execution surface | What carrying tool definitions costs. One row per closed interactive conversation: the tools it had enabled and Hermes's own estimate of the tokens their definitions add to each request. |
+| `hermes.tool_enabled_unused.count` | toolset (a toolset Hermes ships; MCP servers, plugins and user toolsets read `custom`), used (`yes`/`no`) | Which default toolsets are paid for but never used. One row per enabled toolset per closed interactive conversation (bounded by the shipped toolsets). |
+| `hermes.cache_break.count` | provider, model, cause (`compression`, `model_switch`, `toolset_change`, `system_prompt_rebuild`, `provider_reported_miss`, `cache_expired`) | How often Hermes throws away a warm prompt cache, and why. `compression` is expected; `model_switch`, `toolset_change` (the tool array changed mid-conversation) and `system_prompt_rebuild` (a continuing conversation rebuilt its system prompt instead of replaying the stored bytes) are Hermes-known causes; `provider_reported_miss` is a primary call reading zero cached tokens right after a warm read on the same model with no Hermes-known cause, `cache_expired` the same after at least five idle minutes. A known cause is not counted again as a miss. |
+<!-- ---- end v5 efficiency ---- -->
+
+<!-- ---- v5 engagement ---- -->
+#### Engagement and implicit model satisfaction
+
+| Metric | Dimensions | Question it answers |
+|---|---|---|
+| `hermes.engagement.surface_day.count` | surface (`cli`, `tui`, `desktop`, `gateway`, `acp`), active-minutes bucket (`0`, `lt_5m`, `5m_to_30m`, `30m_to_2h`, `2h_to_6h`, `gte_6h`) | How long each surface is actually used per day. One row per surface used on a closed UTC day. |
+| `hermes.engagement.day.count` | active-minutes bucket, surfaces-used count (`0`–`3`, `gte_4`), primary provider, primary model, active-profile count bucket | Days active per week, multi-surface use, and next-day / next-week return by model. One row per closed UTC day a person used Hermes on. The root (default) profile also writes a host row on days only other profiles were active: `surfaces_used_count` `0`, active minutes `0`, carrying the active-profile count; exclude `surfaces_used_count=0` rows when counting days active. |
+| `hermes.model_switch_after.count` | provider, model (the model switched away from), turns-before-switch bucket (`1`, `2_to_3`, `4_to_10`, `11_to_30`, `gte_31`) | How long users stay on a model before `/model` leaves it. Counts the user turns sent on the old model in the conversation (compression segments included; a turn that failed over to a fallback still counts for the model it was sent on; background review forks are not turns); a switch before any turn on the current model is not counted. |
+
+Active time is accumulated locally per UTC day: the sum of the gaps between
+consecutive interactions (a user turn starting or ending on an interactive
+surface or a gateway message; unattended cron runs, which `hermes.cron.run`
+counts, delegated children, background review, curator, batch and API-server /
+python embedding are excluded), each gap capped at 5
+minutes. The day's rows are recorded once the day closes, by the first
+interaction on a later day, in one database transaction, so a day is reported
+exactly once per profile however many processes see the rollover; they are
+dated to the day they describe. The primary model is the one that served the
+most of those user turns that day (`none` when none did), named by the model-route
+rules. Days active per week and return by model are derived server-side from
+these daily rows and the existing `install_id`: Hermes keeps no weekly window
+and no identifier beyond `install_id` for them.
+
+`active_profile_count_bucket` counts the distinct profiles of the host with a
+user-owned turn (the interactions above) that UTC day. Every profile folds its turns into one host
+accumulator kept in the root (default) profile's database, as opaque local
+hashes of each profile's home that never leave it, so a profile counts once
+whichever process or multiplexed runtime served it. Only the root profile's
+day row carries the count (it reports a day even when the root itself was
+idle, with `0` active minutes and surfaces); every other profile's row reads
+`0`. When the root profile has collection off, nothing is written to its
+database and the count is not reported.
+<!-- ---- end v5 engagement ---- -->
+
+<!-- ---- v5 signals ---- -->
+#### Onboarding and feature signals
+
+| Metric | Dimensions | Question it answers |
+|---|---|---|
+| `hermes.tool_unavailable.count` | provider, model, tool name (shipped built-ins only) | Which toolsets should be on by default: the model called a tool Hermes ships that this session did not enable. Any other unknown name (plugin, MCP, hallucinated) stays a `model_tool_quality` `unknown_tool` issue only. A built-in the session enabled but deferred behind `tool_search` (reachable through `tool_call`) is not unavailable. Background reviews, delegated children and cron jobs, whose toolsets are narrowed on purpose, are excluded. |
+| `hermes.provider_setup.count` | provider (catalog name; custom endpoints read `custom`), surface (`cli_setup`, `cli_model`, `tui`, `desktop`, `dashboard`), event (`started`, `completed`, `failed`, `abandoned`), failure class (`auth`, `network`, `no_models`, `cancelled`, `other`; `none` unless failed) | Where connecting a provider breaks down. `started` counts once a provider is picked; the flow's end is recorded by the surface that ran it. In the CLI pickers Esc ends the flow `failed`/`cancelled`; Back (Left arrow) keeps it open, so picking the same provider again continues it (one `started`), while picking another provider or leaving the command ends it `cancelled`. A flow nobody finished leaves a local marker that the next setup start or Hermes start in the profile reports as `abandoned` (its process is gone, or it has been pending over an hour); an OAuth device code left to expire is also `abandoned`. A new or changed provider API key saved from a form (TUI/Desktop/dashboard) and a newly added custom endpoint start and complete in one action; clearing a key, re-saving the same key, editing an existing endpoint, ecosystem tokens (`GITHUB_TOKEN`, `GH_TOKEN`, `HF_TOKEN`) and keys a tool's settings panel also asks for (e.g. `GEMINI_API_KEY`, `XAI_API_KEY`, `DEEPINFRA_API_KEY`) are not counted from the generic key form (the Desktop's onboarding and model settings mark their saves as a provider connection, so those count). Never a key, token, base URL or error text. Leaving the provider picker before choosing one is not counted. |
+| `hermes.feature_adoption.count` | feature (`memory`, `skills_created`, `delegation`, `cron`, `gateway_platform`, `desktop`, `tui`, `mcp`, `plugins`, `browser`, `voice`, `kanban`, `projects`, `bot_mode`, `curator`), days since install (`same_day`, `1d_to_7d`, `7d_to_30d`, `30d_to_90d`, `gte_90d`, `unknown`) | How long after install each major feature is first really used. Once per feature per install, latched in the local database, derived from the counters above (a foreground memory write, a skill created at the user's request (not by Hermes' background review), a successful MCP/plugin/browser/TTS/kanban tool call, a Desktop/TUI/gateway task, a cron run, a manual curator run; the scheduled curator pass does not count) plus direct first-use reports for Bot Mode messages and project creation. The age is the owning profile's (its first session). |
+| `hermes.feature_disabled.count` | kind (`toolset`, `skill`, `plugin`, `platform`, `setting`, `memory`, `curator`, `compression`), name, surface (`cli_tools`, `cli_config`, `cli_slash`, `tui`, `desktop`, `dashboard`), event (`disabled`, `re_enabled`) | What users turn off. Diffed at the config write itself: a default-on toolset removed, a skill or plugin added to its disabled list, a default-`true` setting set false (and each moved back). Names are public only when shipped — toolset key, bundled/catalog skill, bundled/catalog plugin (messaging-platform plugins report as `platform`), `DEFAULT_CONFIG` key path (never a value) — else `custom`. Uninstalling a catalog skill counts as `disabled`. Only user entry points record (`hermes tools` / `config` / `skills` / `plugins`, chat slash commands, TUI/Desktop, dashboard); setup and migrations do not, even when a migration runs inside one of them (`hermes config migrate`, a profile created from the dashboard). A setting whose value is a `${VAR}` template is not compared. The diff and the record run on a background thread after the write, outside every config lock. At most once per (kind, name, event) per day. |
+<!-- ---- end v5 signals ---- -->
 
 Local state is written under:
 
@@ -66446,16 +66880,23 @@ $HERMES_HOME/telemetry/shared_metrics/outbox/*.json
 
 The database keeps transactional aggregate and package-outbox state. Package
 files are immutable delta documents that conform to a closed JSON schema and
-are written with atomic replacement. Each package records the Hermes version,
+are written with atomic replacement as compact JSON (`jq .` pretty-prints one).
+Once the ingest has accepted or refused a package, the database keeps only its
+send state and drops its copy of the body; the file is the local history copy.
+Each package records the Hermes version,
 OS family, architecture, and install method as bounded client resources.
 Unrecognized platform or installation values are exported as `unknown`; raw
 platform strings, hostnames, and paths are never included. Fully packaged
 aggregate rows and successfully exported package rows and files are retained
 locally for 30 days. Pending package rows and counters with unexported deltas
 are never pruned.
-Package schema v1 remains unchanged for existing outbox files. New packages
-use v2, which accepts both the retired model-call contract and the current
-model-route contract so upgrades can drain pending counters safely.
+Package schemas v1 and v2 remain unchanged for existing outbox files. New
+packages use v3, which also accepts the v2 field sets of `hermes.model_route.count`,
+`hermes.tool_call.count` and the task counters so counters recorded before an upgrade
+drain safely.
+Vocabularies derived from in-repo registries (tool names, platforms, memory
+providers, error classes) are bounded by pattern in the JSON schema; the
+authoritative allowlist is `shared_metrics_contract.py`.
 
 Each package contains an `install_id` generated as a random UUID. Despite the
 schema field name, its current scope is one `HERMES_HOME`, so it is more
@@ -66536,6 +66977,14 @@ telemetry:
   and does nothing.
 - Like `enabled`, `send` is profile-owned and is not overridden by
   managed-scope configuration.
+
+Both keys are asked once per profile: by the Shared Metrics section of
+`hermes setup`, or in Hermes Desktop by an offer strip above the composer
+(Send to Nous / Local only / No thanks, with a Details view). The Desktop offer
+never blocks the composer or takes focus, appears only after first-run
+onboarding, and stays until answered. A profile whose `config.yaml` already
+carries either key is never asked again on any surface. Settings › Safety ›
+Privacy & network toggles both keys later.
 
 **A package is only sent when its whole period falls inside a recorded
 consent window.** Consent is stored as explicit intervals in the shared-
@@ -81540,6 +81989,158 @@ So lane authors don't have to reimplement these:
 
 ---
 
+<!-- source: website/docs/user-guide/features/language-packs.md -->
+# Language Packs
+
+# Language Packs
+
+Hermes ships 17 UI languages (`display.language`). The list is **pluggable**: a language pack is a
+plugin (or a folder in your Hermes home) that adds a new language or overrides the wording of an
+existing one — for the Python side (CLI approval prompts, gateway replies, tool verbs, tips), the
+`hermes --tui` interface and the Desktop app, all from one pack.
+
+What a pack translates is the **static UI text**. Agent responses, tool output, logs and slash-command
+*names* stay as they are; to make the agent itself answer in another language, say so in your prompt.
+
+## Where languages come from
+
+When Hermes looks up a string it walks these layers, top first, and takes the first hit:
+
+1. **Plugin language packs** — every installed plugin that declares `provides_locales` (the last one
+   loaded wins when two packs cover the same key).
+2. **Your overlay** — `<HERMES_HOME>/locales/<lang>.yaml` (per profile: each profile home has its own
+   `locales/` folder).
+3. **Bundled** — the `locales/<lang>.yaml` files shipped with Hermes.
+4. The same three layers for English, then the raw key.
+
+Every layer may be **partial**: a pack or overlay only needs the keys it changes.
+
+`hermes config set display.language <id>` accepts any id one of these layers supplies. Unknown ids
+are refused with the list of available languages:
+
+```
+$ hermes config set display.language pl
+✗ Unknown language 'pl' for display.language. Available: en, af, ar, de, es, ...
+  Install a language pack plugin (hermes plugins install <pack>) or drop <HERMES_HOME>/locales/<id>.yaml to add one.
+```
+
+## Using a pack
+
+```bash
+hermes plugins install https://github.com/teknium1/hermes-lang-pl   # or a catalog name
+hermes config set display.language pl
+```
+
+Restart running gateways/TUIs so they pick up the pack. The TUI and Desktop language switchers list
+bundled languages, your overlay languages and every installed pack by their native name (endonym).
+The `HERMES_LANGUAGE` entry in `.env` still overrides `display.language`.
+
+## Writing a pack
+
+A pack needs **no Python code**. Minimal layout:
+
+```
+hermes-lang-pl/
+  plugin.yaml
+  locales/
+    pl.yaml            # core: Python-side strings (approval.*, gateway.*, cli.*, display.*, slash.*, tips.*, ...)
+    pl.tui.yaml        # optional: hermes --tui strings
+    pl.desktop.yaml    # optional: Hermes Desktop strings
+```
+
+`plugin.yaml`:
+
+```yaml
+name: hermes-lang-pl
+version: 1.0.0
+description: Polish language pack for Hermes
+provides_locales:
+  - id: pl            # lowercase BCP-47-style tag: pl, pt-br, zh-hant
+    endonym: Polski   # shown in language switchers
+    rtl: false        # true for right-to-left scripts (flips the Desktop layout)
+```
+
+`provides_locales` entries can also be plain ids (`- pl`); the endonym then defaults to the id.
+When the manifest declares `provides_locales`, the plugin loader registers every
+`locales/<lang>[.tui|.desktop].yaml` automatically.
+
+### Files and keys
+
+- **`pl.yaml` (core)** mirrors the structure of the bundled `locales/en.yaml`. Nested YAML flattens to
+  dotted keys (`approval.denied`, `gateway.goal_cleared`). Copy `en.yaml`, translate the values, delete
+  what you do not want to override.
+- **`pl.tui.yaml` / `pl.desktop.yaml`** mirror the English catalogs of the TUI and Desktop apps. The key
+  sets are exported to `locales/_keys.tui.json` and `locales/_keys.desktop.json` in the Hermes repo,
+  which is what the validator checks against.
+- YAML values must be **text**. A number, list, `true`/`false` or empty value is rejected.
+- Never use YAML reserved words (`on`, `off`, `yes`, `no`) as keys.
+
+### Placeholders
+
+- Core (Python) strings use **named** placeholders exactly as English does: `"⏳ Draining {count} active agent(s)..."`.
+  Keep every `{name}` from the English value; a missing or misspelled placeholder makes Hermes fall
+  back to the untranslated string for that key.
+- TUI and Desktop entries whose English value is a *function* (it takes arguments) are written in YAML
+  as strings with **positional** placeholders: `"{0} of {1} sessions"`.
+
+### Validate
+
+```bash
+hermes plugins validate ./hermes-lang-pl
+```
+
+The validator checks that every declared id has `locales/<id>.yaml`, that each file parses and is
+text-only (a non-text value is an **error**), and **warns** — listing them — about keys that do not
+exist in the English catalog for that surface (they are harmless but do nothing). The `.tui.yaml` /
+`.desktop.yaml` checks run when the corresponding `_keys.*.json` export is present.
+
+### Register from Python (optional)
+
+A plugin that already has Python code can register catalogs itself:
+
+```python
+from pathlib import Path
+
+def register(ctx):
+    here = Path(__file__).parent
+    ctx.register_locale("pl", here / "locales" / "pl.yaml", endonym="Polski")
+    ctx.register_locale("pl", {"approval": {"denied": "      ✗ Odrzucono"}})          # dict, nested or flat
+    ctx.register_locale("pl", here / "locales" / "pl.tui.yaml", surface="tui")
+    ctx.register_locale_dir(here / "locales")                                         # everything at once
+```
+
+`register_locale(lang, source, *, endonym=None, rtl=False, surface="core")` takes a YAML path or a
+mapping; `surface` is `core`, `tui` or `desktop`. Registration is undone when the plugin unloads and
+never changes `display.language`.
+
+## Personal overrides without a plugin
+
+Drop a partial file into your Hermes home:
+
+```yaml
+# ~/.hermes/locales/en.yaml — only the keys you want to change
+approval:
+  denied: "      ✗ Nope."
+```
+
+The overlay applies to that profile only (`~/.hermes/profiles/<name>/locales/` for a named profile).
+Overlay files for a language Hermes does not bundle make that language selectable too. Edits are read
+on the next start or the next `display.language` change.
+
+## Troubleshooting
+
+- **`Unknown language ... for display.language`** — the pack is not installed or not enabled
+  (`hermes plugins list`), or the id in `provides_locales` does not match the file name
+  (`pl` needs `locales/pl.yaml`).
+- **A translated string still shows in English** — the key is not in the English catalog (run
+  `hermes plugins validate`; unknown keys are listed), or the placeholder set differs from English.
+- **Language listed but the TUI/Desktop is still English** — the pack has no `.tui.yaml` /
+  `.desktop.yaml`; those surfaces render English plus whatever the pack provides. For the 16 bundled
+  languages the TUI ships its own `locales/<lang>.tui.yaml` in the Hermes tree (the Desktop bundles
+  its translations in-app), so a pack for one of those only needs the keys it wants to override.
+
+---
+
 <!-- source: website/docs/user-guide/features/loops.md -->
 # Recurring Loops
 
@@ -81717,6 +82318,75 @@ real language server. Two channels, independent signals — the
 agent sees a syntax-clean file with semantic problems as
 ``lint: ok`` plus a populated ``lsp_diagnostics``.
 
+### Workspace trust
+
+Many language servers run code that the project itself ships:
+pyright executes the configured Python interpreter,
+typescript-language-server loads the project's
+`node_modules/typescript`, svelte-language-server loads
+`svelte.config.js`, rust-analyzer runs `cargo check` (build scripts,
+proc-macros) on every save, and servers such as jdtls,
+kotlin-language-server, elixir-ls, zls or haskell-language-server
+evaluate the project's build files (Gradle, `mix.exs`, `build.zig`,
+Cabal/Stack) when they start. That is fine for your own project, but
+not for a repository the agent has just cloned.
+
+Hermes therefore treats every workspace as untrusted unless it is:
+
+- the git worktree of a directory you pointed Hermes at: where you
+  launched it (`cd my-app && hermes`), the worktree `hermes -w`
+  created, the project a Desktop or TUI session is opened in, or a
+  gateway's `terminal.cwd`, or
+- a directory listed under `lsp.trusted_workspaces` (or any
+  directory below one).
+
+A `cd` in the agent's terminal does not move the session's workspace.
+Cron jobs and Kanban workers get no automatic trust, because the agent
+can choose their workdir or workspace; list the directories they should
+trust under `lsp.trusted_workspaces`. A checkout nested inside a trusted
+worktree has its own `.git`, so it is not trusted, and neither is a git
+repository at or above your home directory (a dotfiles repo there would
+otherwise trust everything below it). Trust covers the whole directory
+you pointed Hermes at, including anything later cloned into it, and
+lasts until Hermes exits.
+
+In an untrusted workspace Hermes **denies by default**: only the
+servers below start, each with settings that keep it on Hermes-side
+tools. Every other server is skipped, including rust-analyzer, gopls,
+jdtls, kotlin-language-server, elixir-ls, zls, clojure-lsp,
+haskell-language-server, lua-language-server, terraform-ls, prisma,
+astro, vue-language-server (it loads the `vueCompilerOptions.plugins`
+a project's `tsconfig.json` names) and any server you declare under `lsp.servers`. The diagnostics
+log records `skipped: untrusted workspace …; add it to
+lsp.trusted_workspaces`, and `hermes lsp status` marks those servers
+`[trusted workspaces only]`.
+
+| Server | Untrusted workspace |
+|---|---|
+| pyright | `VIRTUAL_ENV` or the Hermes-managed Python, never the project's `.venv`/`venv` |
+| typescript-language-server | `tsserver.path` pinned to the TypeScript next to the server; skipped if there is none |
+| svelte-language-server | `isTrusted: false` (no `svelte.config.js`, no project `svelte`/`prettier`) |
+| bash-language-server, yaml-language-server, dockerfile-ls, intelephense | unchanged: they run no project code (yaml-language-server may fetch the JSON schemas a file names) |
+| clangd | unchanged: Hermes never passes `--query-driver`, so no project compiler runs |
+
+On a local backend, the post-write shell linters that would use the
+checkout's own toolchain are skipped the same way whenever the terminal's
+current directory is untrusted: `npx tsc` (it runs
+the repository's `node_modules/.bin/tsc`, or installs from the
+registry its `.npmrc` names) and `rustfmt --check` (rustup honours the
+repository's `rust-toolchain.toml`). Sandboxed backends (Docker, SSH,
+Modal, …) are unchanged.
+
+Diagnostics that need the project's dependencies (for example
+unresolved-import warnings) may be less precise until you trust the
+workspace.
+
+```yaml
+lsp:
+  trusted_workspaces:
+    - ~/code/my-app
+```
+
 ## Supported languages
 
 | Language | Server | Auto-install |
@@ -81873,6 +82543,13 @@ lsp:
   exclude_roots: []
   # exclude_roots: ["~/work/huge-monorepo", "/srv/checkouts/*/vendor"]
 
+  # Directories whose projects a language server may load code from
+  # (see "Workspace trust" above). ~ expanded; everything under an
+  # entry counts. The worktree of the directory you launched Hermes in,
+  # or opened the session in, is always trusted.
+  trusted_workspaces: []
+  # trusted_workspaces: ["~/code/my-app"]
+
   # How to handle missing server binaries.
   #   auto    — install via npm/pip/go install into <HERMES_HOME>/lsp/bin
   #   manual  — only use binaries already on PATH
@@ -81920,6 +82597,9 @@ lsp:
 * `command: [bin, ...args]` — pin a custom binary path. Bypasses
   auto-install.
 * `env: {KEY: value}` — extra env vars passed to the spawned process.
+  Servers and the npm / `go install` auto-installers start from Hermes'
+  scrubbed child environment (no gateway tokens or provider API keys),
+  so a server that needs one of those gets it only through this key.
 * `initialization_options: {...}` — merged into the LSP
   `initializationOptions` payload sent in the `initialize`
   handshake. Server-specific; consult the language server's docs.
@@ -84635,6 +85315,11 @@ child with the selected profile's `HERMES_HOME`, so the conversation runs
 with that profile's model, skills, memory, and session history. Switching
 profiles starts a fresh terminal session.
 
+Hub actions (skill install/update/uninstall, MCP install, toolset setup)
+run with the target profile's own secret scope — its `.env` and configured
+secret sources — not the dashboard process's environment; this includes
+actions targeting the `default` profile from the machine dashboard.
+
 What stays per-profile and is *not* absorbed by the switcher: gateway
 processes (manage them via `hermes -p <name> gateway …`), each profile's
 session database, and cron schedulers (the Cron page already aggregates
@@ -84999,7 +85684,10 @@ The web dashboard exposes a REST API that the frontend consumes. You can also ca
 
 :::tip Profile-scoped endpoints
 The management endpoint families — `/api/config`, `/api/env`, `/api/skills`,
-`/api/tools/toolsets`, `/api/mcp`, and `/api/model/{info,options,auxiliary,set}` —
+`/api/tools/toolsets`, `/api/mcp`,
+`/api/model/{info,options,auxiliary,set,recommended-default}`,
+`/api/cron/{delivery-targets,blueprints}`, `/api/audio/voice-config`,
+`/api/ops/debug-share`, `/api/learning/graph`, and `/api/dashboard/plugins/hub` —
 accept an optional `?profile=<name>` query parameter (or `"profile"` in the
 JSON body for writes) that scopes the read/write to that profile's
 `HERMES_HOME`. Omitted = the dashboard's own profile. Unknown profile names
@@ -90098,7 +90786,7 @@ Wake payloads are **content-free by contract** — they carry metadata (event ID
 
 ## Bridge
 
-The adapter automatically spawns `raft agent bridge` as a child process, passing the endpoint URL and token. The bridge connects to the Raft server using the configured profile and begins forwarding wake hints. It is terminated when the gateway shuts down.
+The adapter automatically spawns `raft agent bridge` as a child process, passing the endpoint URL and token. The bridge gets Hermes' scrubbed child environment plus `RAFT_PROFILE` and that token, never Hermes' gateway tokens or provider API keys. The bridge connects to the Raft server using the configured profile and begins forwarding wake hints. It is terminated when the gateway shuts down.
 
 ---
 
@@ -93193,6 +93881,9 @@ Parking does not delete the profile, its sessions, or its scheduled jobs.
 Without a running host it removes the marker and follows the normal start
 path; start the host from the default profile if prompted. `restart` unserves
 and serves the profile without writing a parked marker, re-reading its config.
+On a **parked** profile with no live per-profile gateway, `restart` behaves as
+`start`: it removes the marker and hot-serves the profile (a gateway started
+with `--force` beside the marker keeps its own restart instead).
 These operations do not terminate work already dispatched by a cron tick.
 
 The host also rescans every 30 seconds: adding the marker by hand unserves the
@@ -93646,6 +94337,7 @@ profile and never shares with the default or any sibling:
 |---|---|---|
 | Provider keys, bot tokens, `${VAR}` refs in `config.yaml` | The profile's own `.env` (its secret scope) | Unresolved / no adapter — never the default profile's value |
 | Authorization (`GATEWAY_ALLOW_ALL_USERS`, `GATEWAY_ALLOWED_USERS`, per-platform allowlists and allow-all opt-ins) | The owning profile's `.env` and `config.yaml` | Closed — a default-profile opt-in never opens a secondary's bot |
+| Slash-command gating (`allow_admin_from`, `user_allowed_commands`, `group_allow_admin_from`; see [Slash commands](../reference/slash-commands.md)) | The profile whose bot received the message — a secondary's own platform `extra` block governs its bots, not the default profile's | Fail closed: a served profile whose config the multiplexer has not loaded is gated with an **empty** admin list and no user-enabled commands, so only the always-allowed floor (`/help`, `/whoami`) runs — never the default profile's open policy |
 | HTTP endpoints (`/p/<profile>/api/...`, `/p/<profile>/webhooks/...`, platform event callbacks) | The named profile's `API_SERVER_KEY`, `profile:`-bound webhook routes, and its own adapter | `401`/`404`; delivery without an adapter is `502`/`503`, never another profile's bot |
 | Inbound-port platforms (`/p/<profile>/webhooks/twilio`, `/p/<profile>/line/webhook`, `/p/<profile>/api/messages`, …) | The named profile's own adapter and its secret (Twilio auth token, LINE channel secret, Teams app, BlueBubbles password, …); replies leave through that adapter | `401`/`403` on a wrong secret, `404` when the profile has no such adapter — never the default profile's adapter |
 | Adapter settings (`*_REQUIRE_MENTION`, `*_REACTIONS`, `*_ALLOW_BOTS`, `*_PROXY`, Discord `allow_mentions`, Matrix `allowed_users` / `ignore_user_patterns`, webhook host/port/URL, Matrix thread/session/E2EE policy, Discord backfill/attachment caps, Buzz reply mode, A2A agent card / public URL, WhatsApp bridge policy, Yuanbao home channel) | The owning profile, in this order: explicit `.env` value → its `config.yaml` → the adapter's default | The adapter's documented default — never the default profile's setting. Single-profile installs keep env-over-YAML exactly as each platform page documents |
