@@ -73,6 +73,7 @@ Repo: https://github.com/NousResearch/hermes-agent
 - [Session Heartbeats](https://hermes-agent.nousresearch.com/docs/user-guide/features/heartbeat): A recurring prompt that re-enters your current session whenever it's idle — /heartbeat every 10m Check the deployment.
 - [Kanban Multi-Gateway Deployment](https://hermes-agent.nousresearch.com/docs/user-guide/features/kanban-multi-gateway): Running one kanban board across several per-profile gateways: single dispatcher, profile-owned delivery
 - [Kanban worker lanes](https://hermes-agent.nousresearch.com/docs/user-guide/features/kanban-worker-lanes)
+- [Language Packs](https://hermes-agent.nousresearch.com/docs/user-guide/features/language-packs): Add or override UI languages for the CLI, gateway, TUI and Desktop with a plugin or a personal overlay
 - [Recurring Loops](https://hermes-agent.nousresearch.com/docs/user-guide/features/loops): Re-run a prompt on a recurring interval inside your session — Hermes' take on Claude Code's /loop.
 - [LSP — Semantic Diagnostics](https://hermes-agent.nousresearch.com/docs/user-guide/features/lsp): Real language servers (pyright, gopls, rust-analyzer, …) wired into the post-write lint check used by write_file and patch.
 - [Mixture of Agents](https://hermes-agent.nousresearch.com/docs/user-guide/features/mixture-of-agents): Create named MoA presets that appear as selectable models under the Mixture of Agents provider
