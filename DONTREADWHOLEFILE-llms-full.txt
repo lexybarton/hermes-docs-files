@@ -4947,6 +4947,12 @@ title-only hint (the agent turn still sees only the attachment reference), so a 
 this" plus a large paste is named after the pasted topic. Files you attach yourself are never
 read for titling.
 
+In the local messaging gateway, text messages supply their original request to
+session titling, before channel-bound skills and platform context are added.
+The main model and conversation history still retain the full skill content.
+Attachment-only turns retain the existing enriched-message title fallback.
+This affects new title generation; it does not repair previously named sessions.
+
 ### Stream-only endpoints
 
 Some OpenAI-compatible endpoints reject non-streaming chat requests outright (e.g. Tencent Copilot returns HTTP 400 `"Non-stream chat request is currently not supported"`). Interactive chat already streams, but auxiliary tasks (title generation, compression, vision) use non-streaming calls and would fail on every attempt. Hermes always treats `copilot.tencent.com` as stream-only; for any other such endpoint, list a URL substring under `auxiliary.stream_only_base_urls`:
@@ -49392,7 +49398,7 @@ Upload a debug report (system info + recent logs) to a paste service and get a s
 | `--local` | Print the report locally instead of uploading. |
 | `--no-redact` | Disable upload-time secret redaction. By default, uploads are redacted. |
 
-The report includes system info (OS, Python version, Hermes version), recent agent, gateway, GUI/dashboard, and desktop logs (512 KB limit per file), and redacted API key status. By default, uploads are redacted so secrets are not included; this covers the system dump (including config values such as `fallback_providers` entries and credentials in their URLs) as well as the logs, and the gateway `/debug` report too.
+The report includes system info (OS, Python version, Hermes version), recent agent, gateway, GUI/dashboard, and desktop logs (512 KB limit per file), plus the update and Desktop update hand-off logs when present, and redacted API key status. By default, uploads are redacted so secrets are not included; this covers the system dump (including config values such as `fallback_providers` entries and credentials in their URLs) as well as the logs, and the gateway `/debug` report too.
 
 Default uploads use public paste services tried in order: paste.rs, dpaste.com. `--nous` uploads the same debug bundle to private Nous diagnostics storage instead; the returned viewer link is for the Nous team and auto-deletes after 14 days.
 
@@ -49539,12 +49545,14 @@ View, tail, and filter Hermes log files. All logs are stored in `~/.hermes/logs/
 | `gui` | `gui.log` | Dashboard / TUI-gateway / PTY-bridge / websocket events |
 | `desktop` | `desktop.log` | Electron desktop app — boot, backend spawn output, and recent Python tracebacks |
 | `mcp` | `mcp-stderr.log` | stderr of every stdio MCP server, one `starting MCP server` banner per launch |
+| `update` | `update.log` | Full stdout/stderr mirror of `hermes update` runs (append-only) — the root cause of update/dependency failures |
+| `handoff` | `desktop-update-handoff.log` | Desktop-driven update hand-off stages, including the Desktop rebuild retry output |
 
 ### Options
 
 | Option | Description |
 |--------|-------------|
-| `log_name` | Which log to view: `agent` (default), `errors`, `gateway`, or `list` to show available files with sizes. |
+| `log_name` | Which log to view: `agent` (default), `errors`, `gateway`, `gui`, `desktop`, `update`, `handoff`, or `list` to show available files with sizes. |
 | `-n`, `--lines <N>` | Number of lines to show (default: 50). |
 | `-f`, `--follow` | Follow the log in real time, like `tail -f`. Press Ctrl+C to stop. |
 | `--level <LEVEL>` | Minimum log level to show: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`. |
@@ -57485,8 +57493,13 @@ prompt to the agent as a user turn, off-screen: no bubble takes up the
 transcript, the widget updating is the visible response. The turn is still
 real — it wakes the agent, rides the composer's steer/queue rules, and
 persists (typed `hidden`) so resume and the session DB keep the full record.
-Prompts are trimmed, capped at 500 chars, and throttled to one per second
-per frame.
+Prompts are trimmed, capped at 500 chars (`window.hermes.maxLength`), and
+throttled to one per second per frame. Nothing is truncated or dropped
+silently: `send()` returns a Promise that resolves `{ ok: true }` once the
+prompt reaches the chat's composer, or `{ ok: false, error }` where `error` is
+`too_long` (with `maxLength`), `throttled` (with `retryAfterMs`), `invalid`,
+or `undelivered` (no visible composer took it). Check it before showing a
+widget as saved.
 
 ### Mount-scoped chrome (`Contribute`)
 
@@ -77425,7 +77438,7 @@ While delegated workers are live, a **Subagents** frame appears above the compos
 For sessions running inside a Git repository, the app has a built-in source-control surface:
 
 - **Review pane** — **Cmd/Ctrl+G** toggles the working-tree review pane: branch and ahead/behind status, changed files (list or tree view), and diffs scoped to **Uncommitted**, **Branch**, or **Last turn** (just what the agent changed in its most recent turn). Stage/unstage files, revert changes, write a commit message (or **Generate commit message**), then **Commit** or **Commit & Push** — and **Create PR** via the GitHub CLI (`gh`), or hand the whole thing to the agent with **Ask Hermes to open PR**. You can also create and switch branches from here.
-- **Worktrees** — **Cmd/Ctrl+Shift+B** (or **New worktree** on a project in the sidebar) creates a Git worktree on a new branch so an agent can work on a parallel copy of the repo without touching your checkout. Worktrees show up as their own lanes under the project; removing one offers to delete the worktree directory (the branch stays) or just hide the lane and leave it on disk, with a force option when it has uncommitted changes.
+- **Worktrees** — **Cmd/Ctrl+Shift+B** (or **New worktree** on a project in the sidebar) creates a Git worktree on a new branch so an agent can work on a parallel copy of the repo without touching your checkout. Worktrees show up as their own lanes under the project; removing one offers to delete the worktree directory (the branch stays) or just hide the lane and leave it on disk, with a force option when it has uncommitted changes. A chat also **follows the agent**: when you ask it to make a worktree and work in it, the chat moves to that lane at the end of the turn and the sidebar re-scopes with it. Only a workspace you deliberately switched the chat to (the folder picker, or a project switch) stays put.
 
 ### Memory Graph
 
@@ -77951,6 +77964,17 @@ damaged application files, repair through the
 # Reset a stuck macOS microphone prompt
 tccutil reset Microphone com.nousresearch.hermes
 ```
+
+### Windows: the SSH client is missing or broken
+
+On Windows the app runs SSH through the built-in OpenSSH client (`%SystemRoot%\System32\OpenSSH\ssh.exe`). If that client is not installed, it falls back to Git for Windows' bundled `usr\bin\ssh.exe` and then to whatever `ssh` is on `PATH`. If the built-in client is installed but broken (for example, every `ssh.exe` exits with code 255 after a Windows update), boot stops on an error naming the client instead of retrying. To use a different client, set it in `config.yaml` and restart the app:
+
+```yaml
+desktop:
+  ssh_path: 'C:\Program Files\Git\usr\bin\ssh.exe'
+```
+
+Use single quotes or no quotes so the backslashes stay literal. The key goes two spaces under `desktop:`, like the launch keys above. It has no effect on macOS or Linux.
 
 ### "The host key has CHANGED since you last connected" (SSH remote)
 
