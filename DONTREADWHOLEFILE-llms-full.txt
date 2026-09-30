@@ -5465,11 +5465,11 @@ The override applies automatically everywhere: CLI startup, `hermes -p` one-shot
 
 ## Fast Mode
 
-Fast mode asks the provider for faster output at a premium price: OpenAI [Priority Processing](https://openai.com/api-priority-processing/) (`service_tier: priority`), xAI Priority Processing on Grok 4.6, and Anthropic [Fast Mode](https://platform.claude.com/docs/en/build-with-claude/fast-mode) (`speed: fast`, Opus 4.8 / Opus 5 / Opus 5.5 only). It is **off by default**.
+Fast mode asks the provider for faster output at a premium price: OpenAI [Priority Processing](https://openai.com/api-priority-processing/) (`service_tier: priority`) and Ultrafast (`service_tier: ultrafast`) on supported OpenAI models, xAI Priority Processing on Grok 4.6, and Anthropic [Fast Mode](https://platform.claude.com/docs/en/build-with-claude/fast-mode) (`speed: fast`, Opus 4.8 / Opus 5 / Opus 5.5 only). The `openai` and `openai-api` providers use the first-party OpenAI endpoint. It is **off by default**.
 
 ```yaml
 agent:
-  service_tier: ""          # "" / normal | fast | auto | cold
+  service_tier: ""          # "" / normal | fast | priority | ultrafast | auto | cold
   fast_auto_seconds: 60     # window for auto / cold
 ```
 
@@ -5480,7 +5480,7 @@ agent:
 | `auto` | Requests in the first `fast_auto_seconds` of **every** turn | Snappy first reply; long tool loops fall back to standard pricing |
 | `cold` | Same window, but only on the **first turn** of a session (no prior history) | Fast onboarding reply, standard pricing afterwards |
 
-`/fast normal|fast|auto|cold` switches the mode for the session; add `--global` to persist to `config.yaml`. `/fast` alone shows the current mode.
+`/fast normal|fast|ultrafast|auto|cold` switches the mode for the session. Add `--global` to persist to `config.yaml`. `/fast` alone shows the current mode.
 
 **Cost note:** both providers bill fast requests at a multiplier on standard rates (Anthropic: $8 / $40 per MTok in/out on Opus 5.5, $10 / $50 on Opus 5 and Opus 4.8), stacking with prompt-cache pricing. Hermes prices each Anthropic response from the speed the API reports in `usage.speed`. `auto`/`cold` bound that premium to the window only. Fast params are only sent to the first-party endpoint that supports them (`api.openai.com` / Codex subscription, `api.anthropic.com`, `api.x.ai`); OpenRouter, Nous Portal, Copilot, Azure, Bedrock, and custom `base_url` routes never receive them in any mode.
 
@@ -68320,6 +68320,19 @@ python scripts/release.py --channel pm-preview --build-commit my-branch --remote
 python scripts/release.py --channels --remote origin
 ```
 
+By default a preview channel installs as its own side-by-side app (`Hermes
+NAME`, its own package ID). To test an exact commit as the regular app instead,
+create the channel with `--branding stable`: it copies the published stable
+channel's name, icon and package ID, so the build installs over the official
+app, shares its desktop settings, and later updates follow the channel. Branding is fixed when the channel is
+created; repeat the flag on every dispatch of that channel and use a new channel
+name to change it. `--branding` needs `--channel`, since a plain one-off commit
+build always carries its `Hermes Agent <sha>` identity.
+
+```sh
+python scripts/release.py --channel my-commit --branding stable --build-commit SHA --remote origin --publish
+```
+
 Disposable R2 scoping is opt-in, for test runs only. Dispatch the desktop
 workflow with `disposable_channel` and `build_commit` to allocate a namespace
 under `ci-disposable/<repository-id>/<run-id>/`, then use the exact scoped build
@@ -76904,6 +76917,19 @@ There is no new primitive to learn: a Bot **is** a Hermes profile — isolated c
 See [Profiles, agents, and bots](./profiles.md#profiles-agents-and-bots) for how
 Bot Mode relates to messaging bots and delegated subagents.
 :::
+
+## Coming from profiles?
+
+Your profiles keep working exactly as they did; Bot Mode adds the parts a profile alone does not have:
+
+| With plain profiles | With Bot Mode |
+|---|---|
+| A pile of sessions per profile; you pick one or start another | One permanent **Bot Chat** per Bot. Click the Bot and you are back in the same conversation; `/new` compacts it instead of forking it |
+| Switch profiles to talk to a different specialist | Every Bot sits in one roster with its avatar, latest message, and unread state |
+| Profiles never talk to each other | Bots [message each other](#bot-to-bot-messaging) and share [group chats](#groups-and-group-chats) |
+| Scheduled jobs live in `hermes cron`, apart from any chat | Each Bot's [routines](#routines) are scheduled and edited beside its chat |
+
+Nothing moves: config, memory, skills, and credentials stay in `~/.hermes/profiles/<name>/`, and `hermes -p <bot> chat` still opens the same agent.
 
 ## The Bots pane
 
