@@ -8827,6 +8827,8 @@ Hermes will:
 - Check out an isolated branch (e.g. `hermes/hermes-<hash>`).
 - Run the full CLI session inside that worktree.
 
+Hermes checks the worktree out without running the repository's own git configuration: its hooks, `core.fsmonitor` and clean/smudge filters are off for that checkout, as they are for the worktrees Hermes creates for kanban tasks and subagents. A repository that stores files through Git LFS gets pointer files there; run `git lfs pull` inside the worktree if the session needs their contents.
+
 This is the easiest way to get worktree isolation. You can also combine it with a single query:
 
 ```bash
@@ -33570,7 +33572,7 @@ Requests exceeding the limit receive a `429 Too Many Requests` response.
 
 ### Idempotency
 
-Delivery IDs (from `X-GitHub-Delivery`, `svix-id`, `webhook-id`, `X-Request-ID`, or a timestamp fallback) are cached for **1 hour**. Duplicate deliveries (e.g. webhook retries) are silently skipped with a `200` response, preventing duplicate agent runs.
+Delivery IDs (from `X-GitHub-Delivery`, `svix-id`, `webhook-id`, `X-Request-ID`, or a random per-request ID) are cached for **1 hour**. Duplicate deliveries (e.g. webhook retries) are silently skipped with a `200` response, preventing duplicate agent runs.
 
 ### Body size limits
 
@@ -35045,6 +35047,10 @@ Hermes no longer reads `model.max_tokens`, `HERMES_MAX_TOKENS`, provider output-
 settings, or `model_overrides.*.*.max_output_tokens`. Remove these legacy settings.
 Custom OpenAI-compatible endpoints receive no automatic catalog-sized output cap.
 Their server defaults apply; these can be lower than the model maximum.
+A reply that degenerates into a repetition loop is still stopped: within about 130,000
+characters of the loop starting (visible or reasoning text), Hermes closes the stream
+and ends the turn with a "Repetition Detected" notice, so an uncapped endpoint cannot keep a
+looping model running.
 
 Native Anthropic Messages (including the native Anthropic Bedrock path) requires
 `max_tokens`, so Hermes supplies an internal value. Bedrock Converse is a separate
@@ -46137,7 +46143,7 @@ Codex uses a separate Responses API path:
 
 - `api_mode = codex_responses`
 - dedicated credential resolution and auth store support
-- a resumed session whose lingering Codex reasoning items (`encrypted_content`) are rejected — as a 400 `invalid_encrypted_content` or as a 401 `token_expired` — self-heals by stripping the cached items and replaying once, before any credential refresh or pool rotation
+- a resumed session whose lingering Codex reasoning items (`encrypted_content`) are rejected — as a 400 `invalid_encrypted_content` or as a 401 `token_expired` — self-heals by stripping the cached items and replaying once, before any credential refresh or pool rotation. Reasoning minted after that strip keeps replaying; only a second rejection in the same session turns replay off
 
 ## Auxiliary model routing
 
@@ -63303,6 +63309,15 @@ The compatibility rules are:
   format must still replay. Do not add version literals to unrelated callback
   or context values.
 
+The contract covers documented surfaces only. Replacing or wrapping core
+functions, methods, module attributes or private tables at runtime (assigning
+`AIAgent.<method>`, `setattr` on a Hermes module, writing into
+`sys.modules` or a core dict) is not a supported extension point. It breaks
+whenever the internals move, and it collides with every other plugin patching
+the same seam. The plugin catalog refuses it at admission (`hermes plugins
+validate`, `no core override` check). If a public hook you need is missing,
+open an issue describing it.
+
 ### Deprecation policy
 
 A documented native plugin behavior may be deprecated only with all of the
@@ -75544,7 +75559,7 @@ GitLab payload fields differ from GitHub's — e.g. `{object_attributes.title}` 
 - **Never use `INSECURE_NO_AUTH`** in production — it disables signature validation entirely. It is only for local development.
 - **Rotate your webhook secret** periodically and update it in both GitHub (webhook settings) and your `config.yaml`.
 - **Rate limiting** is 30 req/min per route by default (configurable via `extra.rate_limit`). Exceeding it returns `429`.
-- **Duplicate deliveries** (webhook retries) are deduplicated via a 1-hour idempotency cache. The cache key is `X-GitHub-Delivery` if present, then `X-Request-ID`, then a millisecond timestamp. When neither delivery ID header is set, retries are **not** deduplicated.
+- **Duplicate deliveries** (webhook retries) are deduplicated via a 1-hour idempotency cache. The cache key is `X-GitHub-Delivery` if present, then `X-Request-ID`, then a random per-request ID. When neither delivery ID header is set, retries are **not** deduplicated.
 - **Prompt injection:** PR titles, descriptions, and commit messages are attacker-controlled. Malicious PRs could attempt to manipulate the agent's actions. Run the gateway in a sandboxed environment (Docker, VM) when exposed to the public internet.
 
 ---
@@ -79523,6 +79538,7 @@ The kanban tools are gated by `HERMES_KANBAN_TASK` env var the dispatcher sets �
 | Codex `view_image` (load image into conversation) | — | yes (Codex built-in) |
 | Codex sandbox (seatbelt/landlock, profiles) | — | yes (Codex built-in) |
 | ChatGPT subscription auth | — | yes (via `openai-codex` provider) |
+| Model selection (`model.default`, `/model`) | yes | yes — sent on `thread/start` and every `turn/start`, so a mid-session `/model` applies to the next turn; a `-900k` variant goes out as its base slug (codex applies the extended window itself), and on codex's own provider an `openai/` prefix is dropped |
 | Native Codex plugins (Linear, GitHub, etc.) | — | yes (auto-migrated) |
 | User MCP servers | yes | yes (auto-migrated to codex) |
 | Memory + skill review (background) | yes | yes (via item projection) |
@@ -83494,6 +83510,7 @@ directory of the hermes-agent repository, declaring:
 | `name` | The catalog key you pass to `hermes plugins install` |
 | `repo` | The plugin's public git repository |
 | `sha` | The **exact 40-hex commit** that was reviewed — installs check out this pin, not a branch tip |
+| `subdir` | Path to the plugin inside the repo for monorepos — a plain relative path matching `[A-Za-z0-9._/-]+` (no `..`, `.`, empty segments, absolute or backslash forms) (optional, default repo root) |
 | `tier` | `official` (maintained by NousResearch) or `community` |
 | `category` | Browse shelf: `desktop` (default), `memory`, `platform`, `web`, `tools`, `voice`, `automation`, `models` or `general` |
 | `maintainer` | Who owns the plugin |
@@ -83542,6 +83559,14 @@ The catalog is designed so you know exactly what you're installing:
   including one built from `new RegExp(...).source`, still fails. Treat the
   lint as a review aid, not a
   guarantee; give Desktop halves the same scrutiny you'd give a Python half.
+- **No runtime overrides of Hermes.** Listed plugins extend Hermes through
+  its public surfaces (hooks, middleware, provider profiles, Desktop SDK slots)
+  and never replace core functions, methods or Desktop UI in place: two plugins
+  patching the same seam would break each other, and a core release could break
+  both. Admission's `no core override` check refuses Python that rebinds Hermes
+  modules, classes or their tables at runtime, and the `desktop surface` lint
+  refuses `desktop/plugin.js` code that queries the app's own markup to restyle,
+  hide, click or rewrite core UI.
 - **Capability declarations.** Entries state up front which tools, hooks, and
   middleware the plugin provides and which environment variables (API keys
   etc.) it needs, so you can judge its blast radius before installing.
@@ -87072,9 +87097,10 @@ If no shared backend has **ever** been selected (no `web.backend` written by you
 | `SEARXNG_URL` | searxng |
 | `BRAVE_SEARCH_API_KEY` | brave-free |
 | `ddgs` package importable | ddgs |
+| Registered Nous Portal identity (any tier, including the no-credit free tier; anonymous guests excluded) | managed web search (`web_search` only); extract and the keyless ring below are unchanged |
 | *(nothing set at all)* | keyless ring: exa / parallel / firecrawl / keenable (round-robin) |
 
-**Keyless free-tier ring:** when *no* credential above is present, requests rotate across the ring vendors' public free tiers (Exa, Parallel, Firecrawl, Keenable) so web tools work on a fresh install with zero setup — and a rate-limited request fails over to the next vendor in the ring automatically. Pin one vendor in `hermes tools` to stop the rotation (the ring is then only used as failover succession on throttles). All free tiers are vendor-rate-limited under burst load; sustained normal usage goes through fine. Set `web.keyless_fallback: false` to turn the tier off — with it off and no credentials, web tools are unavailable until a provider is configured.
+**Keyless free-tier ring:** when *no* credential above is present, requests rotate across the ring vendors' public free tiers (Exa, Parallel, Firecrawl, Keenable) so web tools work on a fresh install with zero setup — and a rate-limited request fails over to the next vendor in the ring automatically. Pin one vendor in `hermes tools` to stop the rotation (the ring is then only used as failover succession on throttles). All free tiers are vendor-rate-limited under burst load; sustained normal usage goes through fine. Set `web.keyless_fallback: false` to turn the tier off — with it off and no credentials, web tools are unavailable until a provider is configured. A registered Nous Portal identity is unaffected by that switch: managed `web_search` still applies, though `web_extract` needs a configured provider.
 
 **One-shot keyless rescue for keyed backends:** when your chosen/keyed backend — including the Nous Tool Gateway route (`web.backend: nous`) — fails a call (bad key, outage, unreachable gateway, upstream 5xx), that single call automatically retries on the keyless free-tier ring instead of erroring — the result notes which vendor served it and why (`rescued_from` / `backend_error`). The failover is never sticky: the very next `web_search`/`web_extract` call attempts your chosen backend again. Disable with `web.keyless_rescue: false` (also off whenever `keyless_fallback` is off).
 
