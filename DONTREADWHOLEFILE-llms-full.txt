@@ -982,6 +982,8 @@ Chat turns show their session key, model and current tool; cron jobs show the jo
 
 Wedged work does not hold the restart: a chat turn idle past `agent.gateway_timeout`, or a cron run older than the scheduler's in-flight allowance (`max(2 × the job's interval, cron.inflight_max_minutes)`, 30 minutes by default), is excluded from the wait and interrupted by the restart instead.
 
+Work that outlives the gateway does not hold the restart either: a cron run already handed to a worker in its own systemd scope (`systemd-run --user --scope`, the normal case on a systemd install) keeps running when the gateway stops, and its result is delivered from the durable queue by whichever gateway comes up next — so the restart proceeds instead of waiting up to the full cap. A worker that could not get its own scope (no reachable user D-Bus session, see `cron.require_restart_safe_scope`) stays in the gateway's cgroup and is still awaited, because the restart would kill it mid-run.
+
 ### Missing Windows updater files
 
 If the maintained updater script is missing (for example after antivirus quarantine), the legacy update forwarder fails instead of reporting a successful hand-off. Repair the installation and review the security software's quarantine report before retrying; do not disable antivirus protection. Before reporting success, the maintained updater checks the CLI import, Windows executable header, ASAR header and packaged main entry, readable renderer HTML with a local module entry, initial module files, and current build stamp. These are minimum artifact checks, not a full dependency audit or an application/backend launch test. Missing Python is reported before waiting for Desktop shutdown; dependency repair is still allowed to run as part of the update. Electron checks maintained handoff prerequisites before stopping backends when that layout is present; genuine legacy-flat updater layouts remain supported, so not every missing updater file is detected before backend shutdown.
@@ -6494,14 +6496,14 @@ The delegation provider uses the same credential resolution as CLI/gateway start
 
 ## Clarify
 
-Configure how long Hermes waits for a response to a clarifying question on messaging platforms. The classic CLI modal and the TUI/Desktop card have no deadline — they wait until you answer, interrupt the turn, or close the session. The canonical key is `agent.clarify_timeout` (default `3600` seconds; `0` or less = unlimited); a legacy top-level `clarify.timeout` is still honored if explicitly set:
+Configure how long Hermes waits for a response to a clarifying question. One value covers every surface — the classic CLI modal, the TUI/Desktop card, and the messaging gateway. The canonical key is `agent.clarify_timeout` (default `3600` seconds; `0` or less = unlimited); a legacy top-level `clarify.timeout` is still honored if explicitly set:
 
 ```yaml
 agent:
-  clarify_timeout: 3600        # Seconds a messaging platform waits for a clarification reply (0 or less = unlimited)
+  clarify_timeout: 3600        # Seconds to wait for user clarification response (0 or less = unlimited)
 ```
 
-When the timeout expires, the agent unblocks with `"outcome": "timed_out"` (answers the user already locked are kept) and continues on its own. A clarify prompt is never cut by the generic per-tool deadline (`timeouts.tools.sequential_call`).
+When the timeout expires, the agent unblocks with `"outcome": "timed_out"` (answers the user already locked are kept) and continues on its own. A clarify prompt is never cut by the generic per-tool deadline (`timeouts.tools.sequential_call`); only `agent.clarify_timeout` bounds the wait.
 
 ## Context Files (SOUL.md, AGENTS.md)
 
@@ -9842,7 +9844,7 @@ The full set of keys:
 | Key | Default | What it controls |
 |---|---|---|
 | `mode` | `smart` | Approval policy for dangerous shell commands — see the table below. |
-| `timeout` | `300` | Seconds Hermes waits for an approval reply on messaging platforms, ACP and approval transport plugins before timing out. The CLI, TUI and Desktop wait until you answer. |
+| `timeout` | `300` | Seconds Hermes waits for an approval reply before timing out. |
 | `cron_mode` | `deny` | How [cron jobs](./features/cron.md) behave headlessly when they trigger a dangerous-command prompt. `deny` blocks the command (the agent must find another path); `approve` auto-approves everything in cron context. |
 | `single_query_mode` | `deny` | How one-shot [`hermes chat -q`](./cli.md) sessions behave when they trigger a dangerous-command prompt. A `-q` session runs a single turn and exits with no user waiting to answer prompts; `deny` blocks the command (the agent must find another path), `approve` auto-approves everything in single-query context. Mirrors `cron_mode`. |
 | `unattended_mode` | `deny` | How sessions on unattended programmatic platforms (webhook, msgraph_webhook, api_server) behave when they trigger a dangerous-command prompt. These surfaces have no human who can answer `/approve`, so instead of blocking for the full approval timeout, `deny` blocks the command instantly (the agent must find another path) and `approve` auto-approves everything in unattended context. Mirrors `cron_mode`. |
@@ -9982,9 +9984,7 @@ Deny rules are a shell-command policy, not a complete shell interpreter or an OS
 
 ### Approval Timeout
 
-In the CLI, the TUI and the Desktop app an approval prompt has no deadline: it stays up until you answer it, interrupt the turn (Ctrl+C / Stop), or close the session. The command does not run while it waits.
-
-On messaging platforms (and in ACP editors and approval transport plugins) the user has a configurable amount of time to respond. If no response is given within the timeout, the command is **denied** by default (fail-closed).
+When a dangerous command prompt appears, the user has a configurable amount of time to respond. If no response is given within the timeout, the command is **denied** by default (fail-closed).
 
 An expired prompt cannot be reopened: the pending entry is discarded and the agent is told not to retry on its own within that turn. To run the operation after all, send a new message asking for it (for example "go ahead and run that now") — the agent issues a fresh tool call, which raises a fresh approval card, and a "once" approval applies only to that call. A timeout is not counted as a denial, so asking again is never penalized.
 
@@ -16747,7 +16747,8 @@ it. Any run that reaches the model clears the hold. One-shot jobs are not held.
 
 A recurring job that keeps failing with the *same* error alerts you **once**,
 not on every run. Each failure is recorded as a durable **incident**, keyed by
-the job plus a normalized signature of the error text, in the same per-profile
+the job plus a normalized signature of the error text (case, whitespace and
+measured durations such as `idle for 603s` are ignored), in the same per-profile
 ledger database as the execution history; the first failure of a signature is
 always delivered, and repeats are then withheld while the incident is `alerted`
 (the run is still recorded — `hermes cron runs` and the failure streak see it,
@@ -33478,9 +33479,11 @@ hermes webhook test github-issues --payload '{"issue": {"number": 42, "title": "
 ### How dynamic subscriptions work
 
 - Subscriptions are stored in `~/.hermes/webhook_subscriptions.json`
-- The webhook adapter hot-reloads this file on each incoming request (mtime-gated, negligible overhead)
+- The webhook adapter hot-reloads a coherent snapshot of this file on each incoming request (stat-gated (mtime/size/inode), lock-free)
 - Static routes from `config.yaml` always take precedence over dynamic ones with the same name
 - Dynamic subscriptions use the same route format and capabilities as static routes (events, prompt templates, skills, delivery)
+- Create, update, enable/disable, and remove operations are serialized and atomically replace the store; a stale concurrent update is rejected rather than restoring a route another operation removed or disabled
+- Rebinding an existing route with `--route-profile` rotates its HMAC secret automatically. A caller with the old profile's secret cannot authenticate the rebound route; pass a different `--secret` only when the receiving service requires an operator-chosen value
 - No gateway restart required — subscribe and it's immediately live
 
 ### Agent-driven subscriptions
@@ -36965,7 +36968,7 @@ options exist on the wire but never reach a human. Buzz Desktop does this, so
 treat that path as unattended execution regardless of your `approvals` setting.
 
 On timeout or error, the approval bridge denies the request. The wait is
-`approvals.timeout` from `config.yaml` (default 300 s), the same knob messaging
+`approvals.timeout` from `config.yaml` (default 300 s), the same knob the CLI and
 gateway prompts use — raise it if your editor keeps approval cards open longer.
 
 ### Session-scoped edit auto-approval
@@ -51694,7 +51697,7 @@ These are set automatically by the Docker terminal backend when `proxy.enabled: 
 | `WHATSAPP_CLOUD_ALLOWED_USERS` | Comma-separated `wa_id`s (phone numbers with country code, no `+`) allowed to message the bot |
 | `WHATSAPP_CLOUD_ALLOW_ALL_USERS` | Allow all WhatsApp Cloud senders without an allowlist (`true`/`false`) |
 | `WHATSAPP_CLOUD_APP_ID` | Optional Meta App ID (for future analytics integration) |
-| `WHATSAPP_CLOUD_WABA_ID` | Optional WhatsApp Business Account ID (for future analytics integration) |
+| `WHATSAPP_CLOUD_WABA_ID` | Optional WhatsApp Business Account ID; when set, inbound webhooks must match it |
 | `WHATSAPP_CLOUD_WEBHOOK_HOST` | Interface the inbound webhook server binds to (default `0.0.0.0`) |
 | `WHATSAPP_CLOUD_WEBHOOK_PORT` | Port the inbound webhook server binds to (default `8090`) |
 | `WHATSAPP_CLOUD_WEBHOOK_PATH` | URL path Meta posts inbound messages to (default `/whatsapp/webhook`) |
@@ -92112,7 +92115,7 @@ No configuration is needed — decryption happens transparently when encrypted m
 
 | Method | What it sends | Size limit |
 |--------|--------------|------------|
-| `send` | Markdown text messages | 4000 chars |
+| `send` | Markdown text messages | 4000 chars per message; longer text is split across messages |
 | `send_image` / `send_image_file` | Native image messages | 10 MB |
 | `send_document` | File attachments | 20 MB |
 | `send_voice` | Voice messages (AMR format only for native voice) | 2 MB |
@@ -92350,6 +92353,7 @@ The crypto implementation is compatible with Tencent's official WXBizMsgCrypt SD
 - **No typing indicators** — the callback model doesn't support typing status
 - **Text only** — currently supports text messages for input; image/file/voice input not yet implemented. The agent is aware of outbound media capabilities via the WeCom platform hint (images, documents, video, voice).
 - **Response latency** — agent sessions take 3–30 minutes; users see the reply when processing completes
+- **2048-byte text messages** — WeCom keeps only the first 2048 bytes of a text message, so longer replies (and cron output) are split across several messages; CJK text fits roughly 680 characters per message
 
 ## Troubleshooting
 
@@ -92780,7 +92784,7 @@ You'll need these values from the dashboard — the wizard prompts for them in t
 | **Access Token** | App Dashboard → WhatsApp → API Setup → "Generate access token" | Starts with `EAA`, 100+ chars | Temp tokens last 24h — see "Permanent token" below for production. |
 | **App Secret** | App Dashboard → Settings → Basic → click "Show" next to App secret | 32-character lowercase hex | Used to verify incoming webhook signatures.  Without it, inbound delivery is refused with 503. |
 | **App ID** (optional) | App Dashboard → Settings → Basic | Numeric, 15-16 digits | Not required for messaging, useful for analytics. |
-| **WABA ID** (optional) | App Dashboard → WhatsApp → API Setup → near the top | Numeric, 15+ digits | Not required for messaging, useful for analytics. |
+| **WABA ID** (optional) | App Dashboard → WhatsApp → API Setup → near the top | Numeric, 15+ digits | When set, inbound webhooks must match this business account. |
 
 ---
 
@@ -92943,7 +92947,7 @@ All settings live in `~/.hermes/.env`.  Required values are in **bold**.
 | **`WHATSAPP_CLOUD_ALLOWED_USERS`** | — | Comma-separated wa_ids allowed to message the bot. |
 | `WHATSAPP_CLOUD_ALLOW_ALL_USERS` | `false` | Set to `true` to bypass the allowlist. |
 | `WHATSAPP_CLOUD_APP_ID` | — | Optional, for future analytics integration. |
-| `WHATSAPP_CLOUD_WABA_ID` | — | Optional, for future analytics integration. |
+| `WHATSAPP_CLOUD_WABA_ID` | — | Optional; when set, inbound webhooks must match this business account. |
 | `WHATSAPP_CLOUD_WEBHOOK_HOST` | unset (dual-stack: all interfaces, IPv4+IPv6) | Interface the webhook server binds to. |
 | `WHATSAPP_CLOUD_WEBHOOK_PORT` | `8090` | Port the webhook server binds to.  Must match the port your tunnel forwards. |
 | `WHATSAPP_CLOUD_WEBHOOK_PATH` | `/whatsapp/webhook` | URL path Meta posts to. |
