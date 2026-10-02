@@ -1031,6 +1031,23 @@ git -C $repo rev-list --objects --missing=print --all | Where-Object { $_.Starts
 git -C $repo rev-list --objects --missing=error --all | Out-Null; $LASTEXITCODE   # 0 = complete
 ```
 
+### `.git` keeps growing in a partial clone
+
+The installer's checkout is a partial clone: git downloads trees and blobs on demand, and each
+on-demand download is written as its own small pack. `hermes update` and `hermes update --check`
+fold them back together with `git gc --auto` (git's own `gc.autoPackLimit`, 50 by default), so a
+healthy checkout pays a no-op. They also set `maintenance.auto`, `gc.writeCommitGraph` and
+`fetch.writeCommitGraph` to `false` in that checkout, because a commit-graph write over commits the
+graph has not seen yet downloads every one of their trees. Leave those settings alone, and leave
+`gc.auto` at its default: `gc.auto=0` stops the fold. The first fold on a checkout that has
+piled up thousands of packs is a full repack and can take several minutes; the update says so
+before it starts, and if the fold runs past 20 minutes it stops and prints the command below.
+To fold by hand (with Hermes closed):
+
+```bash
+git -C "$repo" -c gc.writeCommitGraph=false gc --auto
+```
+
 ### Updating against a non-default branch: `--branch`
 
 On the default source channel, `hermes update` tracks `origin/main`. Use
@@ -2172,8 +2189,8 @@ services.hermes-agent.extraDependencyGroups = [ "messaging" ];
 ```nix
 # Enable a memory provider
 services.hermes-agent = {
-  extraDependencyGroups = [ "honcho" ];
-  settings.memory.provider = "honcho";
+  extraDependencyGroups = [ "mem0" ];
+  settings.memory.provider = "mem0";
 };
 ```
 
@@ -2193,7 +2210,7 @@ requirements can still fail that resolution. The table lists common groups;
 | `anthropic` | Native Anthropic SDK (not needed via OpenRouter) |
 | `bedrock` | AWS Bedrock (boto3) |
 | `azure-identity` | Azure Entra ID auth |
-| `honcho` | Honcho memory provider |
+| `mem0` | Mem0 memory provider |
 | `modal` | Modal terminal backend |
 | `daytona` | Daytona terminal backend |
 | `exa` | Exa web search |
@@ -2236,7 +2253,7 @@ External flakes can override the package directly:
     nixpkgs.overlays = [ hermes-agent.overlays.default ];
     # Then:
     #   pkgs.hermes-agent.override { extraPythonPackages = [...]; }
-    #   pkgs.hermes-agent.override { extraDependencyGroups = [ "honcho" ]; }
+    #   pkgs.hermes-agent.override { extraDependencyGroups = [ "voice" ]; }
   };
 }
 ```
@@ -2381,7 +2398,7 @@ nix build .#checks.x86_64-linux.config-roundtrip    # merge script preserves use
 | `extraPackages` | `listOf package` | `[]` | Extra packages available to the agent. Added to the hermes user's per-user profile so terminal commands, skills, and cron jobs all see them |
 | `extraPlugins` | `listOf package` | `[]` | Directory plugin packages to symlink into `$HERMES_HOME/plugins/`. Each must contain `plugin.yaml` |
 | `extraPythonPackages` | `listOf package` | `[]` | Python packages added to PYTHONPATH for entry-point plugin discovery. Use the selected package’s `python.pkgs` |
-| `extraDependencyGroups` | `listOf str` | `[]` | pyproject.toml optional extras to include in the sealed venv (e.g. `["honcho"]`). Resolved by uv — no collisions |
+| `extraDependencyGroups` | `listOf str` | `[]` | pyproject.toml optional extras to include in the sealed venv (e.g. `["voice"]`). Resolved by uv — no collisions |
 | `restart` | `str` | `"always"` | The systemd `Restart=` policy. macOS does not use it. |
 | `restartSec` | `int` | `5` | The systemd `RestartSec=` value. macOS does not use it. |
 
@@ -8274,7 +8291,7 @@ You can also set or auto-generate the description later with `hermes profile des
 hermes profile create work --clone
 ```
 
-Copies your current profile's `config.yaml`, `.env`, `SOUL.md`, skills, and the curated memory files `memories/MEMORY.md` and `memories/USER.md` into the new profile — memory is treated as part of the agent's identity, like `SOUL.md`. If `config.yaml` selects an external memory provider (`memory.provider`), that provider's own config travels too — its `<provider>/` directory or `<provider>.json` under the profile home, e.g. `hindsight/config.json` — so the clone's memory is available instead of silently off; a cloned `local_embedded` hindsight config still shares the source's embedded daemon and bank until you give the clone its own hindsight `profile`/`bank_id` ([#81815](https://github.com/NousResearch/hermes-agent/issues/81815)). Sessions, `state.db`, cron jobs and everything else start empty. For a blank memory as well, create the profile without `--clone` or delete the two files afterwards; the agent never falls back to another profile's memory when they are absent. Edit `~/.hermes/profiles/work/.env` for different API keys, or `~/.hermes/profiles/work/SOUL.md` for a different personality.
+Copies your current profile's `config.yaml`, `.env`, `SOUL.md`, skills, and the curated memory files `memories/MEMORY.md` and `memories/USER.md` into the new profile — memory is treated as part of the agent's identity, like `SOUL.md`. If `config.yaml` selects an external memory provider (`memory.provider`), that provider's own config travels too — its `<provider>/` directory or `<provider>.json` under the profile home, e.g. `hindsight/config.json` — so the clone's memory is available instead of silently off; a cloned `local_embedded` hindsight config still shares the source's embedded daemon and bank until you give the clone its own hindsight `profile`/`bank_id` ([#81815](https://github.com/NousResearch/hermes-agent/issues/81815)). Installed plugins travel too: `plugins/` (catalog, Git and hand-installed plugins, plus their install records) is copied, so a memory provider installed from the plugin catalog keeps working in the clone at the same revision and keeps its catalog install record. Plugin Python dependencies live in the shared environment and are not reinstalled. Sessions, `state.db`, cron jobs and everything else start empty. For a blank memory as well, create the profile without `--clone` or delete the two files afterwards; the agent never falls back to another profile's memory when they are absent. Edit `~/.hermes/profiles/work/.env` for different API keys, or `~/.hermes/profiles/work/SOUL.md` for a different personality.
 
 #### Keep a clone's imported agent setups synced (`--sync-imports`)
 
@@ -11179,7 +11196,7 @@ Hermes Agent includes a rich set of capabilities that extend far beyond basic ch
 - **[Fallback Providers](fallback-providers.md)** — Automatic failover to backup LLM providers when your primary model encounters errors, including independent fallback for auxiliary tasks like vision and compression.
 - **[Credential Pools](credential-pools.md)** — Distribute API calls across multiple keys for the same provider. Automatic rotation on rate limits or failures.
 - **[Prompt caching](../configuration#prompt-caching)** — Built-in cross-session 1-hour prefix cache for Claude on native Anthropic, OpenRouter, and Nous Portal. Always-on; no configuration required.
-- **[Memory Providers](memory-providers.md)** — Plug in external memory backends (Honcho, OpenViking, Mem0, Holographic, RetainDB, ByteRover, Supermemory, plus Hindsight from the plugin catalog) for cross-session user modeling and personalization beyond the built-in memory system.
+- **[Memory Providers](memory-providers.md)** — Plug in external memory backends (OpenViking, Mem0, Holographic, RetainDB, ByteRover, plus Honcho, Hindsight and Supermemory from the plugin catalog) for cross-session user modeling and personalization beyond the built-in memory system.
 - **[API Server](api-server.md)** — Expose Hermes as an OpenAI-compatible HTTP endpoint. Connect any frontend that speaks the OpenAI format — Open WebUI, LobeChat, LibreChat, and more.
 - **[IDE Integration (ACP)](acp.md)** — Use Hermes inside ACP-compatible editors such as VS Code, Zed, and JetBrains. Chat, tool activity, file diffs, and terminal commands render inside your editor.
 - **[Batch Processing](batch-processing.md)** — Run the agent over many prompts or tasks in parallel from the CLI, with structured outputs and trajectory capture suitable for evals or downstream training pipelines.
@@ -11208,7 +11225,7 @@ Tools are functions that extend the agent's capabilities. They're organized into
 Hermes ships with a broad built-in tool registry covering web search, browser automation, terminal execution, file editing, memory, delegation, scheduled tasks, Home Assistant, and more.
 
 :::note
-**Honcho cross-session memory** is available as a memory provider plugin (`plugins/memory/honcho/`), not as a built-in toolset. See [Plugins](./plugins.md) for installation.
+**Honcho cross-session memory** is available as a memory provider plugin from the plugin catalog (`hermes plugins install honcho`), not as a built-in toolset. See [Memory Providers](./memory-providers.md#honcho).
 :::
 
 High-level categories:
@@ -11473,51 +11490,28 @@ See also:
 - [Bundled Skills Catalog](../../reference/skills-catalog.md)
 - [Official Optional Skills Catalog](../../reference/optional-skills-catalog.md)
 
-## Browse and install in Desktop
+## Install from the website
 
-Open **Capabilities → Skills** and switch between **Installed** and **Browse**.
-Search stays at the top; the tab switch and actions share one row.
-**Installed** reads the selected profile's actual skills and enabled state;
-it is not inferred from the public catalog. **Browse** is a native catalog UI,
-not an embedded website or a second, smaller catalog.
-
-Desktop and the public [Skills Hub](/skills) read the same published CDN
-snapshot: [`/docs/api/skills.json`](https://hermes-agent.nousresearch.com/docs/api/skills.json).
-The public docs alias serves the same snapshot as Desktop's fetch URL,
-`https://nousresearch.github.io/hermes-agent/docs/api/skills.json`. The docs
-build generates it from bundled `skills/`, `optional-skills/`, and the
-centralized skills index. Browsing does not crawl GitHub or query upstream
-marketplaces live; installation still retrieves the selected skill through
-its source's installer.
-
-### Install from the website
-
-The Skills Hub has an **Install in Hermes** button on each installable card. It opens the
-installed Hermes Desktop app with a URL-encoded, source-qualified skill target:
-for example, `official/...` for optional skills or `clawhub/...` for ClawHub.
-Bundled skills use an explicit repository path rather than an ambiguous bare
-name. When an older snapshot lacks that explicit bundled target, the website
-omits its install link and native Browse disables installation rather than
-resolving an ambiguous name. The next docs publish supplies those targets.
-The same target is used by native Browse and the card's CLI fallback:
+Each installable card on the public [Skills Hub](/skills) has an **Install in Hermes**
+button. It opens Hermes Desktop with a URL-encoded, source-qualified skill target:
+`official/...` for optional skills, `clawhub/...` for ClawHub, and an explicit
+repository path for bundled skills rather than an ambiguous bare name. The card's
+CLI command uses the same target:
 
 ```text
 hermes://skill/install?identifier=official%2Fsecurity%2F1password
 ```
 
-Hermes shows **Install “skill-name”?** with separate **Source** and **Install to**
-rows. Cancel makes no changes. After confirmation, the same dialog shows
-**Installing…**, then **Installed** and a completion notification. Errors stay
-in the dialog so you can read them and retry. Installation uses the existing
-Skills Hub pipeline, including security scanning, action logs, and installed-list
-refresh. If you switch profile or connection while the confirmation is open,
-reopen the link for the new destination. Changes apply to
-new sessions; a link cannot bypass scanning or select a different profile.
+Desktop shows **Install “skill-name”?** with separate **Source** and **Install to**
+rows. Cancel makes no changes. After confirmation the dialog shows **Installing…**,
+then **Installed** and a completion notification; errors stay in the dialog so you
+can retry. Installation goes through the normal Skills Hub pipeline (security scan,
+action log, installed-list refresh). If you switch profile or connection while the
+confirmation is open, reopen the link for the new destination; a link cannot bypass
+scanning or pick a different profile. Changes apply to new sessions.
 
-The public links use `hermes://`, not the development-only `hermes-dev://`
-scheme. The `skill/install` route requires an updated Desktop build. If the
-app is missing or the link is not recognized, update Desktop or expand the
-card to copy its CLI install command instead.
+The `skill/install` route needs an updated Desktop build. If the app is missing or
+does not recognize the link, expand the card and copy its CLI install command.
 
 ## Starting with a blank slate
 
@@ -13501,7 +13495,7 @@ Full details in [Gating agent skill writes](./skills.md#gating-agent-skill-write
 
 ## External Memory Providers
 
-For deeper, persistent memory that goes beyond MEMORY.md and USER.md, Hermes ships with 7 external memory provider plugins — Honcho, OpenViking, Mem0, Holographic, RetainDB, ByteRover, and Supermemory — and more, such as Hindsight, are available from the [plugin catalog](plugins.md) via `hermes plugins install <name>`.
+For deeper, persistent memory that goes beyond MEMORY.md and USER.md, Hermes ships with 5 external memory provider plugins — OpenViking, Mem0, Holographic, RetainDB and ByteRover — and more, such as Honcho, Hindsight and Supermemory, are available from the [plugin catalog](plugins.md) via `hermes plugins install <name>`.
 
 External providers run **alongside** built-in memory (never replacing it) and add capabilities like knowledge graphs, semantic search, automatic fact extraction, and cross-session user modeling.
 
@@ -13519,7 +13513,7 @@ See the [Memory Providers](./memory-providers.md) guide for full details on each
 
 # Memory Providers
 
-Hermes Agent ships with 7 external memory provider plugins that give the agent persistent, cross-session knowledge beyond the built-in MEMORY.md and USER.md, and more (such as Hindsight) are available from the [plugin catalog](./plugins.md). Only **one** external provider can be active at a time — the built-in memory is always active alongside it.
+Hermes Agent ships with 5 external memory provider plugins that give the agent persistent, cross-session knowledge beyond the built-in MEMORY.md and USER.md, and more (such as Honcho, Hindsight and Supermemory) are available from the [plugin catalog](./plugins.md). Only **one** external provider can be active at a time — the built-in memory is always active alongside it.
 
 ## Quick Start
 
@@ -13535,8 +13529,9 @@ Or set manually in `~/.hermes/config.yaml`:
 
 ```yaml
 memory:
-  provider: openviking   # or honcho, mem0, holographic, retaindb, byterover, supermemory,
-                         # or hindsight (plugin catalog — run `hermes plugins install hindsight` first)
+  provider: openviking   # or mem0, holographic, retaindb, byterover,
+                         # or honcho / hindsight / supermemory (plugin catalog — run
+                         # `hermes plugins install <name>` first)
 ```
 
 ## How It Works
@@ -13556,12 +13551,16 @@ The built-in memory (MEMORY.md / USER.md) continues to work exactly as before. T
 
 ### Honcho
 
+:::info Plugin catalog
+Honcho is maintained by [Plastic Labs](https://github.com/plastic-labs/honcho/tree/main/hermes-plugin-honcho) and installed from the [plugin catalog](./plugins.md) rather than bundled with Hermes. It is the same provider that used to ship in-tree: tools, config files and the `hermes honcho` commands are unchanged.
+:::
+
 AI-native cross-session user modeling with dialectic reasoning, session-scoped context injection, semantic search, and persistent conclusions. Base context now includes the session summary alongside user representation and peer cards, giving the agent awareness of what has already been discussed.
 
 | | |
 |---|---|
 | **Best for** | Multi-agent systems with cross-session context, user-agent alignment |
-| **Requires** | `hermes memory setup` prepares the Honcho SDK through PM; [API key](https://app.honcho.dev) or self-hosted instance |
+| **Requires** | `hermes plugins install honcho` (installs the `honcho-ai` SDK with it); [API key](https://app.honcho.dev) or self-hosted instance |
 | **Data storage** | Honcho Cloud or self-hosted |
 | **Cost** | Honcho pricing (cloud) / free (self-hosted) |
 
@@ -13579,14 +13578,15 @@ The auto-injected dialectic also scales its reasoning level by query length (lon
 
 **Setup Wizard:**
 ```bash
-hermes memory setup        # select "honcho" — runs the Honcho-specific post-setup
+hermes plugins install honcho   # from the plugin catalog
+hermes memory setup             # select "honcho" — runs the Honcho-specific post-setup
 ```
 
 The legacy `hermes honcho setup` command still works (it now redirects to `hermes memory setup`), but is only registered after Honcho is selected as the active memory provider.
 
 **Headless / remote machines:** for cloud auth on a box without a browser (SSH, remote VM), pick **device** at the wizard's auth-method prompt. The CLI prints a short code and a verification link; open the link in a browser on any other machine, approve, and setup completes — no API key copy-paste. The wizard defaults to this option automatically when it detects no usable local browser.
 
-**Config:** `$HERMES_HOME/honcho.json` (profile-local) or `~/.honcho/config.json` (global). Resolution order: `$HERMES_HOME/honcho.json` > `~/.hermes/honcho.json` > `~/.honcho/config.json`. See the [config reference](https://github.com/NousResearch/hermes-agent/blob/main/plugins/memory/honcho/README.md) and the [Honcho integration guide](https://docs.honcho.dev/v3/guides/integrations/hermes).
+**Config:** `$HERMES_HOME/honcho.json` (profile-local) or `~/.honcho/config.json` (global). Resolution order: `$HERMES_HOME/honcho.json` > `~/.hermes/honcho.json` > `~/.honcho/config.json`. See the [plugin README](https://github.com/plastic-labs/honcho/tree/main/hermes-plugin-honcho) and the [Honcho integration guide](https://docs.honcho.dev/v3/guides/integrations/hermes).
 
 <details>
 <summary>Full config reference</summary>
@@ -13788,7 +13788,11 @@ Off-gateway these keys do nothing. `hermes memory setup` only prompts for them w
 
 </details>
 
-See the [config reference](https://github.com/NousResearch/hermes-agent/blob/main/plugins/memory/honcho/README.md) and [Honcho integration guide](https://docs.honcho.dev/v3/guides/integrations/hermes).
+See the [plugin README](https://github.com/plastic-labs/honcho/tree/main/hermes-plugin-honcho) and [Honcho integration guide](https://docs.honcho.dev/v3/guides/integrations/hermes).
+
+#### Upgrading from the bundled Honcho
+
+Earlier Hermes releases shipped Honcho in-tree. If a profile still has `memory.provider: honcho`, Hermes installs the catalog plugin automatically the next time it starts or runs `hermes update` — your `~/.honcho/config.json` (or `$HERMES_HOME/honcho.json`), host blocks, peers and session mappings are read exactly as before, so no memory is lost. To do it by hand, or on a machine without network access at startup, run `hermes plugins install honcho`.
 
 
 ---
@@ -14006,11 +14010,15 @@ See the [upstream Hermes integration docs](https://hindsight.vectorize.io/sdks/i
 
 Hindsight used to ship inside the Hermes tree (and as the `hermes-agent[hindsight]` pip extra). If your `config.yaml` already has `memory.provider: hindsight`, there is nothing to do for most users:
 
-- `hermes update` installs the catalog plugin into every profile home that names the provider (this runs even when `security.allow_lazy_installs` is `false`).
-- If the plugin is still missing on the first agent start (`hermes chat`, the gateway, …), Hermes installs it and prints `✓ Memory provider 'hindsight' moved out of core — installed its plugin from the catalog (your memory.hindsight settings and data are unchanged).`
-- With `security.allow_lazy_installs: false`, the agent-start path instead logs one line — ``Memory provider 'hindsight' is not installed; security.allow_lazy_installs is off — run `hermes plugins install hindsight`.`` — and you run `hermes plugins install hindsight` yourself.
+- `hermes update` installs the catalog plugin into every profile home that names the provider. Each line names the profile it is about. In a terminal it asks before preparing the plugin's Python dependencies; when several profiles use the provider, the questions are asked once and the answers apply to all of them. Without a terminal (the Desktop app, a script, a service) nobody can answer, so each profile prepares them unattended when its `security.allow_lazy_installs` is on (the default); a profile with it off gets the exact `hermes -p <profile> plugins install hindsight` command instead, and the other profiles still migrate.
+- If the plugin is still missing on the first agent start (`hermes chat`, Desktop, the gateway, …), Hermes installs it, dependencies included, and shows ``✓ Memory provider 'hindsight' moved out of core — installed its plugin from the catalog (memory.provider and your stored memories are unchanged; check its settings with `hermes memory status`).`` Messaging platforms get the line with the first reply.
+- When the agent-start install cannot happen, you see why instead of silently running without external memory: with `security.allow_lazy_installs: false` the warning names the install command for that profile; offline or declined installs show the error and the same command.
 
-What changes on disk: the plugin appears in `~/.hermes/plugins/hindsight/` and `config.yaml` gains `plugins.enabled: [hindsight]`. `memory.provider`, `memory.hindsight.*`, `$HERMES_HOME/hindsight/config.json`, `HINDSIGHT_API_KEY` in `.env` and your memory bank data are untouched. Verify with `hermes memory status` (provider active) and `hermes plugins list` (plugin installed and enabled).
+What changes on disk: the plugin appears in `~/.hermes/plugins/hindsight/` and `config.yaml` gains `plugins.enabled: [hindsight]`. `memory.provider`, `$HERMES_HOME/hindsight/config.json`, `HINDSIGHT_API_KEY` in `.env` and your memory bank data are untouched. Verify with `hermes memory status` (provider active) and `hermes plugins list` (plugin installed and enabled).
+
+:::warning Where the plugin reads its config
+Hindsight reads `$HERMES_HOME/hindsight/config.json` (per profile home), `~/.hindsight/config.json` (legacy shared), and the `HINDSIGHT_*` variables in `.env`. It does not read a `memory.hindsight` section of `config.yaml`: a `memory.hindsight.*` key there is ignored. Edit the plugin's own `config.json` (key table above) or use `hermes memory setup`.
+:::
 
 ---
 
@@ -14106,12 +14114,16 @@ hermes config set memory.provider byterover
 
 ### Supermemory
 
+:::info Plugin catalog
+Supermemory is maintained by Supermemory and installed from the [plugin catalog](./plugins.md) rather than bundled with Hermes. Source and full configuration reference: [supermemoryai/hermes-supermemory](https://github.com/supermemoryai/hermes-supermemory). Existing setups are migrated automatically — see [Migrating from bundled Supermemory](#migrating-from-bundled-supermemory).
+:::
+
 Semantic long-term memory with profile recall, semantic search, explicit memory tools, and per-turn conversation capture (one document per session per 4-hour window).
 
 | | |
 |---|---|
 | **Best for** | Semantic recall with user profiling and session-level graph building |
-| **Requires** | `hermes memory setup` prepares the Supermemory SDK through PM; [cloud API key](http://app.supermemory.ai/integrations?connect=hermes), or a [self-hosted server](https://supermemory.ai/docs/self-hosting/overview) |
+| **Requires** | `hermes plugins install supermemory` (installs the Supermemory SDK with the plugin); [cloud API key](http://app.supermemory.ai/integrations?connect=hermes), or a [self-hosted server](https://supermemory.ai/docs/self-hosting/overview) |
 | **Data storage** | Supermemory Cloud or self-hosted |
 | **Cost** | Supermemory pricing (cloud) / free (self-hosted) |
 
@@ -14119,7 +14131,8 @@ Semantic long-term memory with profile recall, semantic search, explicit memory 
 
 **Setup:**
 ```bash
-hermes memory setup    # select "supermemory"
+hermes plugins install supermemory   # from the plugin catalog
+hermes memory setup                  # select "supermemory"
 # Or manually:
 hermes config set memory.provider supermemory
 echo 'SUPERMEMORY_API_KEY=***' >> ~/.hermes/.env
@@ -14131,7 +14144,7 @@ Self-hosted setup:
 npx supermemory local
 ```
 
-Before running `hermes memory setup`, set `base_url` in
+After `hermes plugins install supermemory` and before running `hermes memory setup`, set `base_url` in
 `$HERMES_HOME/supermemory.json`:
 
 ```json
@@ -14187,6 +14200,16 @@ Base URL precedence is `supermemory.json` → `SUPERMEMORY_BASE_URL` → `https:
 
 **Support:** [Discord](https://supermemory.link/discord) · [support@supermemory.com](mailto:support@supermemory.com)
 
+### Migrating from bundled Supermemory
+
+Supermemory used to ship inside the Hermes tree (and as the `hermes-agent[supermemory]` pip extra). If your `config.yaml` already has `memory.provider: supermemory`, there is nothing to do for most users:
+
+- `hermes update` installs the catalog plugin into every profile home that names the provider (this runs even when `security.allow_lazy_installs` is `false`).
+- If the plugin is still missing on the first agent start (`hermes chat`, the gateway, …), Hermes installs it and prints `✓ Memory provider 'supermemory' moved out of core — installed its plugin from the catalog (your memory.supermemory settings and data are unchanged).`
+- With `security.allow_lazy_installs: false`, the agent-start path instead logs one line — ``Memory provider 'supermemory' is not installed; security.allow_lazy_installs is off — run `hermes plugins install supermemory`.`` — and you run `hermes plugins install supermemory` yourself.
+
+What changes on disk: the plugin appears in `~/.hermes/plugins/supermemory/` and `config.yaml` gains `plugins.enabled: [supermemory]`. The Supermemory SDK is installed from the plugin's own package metadata, so the `hermes-agent[supermemory]` extra is no longer needed. `memory.provider`, `$HERMES_HOME/supermemory.json`, the `SUPERMEMORY_*` keys in `.env` and the memories stored in your Supermemory account are untouched. Verify with `hermes memory status` (provider active) and `hermes plugins list` (plugin installed and enabled).
+
 ### Memori
 
 Structured long-term memory using Memori Cloud, with background completed-turn capture, tool-aware turn context, and explicit recall tools for facts, summaries, quota, signup, and feedback.
@@ -14227,14 +14250,14 @@ package command. Restart Hermes after successful dependency preparation.
 
 | Provider | Storage | Cost | Tools | Dependencies | Unique Feature |
 |----------|---------|------|-------|-------------|----------------|
-| **Honcho** | Cloud | Paid | 5 | `honcho-ai` | Dialectic user modeling + session-scoped context |
+| **Honcho** (plugin catalog) | Cloud/Self-hosted | Paid/Free | 5 | `hermes plugins install honcho` | Dialectic user modeling + session-scoped context |
 | **OpenViking** | Self-hosted | Free | 6 | `openviking` + server | Filesystem hierarchy + tiered loading |
 | **Mem0** | Cloud/Self-hosted | Free/Paid | 4 | `mem0ai` | Server-side LLM extraction + self-hosted/OSS modes |
 | **Hindsight** (plugin catalog) | Cloud/Local | Free/Paid | 3 | `hermes plugins install hindsight` | Knowledge graph + reflect synthesis |
 | **Holographic** | Local | Free | 2 | None | HRR algebra + trust scoring |
 | **RetainDB** | Cloud | $20/mo | 10 | `requests` | Delta compression |
 | **ByteRover** | Local/Cloud | Free/Paid | 3 | `brv` CLI | Pre-compression extraction |
-| **Supermemory** | Cloud/Self-hosted | Free/Paid | 4 | `supermemory` | Context fencing + session graph ingest + multi-container |
+| **Supermemory** (plugin catalog) | Cloud/Self-hosted | Free/Paid | 4 | `hermes plugins install supermemory` | Context fencing + session graph ingest + multi-container |
 | **Memori** | Cloud | Free/Paid | 5 | `hermes-memori` | Tool-aware memory + structured recall |
 
 ## Profile Isolation
@@ -14249,13 +14272,17 @@ Each provider's data is isolated per [profile](../profiles.md):
 ## Providers Moving to the Plugin Catalog
 
 Memory providers are moving out of the Hermes tree into their maintainers' own repositories,
-published through the [plugin catalog](./plugins.md) — Hindsight is the first (see
-[Migrating from bundled Hindsight](#migrating-from-bundled-hindsight)). Nothing changes for you: the
-provider name, your `memory.<name>` settings, its data directory and its tools stay the same.
+published through the [plugin catalog](./plugins.md). Hindsight moved first (see
+[Migrating from bundled Hindsight](#migrating-from-bundled-hindsight)), then Honcho (see
+[Upgrading from the bundled Honcho](#upgrading-from-the-bundled-honcho)) and Supermemory (see
+[Migrating from bundled Supermemory](#migrating-from-bundled-supermemory)). Nothing changes for you: the
+provider name, the settings it reads, its data directory and its tools stay the same.
 When a provider you have configured stops shipping with Hermes, `hermes update` installs its
 catalog plugin for every profile that names it; if you update through the Desktop app, the
-agent does the same the first time it starts (unless `security.allow_lazy_installs` is
-`false`, in which case it logs the `hermes plugins install <name>` one-liner instead).
+agent does the same the first time it starts. Every outcome is shown to you — in the terminal,
+in Desktop, or with the first reply on a messaging platform. If the install cannot happen
+(`security.allow_lazy_installs: false`, offline, declined), the warning includes the exact
+`hermes plugins install <name>` command.
 
 ## Building a Memory Provider
 
@@ -15147,11 +15174,10 @@ plugin; choose a new exact commit explicitly with
 profile-local install metadata contains no config values, environment values,
 secrets, or capability grants.
 
-The same agent-plugin pin is available in Hermes Desktop: **Capabilities →
-Plugins → Install from Git** has a *Pin to commit* field that takes the full
-40-character SHA, and **Installed** shows a `pinned @ <sha8>` badge on pinned
-agent plugins. This does not guarantee a pinned standalone desktop-plugin
-install. `hermes plugins list` prints
+The same pin is available in Hermes Desktop: **Skills → Plugins → Install from
+Git** has a *Pin to commit* field that takes the full 40-character SHA, and the
+plugins list shows a `pinned @ <sha8>` badge on every pinned install so a team
+can confirm everyone is running the same commit. `hermes plugins list` prints
 the pin in its Source column (`git pinned@<sha8>`). Pins work for private
 repositories too, through the same stored credentials described below.
 
@@ -15397,25 +15423,6 @@ Ordinary Hermes application updates preserve user plugin directories, including
 wrapper files and external sidecar links. Explicit plugin updates or removals
 can change those files. See [Package management](../../reference/package-management.md)
 and the [plugin authoring guide](../../developer-guide/plugins/index.md#lazy-install-optional-python-dependencies).
-
-### Installed and Browse in Desktop
-
-Open **Capabilities → Plugins**. **Installed** reads the app's desktop-plugin
-registry and the selected profile's actual agent-plugin state, combining both
-halves in one row where appropriate. It is not a list of catalog entries
-assumed to be installed. **Browse** is a native catalog view, not an embedded
-website; it uses the same **Installed / Browse** tabs as Skills, with search
-at the top and the tab switch and actions on one row.
-
-Desktop and the public [Plugin Catalog](/plugins) consume the same CDN
-snapshot, [`/docs/api/plugins.json`](https://hermes-agent.nousresearch.com/docs/api/plugins.json).
-The public alias serves the same data as Desktop's fetch URL,
-`https://nousresearch.github.io/hermes-agent/docs/api/plugins.json`. The docs
-build generates it from `plugin-catalog/*.yaml` and cached star counts. The
-same publish also supplies the removed-entry list used by the installer.
-Browsing does not query GitHub live or fetch source repos;
-the installer retrieves code only as part of the separate install flow.
-
 ### One-click install links (Desktop)
 
 Hermes Desktop registers the `hermes://` URL scheme, so a website, README, or
@@ -15426,22 +15433,18 @@ hermes://plugin/install?catalog=NAME               # catalog entry, installs the
 hermes://plugin/install?repo=owner/repo            # any git repo
 hermes://plugin/install?repo=owner/repo&enable=1   # enable the agent plugin after install
 hermes://plugin/install?repo=owner/repo&force=1    # replace an existing install
+hermes://plugin/install?catalog=<name>             # reviewed catalog entry at its pinned commit
 ```
 
 The `catalog=<name>` form is what the **Open in Hermes Desktop** button on
 every [Plugin Catalog](./plugin-catalog.md) card uses. Desktop resolves the
-name against the live catalog (the same feed **Capabilities → Plugins → Browse**
-shows) and opens the same **reviewed catalog entry** dialog an in-app
+name against the live catalog (the same feed the **Capabilities → Plugins**
+picker shows) and opens the same **reviewed catalog entry** dialog an in-app
 pick does: the agent half installs at the catalog's pinned commit, never the
 branch tip. The link carries no repo URL, and a name that is not in the
 catalog shows an error toast and nothing else — it is never reinterpreted as a
 git path, so a link cannot smuggle an unreviewed repo behind a
 familiar-looking name.
-
-Use an updated Desktop build for catalog links and the Skills Hub's
-`hermes://skill/install?identifier=...` route. If the app is missing or too old,
-use the card's copyable `hermes plugins install <catalog-name>` command to
-retain catalog resolution.
 
 For a `repo=` link, clicking one opens Hermes and shows a **confirmation dialog** — the repo id,
 a "Before you install" note, and GitHub browse + clone links — then
@@ -33738,7 +33741,7 @@ Speech-to-text supports eight providers: local faster-whisper (free, runs on-dev
 ## Memory & Personalization
 
 - **[Built-in Memory](../user-guide/features/memory.md)** — Persistent, curated memory via `MEMORY.md` and `USER.md` files. The agent maintains bounded stores of personal notes and user profile data that survive across sessions.
-- **[Memory Providers](../user-guide/features/memory-providers.md)** — Plug in external memory backends for deeper personalization. Seven providers ship with Hermes: Honcho (dialectic reasoning), OpenViking (tiered retrieval), Mem0 (cloud extraction), Holographic (local SQLite), RetainDB (hybrid search), ByteRover (CLI-based), and Supermemory; Hindsight (knowledge graphs) is available from the plugin catalog via `hermes plugins install hindsight`.
+- **[Memory Providers](../user-guide/features/memory-providers.md)** — Plug in external memory backends for deeper personalization. Five providers ship with Hermes: OpenViking (tiered retrieval), Mem0 (cloud extraction), Holographic (local SQLite), RetainDB (hybrid search) and ByteRover (CLI-based); Honcho (dialectic reasoning), Hindsight (knowledge graphs) and Supermemory (semantic recall) are available from the plugin catalog via `hermes plugins install <name>`.
 
 ## Messaging Platforms
 
@@ -37874,8 +37877,8 @@ See [Matrix Proxy Mode](../messaging/matrix.md#proxy-mode-e2ee-on-macos) for the
 
 [Honcho](https://github.com/plastic-labs/honcho) is an AI-native memory backend that adds dialectic reasoning and deep user modeling on top of Hermes's built-in memory system. Instead of simple key-value storage, Honcho maintains a running model of who the user is — their preferences, communication style, goals, and patterns — by reasoning about conversations after they happen.
 
-:::info Honcho is a Memory Provider Plugin
-Honcho is integrated into the [Memory Providers](./memory-providers.md) system. All features below are available through the unified memory provider interface.
+:::info Honcho is a catalog Memory Provider Plugin
+Honcho is maintained by Plastic Labs and installed from the [plugin catalog](./plugins.md) (`hermes plugins install honcho`); source lives in [plastic-labs/honcho](https://github.com/plastic-labs/honcho/tree/main/hermes-plugin-honcho). It plugs into the [Memory Providers](./memory-providers.md) system, so all features below are available through the unified memory provider interface. Homes upgraded from a release that bundled Honcho get the plugin installed automatically — config and memory carry over untouched.
 :::
 
 ## What Honcho Adds
@@ -37899,7 +37902,8 @@ Honcho is integrated into the [Memory Providers](./memory-providers.md) system. 
 ## Setup
 
 ```bash
-hermes memory setup    # select "honcho" from the provider list
+hermes plugins install honcho   # from the plugin catalog
+hermes memory setup             # select "honcho" from the provider list
 ```
 
 Or configure manually:
@@ -49898,7 +49902,7 @@ See [Hooks](../user-guide/features/hooks.md) for event signatures and payload sh
 hermes memory <subcommand>
 ```
 
-Set up and manage external memory provider plugins. Bundled providers: honcho, openviking, mem0, holographic, retaindb, byterover, supermemory; hindsight (plugin catalog) after `hermes plugins install hindsight`. Only one external provider can be active at a time. Built-in memory (MEMORY.md/USER.md) is always active.
+Set up and manage external memory provider plugins. Bundled providers: openviking, mem0, holographic, retaindb, byterover; honcho, hindsight and supermemory (plugin catalog) after `hermes plugins install <name>` (`hermes update` does this automatically for a provider already named in `memory.provider`). Only one external provider can be active at a time. Built-in memory (MEMORY.md/USER.md) is always active.
 
 Subcommands:
 
@@ -52412,7 +52416,7 @@ For local files, a full unredacted read (including all pages of the same file ve
 
 
 :::note
-**Honcho tools** (`honcho_profile`, `honcho_search`, `honcho_context`, `honcho_reasoning`, `honcho_conclude`) are no longer built-in. They are available via the Honcho memory provider plugin at `plugins/memory/honcho/`. See [Memory Providers](../user-guide/features/memory-providers.md) for installation and usage.
+**Honcho tools** (`honcho_profile`, `honcho_search`, `honcho_context`, `honcho_reasoning`, `honcho_conclude`) are no longer built-in. They are available via the Honcho memory provider plugin from the plugin catalog (`hermes plugins install honcho`). See [Memory Providers](../user-guide/features/memory-providers.md) for installation and usage.
 :::
 
 ## `image_gen` toolset
@@ -56615,7 +56619,7 @@ The script timeout defaults to 3600 seconds (1 hour). `_get_script_timeout()` re
 3. **Config** — `cron.script_timeout_seconds` in `config.yaml` (read via `load_config()`)
 4. **Default** — 3600 seconds (1 hour)
 
-This timeout bounds the **pre-run script only**, not the agent. Skill-based / LLM-driven jobs run on a separate *inactivity*-based budget (`HERMES_CRON_TIMEOUT`, default 600s of idle time, `0` = unlimited) — they can run for hours as long as they keep calling tools or streaming tokens, and are only killed after the configured idle period with no activity. Scripts are dispatched to a persistent thread pool (not held under the tick lock), so a long-running script does not block other due jobs from firing.
+This timeout bounds the **pre-run script only**, not the agent. Skill-based / LLM-driven jobs run on a separate *inactivity*-based budget (`HERMES_CRON_TIMEOUT`, default 600s of idle time, `0` = unlimited) — they can run for hours as long as they keep calling tools or streaming tokens, and are only killed after the configured idle period with no activity. On platforms where Python's monotonic clock excludes suspend (macOS and Linux), time the host spends asleep does not count toward that idle period; Windows behavior is unchanged. Scripts are dispatched to a persistent thread pool (not held under the tick lock), so a long-running script does not block other due jobs from firing.
 
 On timeout or ownership cancellation, `cron.scheduler_script` uses the shared
 `agent.deadline.kill_process_tree` hard-kill path. On POSIX it briefly stops and
@@ -60518,7 +60522,7 @@ def get_config_schema(self):
 Fields with `secret: True` and `env_var` go to `.env`. Non-secret fields are passed to `save_config()`.
 
 :::tip Minimal vs Full Schema
-Every field in `get_config_schema()` is prompted during `hermes memory setup`. Providers with many options should keep the schema minimal — only include fields the user **must** configure (API key, required credentials). Document optional settings in a config file reference (e.g. `$HERMES_HOME/myprovider.json`) rather than prompting for them all during setup. This keeps the setup wizard fast while still supporting advanced configuration. See the Supermemory provider for an example — it only prompts for the API key; all other options live in `supermemory.json`.
+Every field in `get_config_schema()` is prompted during `hermes memory setup`. Providers with many options should keep the schema minimal — only include fields the user **must** configure (API key, required credentials). Document optional settings in a config file reference (e.g. `$HERMES_HOME/myprovider.json`) rather than prompting for them all during setup. This keeps the setup wizard fast while still supporting advanced configuration. See the [Supermemory provider](https://github.com/supermemoryai/hermes-supermemory) (a plugin catalog entry) for an example — it only prompts for the API key; all other options live in `supermemory.json`.
 :::
 
 ## Save Config
@@ -60679,7 +60683,7 @@ def register_cli(subparser) -> None:
 
 ### Reference implementation
 
-See `plugins/memory/honcho/cli.py` for a full example with 13 subcommands, cross-profile management (`--target-profile`), and config read/write.
+See the Honcho plugin's [`cli.py`](https://github.com/plastic-labs/honcho/blob/main/hermes-plugin-honcho/cli.py) for a full example with 13 subcommands, cross-profile management (`--target-profile`), and config read/write.
 
 ### Directory structure with CLI
 
@@ -63648,6 +63652,9 @@ When both exist the `pyproject.toml` wins. What Hermes does with them:
   use a plugin-owned external runtime for them.
 - **`--no-deps`** downloads a new plugin without dependency consent and leaves it disabled,
   even with `--enable`. It cannot bypass PM admission when replacing an active plugin.
+- **`--yes-deps`** answers the dependency question up front, so a headless install (CI, SSH
+  automation, a container entrypoint) prepares the declared dependencies instead of being refused.
+  It is mutually exclusive with `--no-deps`.
 - **`python_runtime: external`** keeps a sidecar's dependencies out of the shared union.
   Hermes does not install that Python runtime or modify its declaration.
 - **Nothing to load is an error** — `hermes plugins validate` rejects `plugin.yaml` without
@@ -64305,7 +64312,7 @@ def reset_client():
     _slot.reset()
 ```
 
-Both serialize concurrent first calls with double-checked locking and run the factory at most once. If the factory raises, nothing is cached and the next call retries. The honcho memory plugin (`plugins/memory/honcho/client.py`) is the reference consumer.
+Both serialize concurrent first calls with double-checked locking and run the factory at most once. If the factory raises, nothing is cached and the next call retries. The [Honcho memory plugin](https://github.com/plastic-labs/honcho/tree/main/hermes-plugin-honcho) (`client.py`) is the reference consumer.
 
 > Rule of thumb: any time you write `global _something` followed by a `is None` check and a build, reach for one of these instead.
 
@@ -68472,7 +68479,8 @@ python scripts/release.py abandon --version 0.21.5 --remote origin
 
 `publish` performs a synchronous supersession preflight, then dispatches the same
 ordered controller used by automatic recovery. It refuses a known burned version
-below a newer published release. `abandon` deletes the draft when one exists,
+below a newer published release. `abandon` force-cancels the attempt's
+in-progress `Stable Release` runs, deletes the draft when one exists,
 writes an `abandoned-rc.<N>-vX.Y.Z` marker ref, and keeps the attempt ref. The
 marker is the record of abandonment; the attempt ref is never deleted. The
 version is not spent, so the next cut is `rc.<N+1>-vX.Y.Z`.
@@ -77913,38 +77921,12 @@ When you have two or more [profiles](./profiles.md), the config-backed settings 
 
 The app also surfaces the broader Hermes management surface so you don't have to drop to a terminal:
 
-- **Skills** — open **Capabilities → Skills** to manage [skills](./features/skills.md). **Installed** shows the selected profile's actual skills and enable/disable state. **Browse** searches the same full published catalog as the public Skills Hub, with native cards and details.
-- **Plugins** — **Capabilities → Plugins** uses the same **Installed / Browse** layout. Installed combines actual app-level desktop plugins with agent plugins from the selected profile; Browse shows the public [Plugin Catalog](./features/plugin-catalog.md). Search stays at the top, and the tab switch and actions share one row on both pages.
+- **Skills** — browse, install, and manage [skills](./features/skills.md). The Skills tab lists your installed skills with enable/disable toggles, and below them the full built-in optional-skills catalog that ships with Hermes — each entry has a one-click **Install** button that flips the row into the installed list once it finishes. The public Skills Hub's **Install in Hermes** buttons open `hermes://skill/install?identifier=...` links that install through the same pipeline after you confirm (see [skill links](./features/skills.md#install-from-the-website)).
 - **Memory graph (Star Map)** — type `/journey` (aliases `/learning`, `/memory-graph`) in chat to open an interactive constellation of learned skills and memories over time, with a playback scrubber. Nodes can be edited or deleted right from the panel (skills are archived, memories removed). See [Learning Journey](./features/memory.md#learning-journey-journey).
 - **Cron** — view and manage [scheduled jobs](../reference/cli-commands.md#hermes-cron). With **All profiles** on, the list aggregates every profile's jobs; a job's run history and actions (pause, resume, edit, delete) always go to the profile that owns the job, whichever profile is active.
 - **Profiles** — switch between [Hermes profiles](./profiles.md) (isolated config/skills/sessions).
 - **Messaging** — set up gateway channels. Telegram has a **Quick setup** card: click **Create with QR**, scan the code (or open the link) in Telegram, and Hermes creates the bot, detects your user ID for the allowlist, saves the credentials, and restarts the gateway for you. Any credential save, clear, or enable toggle keeps a **Restart now** banner on the page until the gateway has actually restarted; if a restart fails, the banner stays so you can retry or restart manually.
 - **Agents** and **Command Center** — orchestration surfaces for multi-agent work.
-
-#### Where Browse gets its data
-
-These are native Desktop views, **not embedded website pages**. Desktop and
-the public website consume the same generated CDN snapshots:
-
-| Catalog | Public docs alias | Desktop fetch URL |
-|---|---|---|
-| Skills | [`/docs/api/skills.json`](https://hermes-agent.nousresearch.com/docs/api/skills.json) | `https://nousresearch.github.io/hermes-agent/docs/api/skills.json` |
-| Plugins | [`/docs/api/plugins.json`](https://hermes-agent.nousresearch.com/docs/api/plugins.json) | `https://nousresearch.github.io/hermes-agent/docs/api/plugins.json` |
-
-The skills snapshot combines `skills/`, `optional-skills/`, and the centralized
-skills index. The plugin snapshot comes from `plugin-catalog/*.yaml` and cached star
-counts; the same publish supplies the installer's removed-entry list. Browsing does not make live
-GitHub API calls or fetch plugin/skill source repositories. **Installed** is
-separate: its state comes from the selected profile's backend and the app's
-desktop-plugin registry, not those public snapshots.
-
-The public hubs' install buttons open `hermes://skill/install?identifier=...`
-or `hermes://plugin/install?catalog=...` links and require confirmation in Desktop.
-Use an updated Desktop build for these routes; the cards retain copyable CLI
-commands if the app is missing or too old. See
-[skill links](./features/skills.md#install-from-the-website) and
-[plugin links](./features/plugins.md#one-click-install-links-desktop) for the
-parameters and review flow.
 
 ### Bot Mode (built in)
 
@@ -78220,25 +78202,25 @@ SHA-pinned) plus an import allowlist — not isolation. A plugin whose
 row; **⌘K → Reload desktop plugins** re-reads every installed `plugin.js`,
 including one an installer replaced in place.
 
-**Capabilities → Plugins → Installed** shows the actual installed state:
-**one list entry per plugin**, with Desktop and Agent controls in its detail pane.
+**Capabilities → Plugins** is the one place for everything that extends
+Hermes: **one row per plugin**, with two switch columns.
 
 - A plugin can extend **this app**, **the agent**, or **both** — the badge on
   each row says which, inferred from what the package contains (`plugin.yaml`
   → agent half, `plugin.js` → desktop half). A plugin with both halves is one
   row, never two.
-- **Desktop control** — the half loaded into this app. It is app-level: the
+- **Desktop column** — the half loaded into this app. It is app-level: the
   same switch, the same value, whichever profile, gateway, or remote machine
   the window is looking at. Desktop code loads from exactly one place,
   `~/.hermes/desktop-plugins/`; the desktop half of a unified agent+desktop
   package is copied there by the app when the package is installed (and
   follows its updates and uninstall), so switching profiles never loads,
   unloads, or re-scopes a pane. Toggles apply live.
-- **Agent control** — the half installed in the selected profile's backend
+- **Agent column** — the half installed in the selected profile's backend
   ([agent plugins](./features/plugins.md): user, git, project, pip and
   portable installs), with an **Update** chip when a catalog pin moved. The
-  profile selector governs only the agent half; with a single profile there
-  is no selector at all.
+  profile selector lives in this column's header because it governs only
+  this column; with a single profile there is no selector at all.
   Repo-bundled built-ins (platform adapters, provider plugins) are not
   listed: they ship enabled and are configured from their own surfaces. The
   exceptions are the bundled lifecycle plugins with no surface of their own
@@ -78263,14 +78245,13 @@ including one an installer replaced in place.
   button; confirming deletes that folder on this computer and unloads the
   plugin immediately, no gateway involved.
 
-Switch to **Browse** for the native [Plugin Catalog](./features/plugin-catalog.md).
-Both Browse and **Install from Git** open the review-then-install dialog. For
-an agent-plugin catalog install, the backend resolves the catalog name to its
-reviewed pin. Website links carry only that name; Desktop looks up the reviewed
-repository and commit rather than trusting metadata supplied by a link.
-**Install from Git** also offers **Pin to commit** for agent-plugin installs
-(a full 40-character SHA, including private repositories); pinned agent plugins
-show a `pinned @ <sha8>` badge. Old `Settings → Plugins` links redirect here.
+Discovery sits underneath: the live [Plugin Catalog](./features/plugin-catalog.md)
+picker installs reviewed entries at their pinned commit into the selected
+profile, and **Install from Git** takes any other repository through the same
+review-then-install dialog; its optional **Pin to commit** field installs one
+exact 40-character commit SHA (private repos included), and pinned plugins
+carry a `pinned @ <sha8>` badge in the list. Old `Settings → Plugins` links
+redirect here.
 
 ## Troubleshooting
 
@@ -83764,7 +83745,7 @@ hermes plugins install <name>
 Browse it visually at **[/docs/plugins](/plugins)** — entries are shelved by
 category (Memory, Desktop, Platforms, Web & Browser, Tools, Voice, Automation,
 Models), with search, tier filters (Official / Community), capability chips, and
-**Open in Hermes Desktop** buttons and copyable CLI commands for every entry.
+copyable install commands for every entry.
 
 Every entry also has its own page at `/docs/plugins/<name>` (click a card):
 the full description and any disclosure, the pinned commit, tools, hooks and
@@ -83774,12 +83755,6 @@ author** shelf. Authors have a page at `/docs/plugins/by/<maintainer>` listing
 everything they maintain in the catalog. Both are generated at build time from
 the same catalog files, so a merged PR is the only way a page changes.
 
-In Desktop, open **Capabilities → Plugins → Browse** for the native catalog
-view. It is not an embedded website. **Installed** is a separate tab backed
-by the app's desktop-plugin registry and the selected profile's agent-plugin
-state, rather than catalog metadata. Skills uses the same **Installed / Browse**
-layout; search stays at the top and the tab switch and actions share one row.
-
 The catalog complements — it does not replace — the existing
 [plugin system](plugins.md). Anything you can install from the catalog is a
 normal plugin under the hood; the catalog just adds discovery and a review
@@ -83788,20 +83763,6 @@ layer on top.
 During desktop onboarding, the setup guide can also offer catalog plugins and skills through an
 approval card. Each row installs into your `default` profile only when you click Install, at the
 same reviewed commit this page describes.
-
-### Published browse data
-
-The website and Desktop read the same generated CDN snapshot:
-[`https://hermes-agent.nousresearch.com/docs/api/plugins.json`](https://hermes-agent.nousresearch.com/docs/api/plugins.json).
-Desktop fetches it through
-`https://nousresearch.github.io/hermes-agent/docs/api/plugins.json`; the public
-docs alias serves the same data. The docs build reads `plugin-catalog/*.yaml`
-and adds cached repository star counts. It also publishes the installer's
-removed-entry list. Neither Browse view crawls source repositories or queries
-the GitHub API live.
-
-This browse snapshot is distinct from the installer's
-[`plugin-catalog.json`](#live-refresh), which resolves catalog names and pins.
 
 ## What's in an entry
 
@@ -83894,22 +83855,6 @@ repository. Review the code of anything you give credentials to.
 :::
 
 ## Installing from the catalog
-
-On the website, **Open in Hermes Desktop** opens a protocol link of this form:
-
-```text
-hermes://plugin/install?catalog=example-plugin
-```
-
-Desktop resolves the name against the published catalog and asks you to review
-the source, destination and components before confirming. The link does not
-auto-install or supply its own repository or commit. An unknown name or failed
-lookup shows an error; it never falls back to a repository install. For the
-agent-plugin component, the backend resolves the catalog name to its reviewed pin.
-
-Use an updated Desktop build for catalog links and the Skills Hub's
-`hermes://skill/install?identifier=...` route. The cards retain CLI commands,
-so you can install by catalog name without Desktop:
 
 ```bash
 # Install a reviewed catalog entry by name (checks out the pinned SHA)
