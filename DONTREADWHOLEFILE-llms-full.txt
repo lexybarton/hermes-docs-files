@@ -6090,7 +6090,7 @@ websocket triggers) cannot starve the messaging gateway that shares this cap.
 
 When the cap is reached, Hermes returns a direct limit message naming which
 surfaces hold the slots. Existing active sessions keep their normal behavior.
-Run `hermes status` to see the current slot usage and every holder.
+Run `hermes status --full` to see the current slot usage and every holder.
 
 This is the only cap on concurrent gateway turns: the gateway runs each turn body
 on its own thread, so with the default (unset) every accepted turn starts
@@ -9472,7 +9472,7 @@ Each profile created with `hermes profile create <name>` automatically gets an s
 - `docker restart`, image upgrades (`docker compose up -d --force-recreate`), and unexpected exits preserve running gateways: the cont-init reconciler reads `$HERMES_HOME/profiles/<name>/gateway_state.json` and brings the slot back up if the last recorded state was `running`. Only an explicit `hermes gateway stop` records `stopped` and keeps the gateway down across the restart; the container/s6 SIGTERM sent on a restart or upgrade is treated as "still running" and auto-starts.
 - Per-profile gateway logs persist under `$HERMES_HOME/logs/gateways/<profile>/current` (rotated by `s6-log`), and the reconciler's actions are appended to `$HERMES_HOME/logs/container-boot.log` per boot. See [Where the logs go](#where-the-logs-go) for the full routing map.
 
-`hermes status` inside the container reports `Manager: s6 (container supervisor)`. Use `/command/s6-svstat /run/service/gateway-<name>` for the raw supervisor view (note `/command/` is on PATH for supervision-tree processes only; pass the absolute path when calling from `docker exec`).
+`hermes status --full` inside the container reports `Manager: s6 (container supervisor)`. Use `/command/s6-svstat /run/service/gateway-<name>` for the raw supervisor view (note `/command/` is on PATH for supervision-tree processes only; pass the absolute path when calling from `docker exec`).
 
 ## Upgrading
 
@@ -47119,7 +47119,7 @@ When you call `ctx.register_platform()`, the following integration points are ha
 | System prompt hints | `platform_hint` injected into LLM context |
 | Message chunking | `max_message_length` for smart splitting |
 | PII redaction | `pii_safe` flag |
-| `hermes status` | Shows plugin platforms with `(plugin)` tag |
+| `hermes status` | Lists plugin platforms alongside built-ins, one row each, using the gateway's own configured check |
 | `hermes gateway setup` | Plugin platforms appear in setup menu |
 | `hermes tools` / `hermes skills` | Plugin platforms in per-platform config |
 | Token lock (multi-profile) | Use `acquire_scoped_lock()` in your `connect()` |
@@ -49070,13 +49070,17 @@ has no usage endpoint, or the fetch fails (stdout stays empty).
 ## `hermes status`
 
 ```bash
-hermes status [--all] [--deep]
+hermes status [--full] [--deep]
 ```
+
+By default prints a one-screen summary: model, active provider, every provider with
+credentials (the same list the `/model` picker offers), gateway state, the messaging
+platforms the gateway would start, and scheduled jobs. No key values are printed.
 
 | Option | Description |
 |--------|-------------|
-| `--all` | Show all details in a shareable redacted format. |
-| `--deep` | Run deeper checks that may take longer. |
+| `--full` | Print every section (API keys redacted, auth providers, terminal backend, sessions, ...). `--all` is an alias. |
+| `--deep` | Run deeper checks that may take longer. Implies `--full`. |
 
 ## `hermes cron`
 
@@ -56952,6 +56956,7 @@ Import the area constants from the SDK; each area has its own `data` payload.
 | Keybind | `KEYBINDS_AREA` | `data: KeybindContribution` |
 | Theme | `THEMES_AREA` | `data` as a `DesktopTheme` |
 | Composer | `COMPOSER_AREAS.*` | render slots, or middleware / attachment providers |
+| Model menu rows | `MODEL_MENU_ROW_AREA` | `data: ModelMenuRowContribution` — a leading icon / trailing badge per model |
 | Appearance settings | `APPEARANCE_AREAS.extra` | `render` — controls appended to Settings → Appearance |
 
 ### Panes
@@ -57138,6 +57143,45 @@ manual pick. To tint the *active* theme rather than replace it, use
 `setAccentOverride(hex)` and clear it in `ctx.onDispose` — the standalone
 [Accent Picker](https://github.com/NousResearch/hermes-desktop-accent-picker)
 plugin is the worked example (it is also a complete, installable disk plugin).
+
+#### Styling the chat switch — `data-session-switching`
+
+Opening a chat places its transcript in steps: the session loads, the rows
+land, then the restored scroll position settles a few frames later. A theme
+that wants that hidden (or faded) targets one documented attribute instead of
+watching the route or the DOM: core sets `data-session-switching="true"` on the
+chat surface root (`[data-chat-surface]`) from the frame the switch starts until
+the new transcript's rows are on screen and its scroll position has settled,
+then removes it.
+
+```css
+/* Hide the transcript while it is being placed, fade it in when it lands. */
+:root[data-hermes-theme="noir"] [data-chat-surface] [data-slot="aui_thread-viewport"] {
+  transition: opacity 0.12s ease-out;
+}
+:root[data-hermes-theme="noir"] [data-chat-surface][data-session-switching] [data-slot="aui_thread-viewport"] {
+  opacity: 0;
+  transition: none;
+}
+```
+
+- **Per surface.** The primary chat and every tile has its own
+  `[data-chat-surface]`; the attribute marks only the one switching. Narrow to
+  the primary pane with `[data-composer-target="main"]`.
+- **Always ends.** It is held by core's own load and scroll-restore phases:
+  the load phase ends when the transcript arrives or the resume gives up, the
+  restore phase on settle (a bounded number of frames) or the first user
+  scroll/key/pointer input, and both on unmount — a theme that hides content
+  under it cannot strand the chat hidden. A brand-new empty draft never sets it.
+- **The contract is the attribute.** Target `[data-session-switching]` and the
+  `data-chat-surface` / `data-slot` hooks; internal class names are not a
+  contract and change without notice. Do not toggle the attribute yourself or
+  reproduce it with a route listener or `MutationObserver` (catalog rule 8).
+
+This replaces the t3-code-theme `installSwitchFade` pattern (a focus-store
+listener plus a `requestAnimationFrame` loop that polled the transcript's rows
+and scroll position, then toggled its own root attribute): the CSS above is the
+whole migration.
 
 ### Composer extensions
 
@@ -57369,6 +57413,60 @@ register(ctx) {
 
 The reasoning-pill visibility CSS the plugin also injected has no hook; it is
 only needed if the app ever hides that label at narrow widths.
+
+#### Model menu row decorations
+
+`MODEL_MENU_ROW_AREA` puts a per-model mark inside the native model menu — the
+one the composer's pill opens, and every other surface that renders
+`ModelCatalogMenu`. A contribution supplies `decorate(row)`; core paints what it
+returns in two fixed slots of the row: a **leading icon** before the model name
+and a **trailing badge** after core's own chips. The row's markup, name,
+star, submenu and click stay core's.
+
+```ts
+import { MODEL_MENU_ROW_AREA, type ModelMenuRowContribution } from '@hermes/plugin-sdk'
+
+interface ModelMenuRowContext {
+  provider: string  // provider slug: 'anthropic', 'openrouter', …
+  model: string     // the model id the row commits
+  label: string     // the display name core paints on the row
+}
+interface ModelMenuRowDecoration {
+  icon?: ReactNode  // element (<img>, <svg>, a component) or short text, drawn in a 1rem box
+  badge?: string    // plain text chip
+}
+
+ctx.register({
+  area: MODEL_MENU_ROW_AREA,
+  id: 'provider-marks',
+  data: {
+    decorate: ({ provider }) => {
+      const src = PROVIDER_ICONS[provider]   // data: URL of an SVG mark
+      return src ? { icon: <img alt="" src={src} /> } : null
+    }
+  } satisfies ModelMenuRowContribution
+})
+```
+
+**Arbitration.** Decorators run in registry order, **per slot**: the first one
+that returns a usable `icon` fills the icon slot, the first usable `badge` the
+badge slot, so an icon plugin and a pricing-badge plugin compose on the same
+row. `null` (or nothing usable) declines. Only a React element or a non-empty
+string is an icon and only a non-empty string is a badge; anything else is
+ignored rather than rendered. A decorator that **throws** declines too, and an
+icon component that throws while rendering blanks only its own slot (it sits
+in its own error boundary) — a broken plugin can never take the menu down.
+`decorate()` re-runs only when the registry or the row's provider/model/label
+changes, so keep it a pure lookup.
+
+**Teardown.** An ordinary data contribution: the `ctx.register` disposer (and
+plugin disable/reload) removes it and the rows repaint bare.
+
+**Migrating t3-code-theme.** Its provider marks were painted into the open menu
+by a `MutationObserver` that located the rows in the menu's DOM and wrote mask
+images onto them. The same marks come from `decorate({ provider })` returning
+`{ icon: <img alt="" src={providerSvgDataUrl(provider)} /> }` — no DOM reads,
+and the row keeps working when the menu's markup changes.
 
 ### Appearance settings
 
@@ -58352,7 +58450,7 @@ pipeline as a trust boundary.
 |----------|---------|
 | Host | `host` (`.state.*`, `.settings`, `.notify`, `.notifyError`, `.navigate`, `.onEvent`, `.logs`, `.status`, `.restartGateway`, `.request`, `.composer`, `.sessions`, `.skills`, `.toolsets`, `.profiles`, `.pluginDecisions`) |
 | Plugin contract | `HermesPlugin`, `PluginContext`, `PluginContribution`, `PluginStorage`, `PluginOs`, `PluginRestOptions`, `PluginNativeNotificationInput`, `PluginNotificationAction`, `HermesOpenTarget`, `Contribution` |
-| Area constants | `PANES_AREA`, `ROUTES_AREA`, `SIDEBAR_NAV_AREA`, `STATUSBAR_AREAS`, `TITLEBAR_AREAS`, `WORKSPACE_PAGE_HEADER_AREA`, `PALETTE_AREA`, `KEYBINDS_AREA`, `THEMES_AREA`, `COMPOSER_AREAS`, `SESSION_ROW_AREAS`, `SIDEBAR_NAV_PREFS_AREA`, `APPEARANCE_AREAS` |
+| Area constants | `PANES_AREA`, `ROUTES_AREA`, `SIDEBAR_NAV_AREA`, `STATUSBAR_AREAS`, `TITLEBAR_AREAS`, `WORKSPACE_PAGE_HEADER_AREA`, `PALETTE_AREA`, `KEYBINDS_AREA`, `THEMES_AREA`, `COMPOSER_AREAS`, `MODEL_MENU_ROW_AREA`, `SESSION_ROW_AREAS`, `SIDEBAR_NAV_PREFS_AREA`, `APPEARANCE_AREAS` |
 | Area payloads | `RouteContribution`, `SidebarNavContribution`, `StatusbarItem`, `TitlebarTool`, `PaletteContribution`, `KeybindContribution`, `ComposerMiddleware`, `ComposerAttachmentProvider`, `SessionRowSlotContribution`, `SidebarNavPrefsContribution` |
 | React / state | `useValue`, `atom`, `computed`, `useQuery`, `useMutation`, `useQueryClient`, `queryClient`, `Contribute`, `WorkspacePageHeaderControl` |
 | Theming | `useTheme`, `requestTheme`, `setAccentOverride`, `$accentOverride`, `retintTheme`, `themeHue`, `DesktopTheme`, `DesktopThemeColors`, plus OKLCH math (`hexToOklch`, `oklchToHex`, `oklchToSrgb255`, `mixOklab`, `maxChroma`, `hueDelta`, `normalizeHex`) and sRGB measures (`contrastRatio` — `number | null`, null for unparseable input — `readableOn`) |
@@ -65275,6 +65373,209 @@ Evaluation uses `locate` and optional version inspection. It never probes a serv
 
 - **MCP `check_fn`** (`tools/mcp_tool_handlers.py::_make_check_fn`): connection alive AND, when a declaration with `requires.app` is registered for the server, `availability(decl).offerable`. Returns a plain `bool` because the registry caches `bool(fn())`.
 - **Skill `requires_apps:` frontmatter** (`agent/skill_utils.py::skill_matches_apps`): each name resolves through `declaration.lookup`; an unknown name hides the skill (fail closed). Offer-time filter, like `environments:`.
+
+---
+
+<!-- source: website/docs/developer-guide/plugins/catalog-submission.md -->
+# Submitting to the Plugin Catalog
+
+# Submitting to the Plugin Catalog
+
+The [plugin catalog](../../user-guide/features/plugin-catalog.md) is a human-reviewed
+directory of Hermes plugins. Being listed is the trust signal: users install a
+catalog plugin by name, at the exact commit a maintainer read. This page holds
+the complete guidelines for getting a plugin in and keeping it there.
+
+The canonical copy of the admission rules is
+[`plugin-catalog/README.md`](https://github.com/NousResearch/hermes-agent/blob/main/plugin-catalog/README.md)
+in the repository. The [rules section](#admission-rules) below mirrors it word
+for word, and a test fails the build if the two drift apart.
+
+## Before you submit
+
+- **A public repository.** The `repo` URL is an `https://` URL anyone can clone
+  (GitHub or GitLab).
+- **A loadable plugin at the commit you pin.** The tree has a `plugin.yaml`
+  manifest plus at least one entrypoint Hermes loads: `__init__.py` (Python),
+  `desktop/plugin.js` (Desktop), `plugin.json` (portable Agent Plugin) or
+  `dashboard/manifest.json` (web dashboard). If the plugin lives in a monorepo,
+  point `subdir` at its directory. The
+  [plugin developer guide](./index.md) covers the layout.
+- **Public surfaces only.** Extend Hermes through hooks, middleware, the
+  `ctx.register_*` APIs, provider plugins and the
+  [Desktop plugin SDK](../desktop-plugin-sdk.md). Never patch Hermes
+  code or Desktop markup at runtime. If the hook you need is missing, see
+  [Asking for a hook](#asking-for-a-hook).
+- **Validation passes locally.** Run the same check catalog CI runs, against a
+  checkout at the commit you are about to pin:
+
+  ```bash
+  hermes plugins validate /path/to/your-plugin --install-deps
+  ```
+
+  It checks the manifest and `requires_hermes`, that the plugin loads, that the
+  `capabilities` you declare match what it registers, `config_schema` and
+  `requires_env`, Python dependencies against Hermes's core constraints, the
+  install security scan, and the `desktop surface` and `no core override`
+  rules. Fix every failure before opening the PR, and read the warnings, since
+  a reviewer will.
+
+## Opening the PR
+
+1. Add **one** file, `plugin-catalog/<name>.yaml`, to
+   [`NousResearch/hermes-agent`](https://github.com/NousResearch/hermes-agent).
+   The fields are documented in the README's
+   [entry schema](https://github.com/NousResearch/hermes-agent/blob/main/plugin-catalog/README.md#entry-schema)
+   and in [What's in an entry](../../user-guide/features/plugin-catalog.md#whats-in-an-entry).
+   Pin `sha` to a full 40-character commit, and quote `version`.
+2. In the PR description, say what the plugin does, which Hermes surfaces it
+   uses, and everything rule 13 asks you to disclose. Add screenshots for
+   anything with a UI.
+3. Wait for the catalog CI job to go green. It clones your repo at the pinned
+   commit and runs `hermes plugins validate`.
+4. A maintainer reviews the pinned tree and merges, asks for changes, or
+   declines. Rule 3 and rule 9 problems are declines rather than bug-fix
+   requests: the plugin has to change its design before it can be listed.
+
+Your plugin's page at `/docs/plugins/<name>` is built from the same file. The
+README at the pinned commit renders there by default, and `screenshots:` fills
+the gallery. There is no separate listing to maintain.
+
+## Admission rules
+
+<!-- admission-rules:start (mirrored in website/docs/developer-guide/plugins/catalog-submission.md; tests/plugin_catalog keeps them identical) -->
+1. **Human-merged gate.** Entries are added *only* via a PR to the
+   `hermes-agent` repository, reviewed and merged by a maintainer. There is
+   no self-serve registry, no automated ingestion.
+2. **Exact SHA pins are mandatory.** Every entry pins a full 40-character
+   commit SHA. Branches, tags, and short SHAs are rejected by the loader.
+   Installs clone the repository and check out exactly that commit.
+3. **No self-updating code.** A listed plugin must not fetch and replace
+   its own files (in-app "check for updates", signed release downloaders,
+   remote `plugin.js` loaders). The exact SHA pin *is* the trust model; a
+   self-updater lets an installed copy move to a commit nobody reviewed.
+   Updates reach users only through a SHA-bump PR here plus
+   `hermes plugins update <name>`. Keep the updater in the standalone
+   distribution if you want one; strip it from the catalog build.
+4. **SHA bumps are new PRs.** Updating an entry's pin is a new PR whose diff
+   (old SHA → new SHA) is re-reviewed like any other change — reviewers are
+   expected to look at the upstream commit range being adopted.
+5. **Owner-or-major-contributor submissions, or a maintainer-curated sweep.**
+   An entry may be submitted by the plugin repository's owner or a major
+   contributor to it; drive-by submissions of third-party repos are declined.
+   Hermes maintainers may also add entries in batches from a reviewed sweep
+   of community plugins (every pin validated and scanned at the pinned
+   commit, self-updater and credential-store checks run, English-first UI).
+   Authors of swept-in entries keep control: a PR from the owner adjusting
+   or removing their entry is accepted on request, and SHA bumps stay
+   owner-or-maintainer PRs under rule 4.
+6. **Declared capabilities must match reality.** The `capabilities:` block
+   (tools, hooks, middleware, env vars) must match what the plugin actually
+   registers at the pinned commit. Validation fails the entry otherwise —
+   undeclared capability creep is treated as a security issue.
+7. **The install scanner runs at admission.** `hermes plugins validate` includes
+   the `security scan` check: `dangerous` fails the entry; `caution` findings
+   appear as warnings in the CI log and the reviewer reads them before merging.
+   In exchange, installs at the pinned SHA accept `caution` without a prompt
+   (`dangerous` still blocks). Review the warnings; do not merge past them.
+8. **Desktop plugins stay inside the SDK surface.** A `desktop/plugin.js` runs
+   in the Desktop renderer with the app's full authority (the loader isolates
+   errors, not capabilities), so a listed one may only use the plugin SDK:
+   no prototype patching (`X.prototype.y =`, `Object.defineProperty(...prototype`),
+   no `eval`/`new Function`, no `import()` of anything but `@hermes/plugin-sdk`
+   / `react` (app bundle chunks, blob or http URLs included), no script-tag
+   injection, no reaching into the app's internal stores or its own markup
+   (querying `data-slot` / `data-tour` / `data-sidebar` / `data-testid`
+   elements from `document`, or a `document.body` MutationObserver, to restyle,
+   hide, click or rewrite core UI). `hermes plugins validate` refuses these at
+   admission (`desktop surface` check); a plugin that needs a capability the
+   SDK lacks asks for an SDK hook instead of patching around it.
+9. **No runtime overrides of Hermes core.** A listed plugin extends Hermes only
+   through public surfaces: hooks, middleware, provider profiles and the
+   other `register_*` APIs, and Desktop SDK slots and routes. It must not
+   replace, wrap or rebind core functions, methods, module attributes or
+   private dicts in place (`AIAgent.<method> = ...`, `setattr(server, ...)`,
+   `sys.modules[...]`, writes into a core module's tables). Two plugins
+   patching the same seam silently break each other, and every core release
+   can break both. `hermes plugins validate` refuses these at admission (`no
+   core override` check). If the hook you need does not exist, open an issue
+   describing it: we would rather add the seam than list a patch.
+10. **Dependency security policy is the plugin's.** Hermes's 14-day
+   `exclude-newer` quarantine covers Hermes's own dependencies only; a plugin's
+   `python_dependencies` / `pyproject.toml` install under the plugin's policy
+   (no quarantine, still inside Hermes's core constraints). Reviewers read the
+   dependency list at the pinned SHA: bare floors (`>=X` with no upper bound)
+   and floors on the newest release get a request for the oldest
+   API-compatible floor plus an upper bound, and authors are strongly
+   recommended to run their own release quarantine (`uv --exclude-newer` in
+   their CI) — see the developer guide's *Dependency security policy*. A
+   recent floor alone is not grounds to hold an entry.
+
+11. **Credentials stay with their owner.** A plugin reads the credentials it is
+   configured with: the env vars in `requires_env` and its own `config_schema`
+   secrets. Reading another tool's login (a vendor CLI's token file, a browser
+   profile) must be disclosed in the PR and is a trust-tier call for a
+   maintainer. Refreshing, rotating or writing another client's OAuth tokens, or
+   presenting itself as another vendor's client, is not admitted without an
+   explicit maintainer ruling; a read-only build is the usual way through.
+12. **Approvals and unattended runs are respected.** A plugin never routes around
+   Hermes's approval system: no auto-approving, no disabling guards, and no
+   spawning Hermes or shell children that inherit YOLO or non-interactive mode
+   to run commands nobody approved. Anything that waits for a person (a prompt,
+   an OAuth browser flow) fails cleanly or times out under cron, the messaging
+   gateway and other unattended runs instead of hanging the agent.
+13. **Risky behaviour is disclosed.** What a user would want to know before
+   installing goes in the PR description and the plugin's README: network calls
+   to third-party services, reads outside the plugin's own data, shell commands,
+   long-running background processes, stored credentials. Telemetry and usage
+   reporting are opt-in. Reviewers summarise these as disclosure lines on the
+   entry PR; undisclosed behaviour found in review is a request for changes.
+14. **Compatibility metadata is truthful.** `requires_hermes` is a SemVer floor
+   (`">=0.21.5"`), never a CalVer date, and never newer than the current release
+   (the loader skips the plugin otherwise). `version` matches the pinned code,
+   and Python dependencies resolve under Hermes's core constraints
+   (`hermes plugins validate --install-deps` is what CI runs).
+15. **No skins or forks of bundled plugins.** A change to a bundled plugin is a
+   PR against `hermes-agent`, not a competing listing, and vendor-lookalike skins
+   are not listed under Nous branding.
+<!-- admission-rules:end -->
+
+## Updating your entry
+
+Pin updates (bumping `sha` to a newer commit) go through the same PR and review
+process. A reviewer reads the commit range you are adopting. Bump `version` in
+the same PR so the label users see matches the code, and re-pin any `image` /
+`screenshots` URLs that embed the old sha.
+
+Installed plugins compare their recorded sha against the live pin:
+`hermes plugins list --json` reports `update_available`, the Desktop Plugins tab
+shows an **Update to 1.4.0** button, and `hermes plugins update <name>` checks
+out exactly the new pin.
+
+If a maintainer swept your plugin into the catalog and you want the entry
+changed or removed, open a PR on its file. Owners keep control of their entries.
+
+## Delisting and removal
+
+- **Delisting** deletes an entry's file: for plugins that are unmaintained,
+  superseded, squatting a name, or no longer meet a rule. Users who already
+  installed the plugin keep it, and it is welcome back once the problem is
+  fixed. When a new rule affects plugins that are already listed, their
+  authors get an issue on their repository explaining the change and time to
+  update before anything is removed.
+- **Removal** adds the plugin to
+  [`removed.yaml`](https://github.com/NousResearch/hermes-agent/blob/main/plugin-catalog/README.md#removedyaml--the-blocklist),
+  which is reserved for security and policy incidents. Installers refuse
+  anything on that list, and installed copies stop updating and cannot be
+  enabled.
+
+## Asking for a hook
+
+If your plugin needs something the plugin surface doesn't offer, open an issue
+on [hermes-agent](https://github.com/NousResearch/hermes-agent/issues)
+describing what you need and why. We would much rather add a proper seam than
+list a patch, and a plugin that will use the hook is exactly the concrete
+consumer a new hook needs.
 
 ---
 
@@ -83719,31 +84020,18 @@ catalog for discovery.
 ## Submitting a plugin to the catalog
 
 Submissions are pull requests that add one `plugin-catalog/<name>.yaml` file.
-The full checklist lives in the
-[plugin-catalog README](https://github.com/NousResearch/hermes-agent/tree/main/plugin-catalog);
-in short, an entry must be:
+The complete guidelines live in
+**[Submitting to the plugin catalog](../../developer-guide/plugins/catalog-submission.md)**:
+what to check before you submit, how the PR and review work, every admission
+rule, and how pin updates, delisting and removal work. That page mirrors the
+canonical rules in the
+[plugin-catalog README](https://github.com/NousResearch/hermes-agent/tree/main/plugin-catalog).
 
-1. **Owner-submitted** — the PR author owns or maintains the plugin repo.
-   Maintainers also add batches of community plugins from a reviewed sweep
-   (each pin validated and scanned at the pinned commit); if yours was swept
-   in and you want it changed or removed, open a PR on your entry.
-2. **A public repository** — the `repo` URL is publicly cloneable.
-3. **Released** — the repo has real releases/tags, not just a default branch.
-4. **Passing validation** — the catalog validation GitHub Action is green on
-   the PR (schema, SHA format, reachability).
-5. **Not self-updating** — the catalog build must not download and replace
-   its own files; the pinned SHA is the only update path (a SHA-bump PR plus
-   `hermes plugins update <name>`).
-
-Pin updates (bumping `sha` to a newer commit) follow the same PR + review
-process; bump `version` in the same PR so the label users see matches the
-code, and re-pin any `image` / `screenshots` URLs that embed the sha. Your
-plugin page (`/docs/plugins/<name>`) is built from the same file: add
-`screenshots:` there to fill it out (the README renders by default) — there is no separate
-listing to maintain. Installed plugins compare their recorded sha against the live pin:
-`hermes plugins list --json` reports `update_available`, the Desktop Plugins
-tab shows an **Update to 1.4.0** button, and `hermes plugins update <name>`
-checks out exactly the new pin.
+In short, a listed plugin is submitted by its owner (or added in a reviewed
+maintainer sweep), lives in a public repository, pins an exact commit, passes
+`hermes plugins validate` in catalog CI, never updates itself, and extends
+Hermes only through public hooks and the Desktop SDK, never by patching core
+code or Desktop UI at runtime.
 
 ## See also
 
@@ -83752,6 +84040,7 @@ checks out exactly the new pin.
 - [Built-in Plugins](built-in-plugins.md) — plugins that ship with Hermes
 - [Build a Hermes Plugin](../../developer-guide/plugins/index.md) — write your own
 - [Plugin Catalog page](/plugins) — the browsable catalog
+- [Submitting to the plugin catalog](../../developer-guide/plugins/catalog-submission.md) — admission rules and the submission guide
 
 ---
 
@@ -83795,6 +84084,14 @@ display:
 | `poseidon` | Ocean-god theme — deep blue and seafoam | `Poseidon Agent` | Deep blue to seafoam gradient. Ocean-themed spinners ("charting currents", "sounding the depth"). Trident ASCII art banner. |
 | `sisyphus` | Sisyphean theme — austere grayscale with persistence | `Sisyphus Agent` | Light grays with stark contrast. Boulder-themed spinners ("pushing uphill", "resetting the boulder", "enduring the loop"). Boulder-and-hill ASCII art banner. |
 | `charizard` | Volcanic theme — burnt orange and ember | `Charizard Agent` | Warm burnt orange to ember gradient. Fire-themed spinners ("banking into the draft", "measuring burn"). Dragon-silhouette ASCII art banner. |
+
+### On the Desktop app
+
+The Desktop app lists your CLI skins next to its own themes in **Settings → Appearance**, with a few differences:
+
+- `default` (and `/skin default`) means the Desktop default theme, **Nous**. A stock `display.skin: default` therefore never repaints Desktop, and a runtime switch to `default` from the CLI/TUI or `config.yaml` moves a Desktop pick back to Nous.
+- The classic gold look is a separate Desktop theme named `classic` (**Classic Hermes**). Pick it in Appearance, or run `/skin classic`, `/skin gold` or `/skin hermes` in a Desktop chat. It follows the light/dark toggle: gold on navy in dark mode, the CLI's light-terminal goldenrod palette in light mode.
+- `classic` is a reserved Desktop theme name, like the other Desktop built-ins (`mono`, `slate`, …). A user skin file with one of those names keeps the Desktop palette there; its `customCSS` still applies.
 
 ## Complete list of configurable keys
 
@@ -84593,7 +84890,7 @@ Check what's active at any time:
 ```bash
 hermes portal info        # Portal auth + Tool Gateway routing summary
 hermes portal tools       # Gateway catalog with current routing per tool
-hermes status             # Full system status (Tool Gateway is one section)
+hermes status --full      # Full system status (Tool Gateway is one section)
 ```
 
 `hermes portal info` shows a section like:
@@ -84785,9 +85082,12 @@ tool_describe(names)           load the full schemas for one or more tools
 tool_call(calls)               invoke deferred tools; `calls` is an array of {name, arguments}
 ```
 
-`calls` takes one entry per invocation; a single local call is an array of
-one. Only `connectors__` names may be batched together; mixed and
-multi-local batches are rejected.
+`calls` takes one entry per invocation; a single call is an array of one.
+Independent calls may be batched (up to 10 entries). The agent splits a
+batch containing local tools into one tool call per entry, so each entry
+gets its own scope check, schema validation, hooks, approval and result,
+and runs under that tool's normal concurrency policy. A batch of only
+`connectors__` names goes to the hosted connector gateway as one dispatch.
 
 A typical interaction looks like:
 
@@ -94425,7 +94725,7 @@ parent conversation.
 
 #### 5. One PID/lock and one status surface
 
-There is a single process-level PID and lock (the multiplexer, under the default home). `hermes status` on the default profile reports the multiplexer and lists the profiles it serves (`Serves: coder, research`). `hermes -p coder status` and `hermes -p coder gateway status` report "running via the default-profile multiplexer" instead of "stopped". The dashboard's `/api/status?profile=coder` / Channels page report the multiplexer as coder's running gateway, with coder's own adapters as its platforms. The single `gateway_state.json` lives under the default home: secondary adapters appear there as `<profile>:<platform>` entries beside `served_profiles`; no per-profile gateway status file is written.
+There is a single process-level PID and lock (the multiplexer, under the default home). `hermes status --full` on the default profile reports the multiplexer and lists the profiles it serves (`Serves: coder, research`). `hermes -p coder status` and `hermes -p coder gateway status` report "running via the default-profile multiplexer" instead of "stopped". The dashboard's `/api/status?profile=coder` / Channels page report the multiplexer as coder's running gateway, with coder's own adapters as its platforms. The single `gateway_state.json` lives under the default home: secondary adapters appear there as `<profile>:<platform>` entries beside `served_profiles`; no per-profile gateway status file is written.
 
 `hermes -p coder cron status` names the single host gateway and the profiles it serves — `Scheduler host: the host gateway (PID 4211) serving profiles default, coder` — then checks coder's own ticker heartbeat and last successful tick. A missing or stale heartbeat produces a warning rather than an unconditional running verdict. `cron list` and `cron create` also warn when a served profile has no fresh heartbeat. `cron status` adds tick-failure details that those lightweight checks do not read.
 
