@@ -1036,9 +1036,9 @@ git -C $repo rev-list --objects --missing=error --all | Out-Null; $LASTEXITCODE 
 The installer's checkout is a partial clone: git downloads trees and blobs on demand, and each
 on-demand download is written as its own small pack. `hermes update` and `hermes update --check`
 fold them back together with `git gc --auto` (git's own `gc.autoPackLimit`, 50 by default), so a
-healthy checkout pays a no-op. They also set `maintenance.auto`, `gc.writeCommitGraph` and
-`fetch.writeCommitGraph` to `false` in that checkout, because a commit-graph write over commits the
-graph has not seen yet downloads every one of their trees. Leave those settings alone, and leave
+healthy checkout pays a no-op. They also set `maintenance.commit-graph.enabled`,
+`gc.writeCommitGraph` and `fetch.writeCommitGraph` to `false` in that checkout, because a
+commit-graph write over commits the graph has not seen yet downloads every one of their trees. Leave those settings alone, and leave
 `gc.auto` at its default: `gc.auto=0` stops the fold. The first fold on a checkout that has
 piled up thousands of packs is a full repack and can take several minutes; the update says so
 before it starts, and if the fold runs past 20 minutes it stops and prints the command below.
@@ -78037,8 +78037,10 @@ These controls are hidden for Nix, bundled/Light packages, and other externally 
 
 For self-managed installations, you can do the same from the terminal — `hermes uninstall --gui` for the GUI alone, or `hermes uninstall` / `hermes uninstall --full` for the agent too.
 
+Preview GUI cleanup with `hermes uninstall --gui --dry-run`. It lists the removal targets and returns without prompting or removing anything, including when `--yes` is also supplied.
+
 :::note
-Running `hermes uninstall --gui` from a **source checkout** (a `hermes desktop` dev build) also removes the workspace `node_modules` and `apps/desktop/{dist,release}` build output, since those are GUI build artifacts. They're recoverable with `hermes desktop` (or `npm install` + a rebuild) — but if you're actively hacking on the desktop app, expect to reinstall dependencies afterward.
+Running `hermes uninstall --gui` from a **source checkout** (a `hermes desktop` dev build) removes `apps/desktop/{dist,release,node_modules}` and the desktop build stamp. The workspace-root `node_modules` stays installed because it is shared with the TUI, dashboard and other workspaces. Rebuild the GUI with `hermes desktop` if you need it again.
 :::
 
 ## CLI reference: `hermes desktop`
