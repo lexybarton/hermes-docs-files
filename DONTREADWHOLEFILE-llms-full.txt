@@ -6640,6 +6640,12 @@ Type in the filter box to narrow by provider name, slug, or model ID.
 
 Pick a model, hit **Switch**, and Hermes writes it to `~/.hermes/config.yaml` under the `model` section. **This applies to new sessions only** — any chat tab you already have open keeps running whatever model it started with. To hot-swap the current chat, use the `/model` slash command inside it.
 
+### Subscription speed and extended context
+
+Speed is separate from reasoning effort. On supported subscription models, **Fast** requests Priority; **Ultrafast** requests Astra's Ultrafast tier. Selecting one clears the other. The chosen tier is remembered per model and carried into a new chat. The profile default lives under **Settings → Model → Main model → Speed** (`agent.service_tier`: `normal`, `fast` or `ultrafast`); Ultrafast is listed only for models that offer it. A legacy setting can be cleared with **Use standard speed**. An accepted request does not guarantee that OpenAI served the requested tier.
+
+Hermes creates the **GPT-6.1 Sol-900k** choice from an eligible discovered GPT-6.1 Sol model. The `-900k` suffix is a local context choice, removed from the model ID sent to OpenAI. Hermes limits its budget to the account catalog's maximum, and Codex may report a smaller usable context after its own reserve. Use **Refresh models** if a new model is absent. A failed discovery uses short-lived compatibility hints instead of caching them as a successful account catalog.
+
 ### Mid-session switches and context warnings
 
 When you switch models **inside an active session** (Herm TUI model picker, `hermes` CLI, or `/model` on Telegram/Discord), Hermes estimates whether your **next message** will run **preflight context compression** against the new model's window. If the session is already near or above that model's compression threshold (see [Context Compression](./configuration.md#context-compression)), the switch reply includes a warning — the same `warning_message` path used for expensive-model notices. The switch still applies immediately; compression runs on the **first user message after the switch**, before the model answers.
@@ -7402,7 +7408,7 @@ hermes sessions export ~/exports/ --session-id 20250305_091523_a1b2c3d4
 hermes sessions export backup.jsonl --redact
 ```
 
-Exported files contain one JSON object per line with full session metadata and every stored message, each with its `active`/`compacted` flags. That includes turns archived by in-place compaction and messages removed by rewind or edit. Importing the file (the dashboard's session import) restores those rows as archived history, not as live model context. A CLI or messaging `/save json` snapshot holds the same rows. Treat a backup as holding everything the session ever contained. To share a conversation, export a display format (`--format md` or `html`, which holds only the history the session shows) with `--redact`. Each session's backup is built in memory, so a session with more stored rows than `sessions.max_export_messages` is refused (see [Oversized-Transcript Guards](#oversized-transcript-guards)).
+Exported files contain one JSON object per line with full session metadata and every stored message, each with its `active`/`compacted` flags. That includes turns archived by in-place compaction and messages removed by rewind or edit. Importing the file (the dashboard's session import) restores those rows as archived history, not as live model context. A `/save json` snapshot (CLI, messaging, TUI, or Desktop) holds the same rows. Treat a backup as holding everything the session ever contained. To share a conversation, export a display format (`--format md` or `html`, which holds only the history the session shows) with `--redact`. Each session's backup is built in memory, so a session with more stored rows than `sessions.max_export_messages` is refused (see [Oversized-Transcript Guards](#oversized-transcript-guards)).
 
 Filtered exports include matching pinned and archived sessions. Pinning protects a session from pruning, rather than excluding it from a backup. If an explicit `--session-id` cannot be resolved, export exits with a non-zero status and creates no output file.
 
@@ -7475,7 +7481,7 @@ hermes sessions export --format md --model sonnet --min-messages 50 --redact
 hermes sessions export --format md --session-id 20250305_091523_a1b2c3d4 --delete-after-verified --yes
 ```
 
-Markdown/QMD export writes one `.md` or `.qmd` file per exported session plus a `manifest.jsonl` with the file path, message count, lineage ids, and SHA-256. Bulk export requires at least one filter; a bare bulk export is refused. `--delete-after-verified` is intentionally limited to `--session-id` and requires `--yes`. Because deleting a parent session also removes its delegate/subagent sessions, this mode exports and verifies each delegate in a separate file before deleting anything. Markdown/QMD files hold the full history shown by the session, including turns archived by in-place compaction. Deletion compares that exact display transcript and the delegate set again inside the same database transaction that performs the delete; any intervening append, rewrite, rewind, compaction, or delegate change refuses deletion. The same display-history rule applies to `--format html`, `--only user-prompts` (with either Markdown or JSONL output), and `/save md|html`. Full-session JSON/JSONL exports (`hermes sessions export` without `--only`) and CLI/messaging `/save json` are backups of every stored row, archived rows included (see [Export Sessions](#export-sessions)). `--redact` scrubs secrets (API keys, tokens, credentials) from message content and tool output before writing — recommended for any export you plan to share.
+Markdown/QMD export writes one `.md` or `.qmd` file per exported session plus a `manifest.jsonl` with the file path, message count, lineage ids, and SHA-256. Bulk export requires at least one filter; a bare bulk export is refused. `--delete-after-verified` is intentionally limited to `--session-id` and requires `--yes`. Because deleting a parent session also removes its delegate/subagent sessions, this mode exports and verifies each delegate in a separate file before deleting anything. Markdown/QMD files hold the full history shown by the session, including turns archived by in-place compaction. Deletion compares that exact display transcript and the delegate set again inside the same database transaction that performs the delete; any intervening append, rewrite, rewind, compaction, or delegate change refuses deletion. The same display-history rule applies to `--format html`, `--only user-prompts` (with either Markdown or JSONL output), and `/save md|html`. Full-session JSON/JSONL exports (`hermes sessions export` without `--only`) and `/save json` (CLI, messaging, TUI, Desktop) are backups of every stored row, archived rows included (see [Export Sessions](#export-sessions)). `--redact` scrubs secrets (API keys, tokens, credentials) from message content and tool output before writing — recommended for any export you plan to share.
 
 ### Delete a Session
 
@@ -8145,7 +8151,7 @@ sessions:
 ```
 
 `max_export_messages` applies per session to the JSON/JSONL backup (`hermes sessions export`,
-`sessions export` in `hermes console`, and CLI/messaging `/save json`). It counts every stored row, archived included, because
+`sessions export` in `hermes console`, and `/save json` in the CLI, messaging, TUI and Desktop). It counts every stored row, archived included, because
 the backup holds all of them. A heavily compacted session with a small live tail can still exceed it.
 The dashboard Sessions page's Export action streams the rows instead and is not capped.
 
@@ -8164,7 +8170,8 @@ history of the conversation:
 
 When a resume is refused the client receives error code `4130` with the count
 and the scope it was measured against (`across its lineage` or
-`in its tip segment`). `hermes sessions export` still works for such sessions; its JSON/JSONL
+`in its tip segment`). A TUI/Desktop `/save` refused by `max_export_messages` returns error code `4131`.
+`hermes sessions export` still works for such sessions; its JSON/JSONL
 backup needs each session to stay under `max_export_messages`.
 
 ### Manual Cleanup
@@ -15731,6 +15738,57 @@ Scanning is on by default; disable it in `config.yaml`:
 plugins:
   scan_on_install: false
 ```
+
+### Running plugins out of process (`plugins.isolation`)
+
+By default third-party Python plugins are imported into the Hermes process, as they always have been.
+Setting `plugins.isolation: host` moves them into a **plugin host**: one separate Python process per
+profile, started on demand, that imports the profile's user-installed plugins and talks to Hermes over a
+private pipe.
+
+```yaml
+plugins:
+  isolation: host        # default: in_process
+  host:
+    launcher: []         # optional argv prefix for the host, e.g. a sandbox runner
+```
+
+Plugins do not change. They receive the same `ctx` and register tools, hooks, slash commands, skills and
+provider objects (image/video generation, web search, browser, TTS/STT, memory, context engines,
+model-provider profiles) exactly as before; Hermes registers matching entries on its side that call into
+the host. Dashboard plugin APIs are served by the host too. Bundled plugins keep running in-process.
+
+What changes in `host` mode:
+
+- **No shared interpreter.** A plugin's module never enters the Hermes process, so it cannot read
+  another profile's data from memory or patch Hermes internals. Under the multiplex gateway every
+  profile gets its own host, started with only that profile's environment and secrets.
+- **Crashes stay contained.** A plugin that crashes or exits kills its host, not Hermes; the call in
+  flight returns a tool error and Hermes restarts the host and reloads its plugins (bounded retries).
+- **A few surfaces need in-process code** and fail that plugin with a clear reason instead of loading:
+  gateway platform adapters (`register_platform`), approval transports, Telegram/platform handlers,
+  model-provider profiles that build their own SDK client (`create_client`), streaming dashboard
+  endpoints, and plugins that monkeypatch Hermes modules. Run those with `isolation: in_process`.
+
+**Locking it for a shared deployment.** `plugins.isolation` is ordinary profile config, so whoever can
+edit a profile's `config.yaml` can turn it off. When the profiles belong to people you are isolating from
+each other, pin it in the [managed scope](../managed-scope.md) instead; the managed value wins over every
+profile's own config and `hermes config set` refuses to change it:
+
+```yaml
+# /etc/hermes/config.yaml (root-owned, read by every profile on the machine)
+plugins:
+  isolation: host
+  host:
+    launcher: [...]      # pin the sandbox runner too, if you use one
+```
+
+Run the agents' terminal on an isolated backend (Docker, SSH, ...) as well, so the agent itself cannot
+reach the operator's files.
+
+`hermes plugins validate <dir>` and `hermes plugins show <name>` report whether a plugin runs in the host
+and, if not, why. Across the plugin catalog at the time of writing, 299 of 348 entries run in the host
+unchanged.
 
 ### Interactive UI
 
@@ -65349,8 +65407,11 @@ requires:
 |---|---|---|
 | `app` | bool | when true, `app:` must exist and the server is gated on presence |
 | `min_version` | str | requires `app: true`; dotted numeric; every applicable `app.<os>` must declare a real `version.kind`; compared numerically per segment, non-numeric characters in a segment are dropped (`2.3.0.12594` ≥ `2.3.0`; prerelease suffixes are not ordered) |
+| `gpu` | str | `nvidia`; the server is offered only on a host where `hermes_platform.host.facts.gpu_class()` reports that vendor. Independent of `app`: a server with no `app:` block can require a GPU. |
 
 `requires.app: true` with no `app:` block is a `DeclarationError`.
+
+`gpu` is for an application that has no install location to check, or that needs the hardware whatever is installed. `gpu_class()` reads the registry on Windows, sysfs on Linux and the CPU architecture on macOS, never a subprocess or a driver library. When it cannot read the GPU (`unknown`), the requirement passes: a failed read must not lock out a machine that has the GPU, and the connection check still applies. Only `nvidia` is accepted: `gpu_class()` reports the highest-priority vendor present, which answers "is an NVIDIA GPU here" exactly and would not answer the same question for AMD or Intel on a machine that also has an NVIDIA GPU.
 
 ## Availability: the one evaluation every reader uses
 
@@ -65359,21 +65420,22 @@ requires:
 ```
 Availability(
   state:   available | installed_not_running | missing_app | version_too_old
-         | unsupported_os | no_requirements,
+         | unsupported_os | unsupported_gpu | no_requirements,
   version: str | None,       # inspected, when present
   path:    str | None,       # where the app was found or looked for
   min_version: str | None,   # from requires
 )
 ```
 
-- `no_requirements`: no `requires.app`; the application gate passes, but the connection check still applies.
+- `no_requirements`: no `requires.app`, and `requires.gpu` (if any) is met; the application gate passes, but the connection check still applies.
 - `unsupported_os`: `requires.app` and no `app.<this os>` block. Zero I/O.
+- `unsupported_gpu`: `requires.gpu` names a vendor this host's GPU is not. The install is refused (`… is unavailable: unsupported_gpu, needs an NVIDIA GPU.`), and a registered server's status sentence is "`<app>` needs an NVIDIA GPU; none was found on this machine. Use `<app>` on a machine with an NVIDIA GPU."
 - `missing_app`: `locate` found nothing at `location`.
 - `version_too_old`: the version is below the minimum or cannot be read.
 - `available`: present, version acceptable or not required.
 - `installed_not_running`: reserved vocabulary; this evaluator never produces it.
 
-Evaluation uses `locate` and optional version inspection. It never probes a server, launches an application, or connects. The tool registry retains its existing availability cache.
+Evaluation uses `locate`, optional version inspection and the cached GPU fact. It never probes a server, launches an application, or connects. The tool registry retains its existing availability cache.
 
 ## The two gates
 
@@ -67016,7 +67078,16 @@ also carries `call_role` (`primary` or `auxiliary`), `outcome` (`success`,
 `failed`, `cancelled`) and `error_class`: the error classifier's own
 `FailoverReason` value (`rate_limit`, `auth`, `context_overflow`, ...) for the
 last failed attempt of that logical call, or `none`. A `success` row with a
-non-`none` class is a call that recovered after that error. The previous
+non-`none` class is a call that recovered after that error. Auxiliary calls
+(titles, compression, vision, ...) follow the same rules: one row per logical
+call however many fallback attempts it took, classified by the same classifier
+(an HTTP-200 body carrying a provider `error` object is classified from that
+object), `cancelled` with `none` when Hermes aborted it (`/stop`, Ctrl+C, an
+interrupt, shutdown), and `unknown` only when the classifier cannot name the
+failure. An auxiliary call that runs beside the turn (title generation) and
+finishes under the turn's own live scopes is still counted: its result closes
+the scope when the turn drains it. Auxiliary rows report `ttft_bucket`
+`unknown`: most auxiliary calls are not streamed. The previous
 `hermes.model_call.count` contract remains readable only so pending local
 counters created by older builds can be exported without losing data.
 
@@ -67052,6 +67123,29 @@ ID after a terminal tool result is observed. The outer `AIAgent` execution
 boundary closes the task for normal returns, early returns, exceptions, and
 cancellations. Active task ownership follows the task ID if Hermes rotates its
 conversation session during context compression.
+
+The `entrypoint` dimension (on `hermes.task_run.started`, `hermes.task_run.finished`
+and `hermes.session.count`) says who dispatched the run, from a closed set:
+
+| Value | Meaning |
+|---|---|
+| `interactive` | A person in a chat UI: the `hermes` REPL, a `hermes chat -q` that seeds the REPL on a TTY, `--tui`, Desktop, ACP editors. |
+| `one_shot` | A finite CLI run that answers one prompt and exits: `hermes -z` / `--oneshot`, `hermes chat -q` off a TTY or with `--oneshot`, `-Q` / `--quiet`. A person's shell line and a script looping it look the same, so both read `one_shot`. Bot Chat delivery turns (`hermes -p <profile> chat -c "Bot Chat" -Q`) are one-shot runs too: their author may be a person on another connection. Surface stays `cli`. |
+| `background` | An unattended run a Hermes dispatcher spawned: a kanban worker (`HERMES_SESSION_SOURCE=kanban`) or an A2A forward (`--source a2a`). |
+| `delegated` | A subagent run under a parent task or session (wins over the values above). |
+| `gateway_message` | A messaging-platform message. |
+| `scheduled_task`, `batch`, `api`, `python` | Cron, batch runner, API server, Python embedding. |
+| `other`, `unknown` | Unattributable. |
+
+A run is `one_shot` or `background` when its process carries the
+`HERMES_SINGLE_QUERY_SESSION` marker that the one-shot paths set (the same marker the
+session source and `cache_ttl: auto` read). Engagement (`hermes.engagement.*`) and the
+attended-only rows (task cost, tool usage per session, model friction) treat `one_shot`
+like `interactive`, as they did before the value existed; `background` and `delegated`
+runs are unattended and excluded there. Packages written before `one_shot` existed
+carry these runs as `interactive` and still validate. `hermes -z` leaves through
+`os._exit`, so it closes its metrics session before exiting rather than relying on the
+atexit hook.
 
 Each tool invocation is represented by a Relay tool lifecycle named
 `hermes.tool_call`. The terminal counter contains only bounded tool category,
@@ -87219,7 +87313,7 @@ Get a key at [app.tavily.com](https://app.tavily.com/home). See [Tavily keyless]
 
 ### Perplexity
 
-[Perplexity's Search API](https://docs.perplexity.ai/docs/search/quickstart) returns ranked, date-stamped results from Perplexity's own index (`web_search`). For `web_extract` it uses the same query-relevant *snippets* route as the official `pplx` CLI: you get the passages of each page that matter, with elisions marked `…`, rather than a verbatim full-page dump — pick Firecrawl / Exa / Parallel as `web.extract_backend` when you need the whole page. Keyed only; there is no anonymous tier.
+[Perplexity's Search API](https://docs.perplexity.ai/docs/search/quickstart) returns ranked, date-stamped results from Perplexity's own index (`web_search`). For `web_extract` it uses the same query-relevant *snippets* route as the official `pplx` CLI: you get the passages of each page that matter, with elisions marked `…`, rather than a verbatim full-page dump — pick Firecrawl / Exa / Parallel as `web.extract_backend` when you need the whole page. Keyed only at Perplexity itself; the managed Nous route (any Nous identity, guests included) serves `web_search` without a key.
 
 ```bash
 # ~/.hermes/.env
@@ -87366,10 +87460,10 @@ If no shared backend has **ever** been selected (no `web.backend` written by you
 | `SEARXNG_URL` | searxng |
 | `BRAVE_SEARCH_API_KEY` | brave-free |
 | `ddgs` package importable | ddgs |
-| Registered Nous Portal identity (any tier, including the no-credit free tier; anonymous guests excluded) | managed web search (`web_search` only); extract and the keyless ring below are unchanged |
+| Nous identity present (any account, including the free tier and anonymous guests) | managed web search (`web_search` only); extract and the keyless ring below are unchanged |
 | *(nothing set at all)* | keyless ring: exa / parallel / firecrawl / keenable (round-robin) |
 
-**Keyless free-tier ring:** when *no* credential above is present, requests rotate across the ring vendors' public free tiers (Exa, Parallel, Firecrawl, Keenable) so web tools work on a fresh install with zero setup — and a rate-limited request fails over to the next vendor in the ring automatically. Pin one vendor in `hermes tools` to stop the rotation (the ring is then only used as failover succession on throttles). All free tiers are vendor-rate-limited under burst load; sustained normal usage goes through fine. Set `web.keyless_fallback: false` to turn the tier off — with it off and no credentials, web tools are unavailable until a provider is configured. A registered Nous Portal identity is unaffected by that switch: managed `web_search` still applies, though `web_extract` needs a configured provider.
+**Keyless free-tier ring:** when *no* credential above is present, requests rotate across the ring vendors' public free tiers (Exa, Parallel, Firecrawl, Keenable) so web tools work on a fresh install with zero setup — and a rate-limited request fails over to the next vendor in the ring automatically. Pin one vendor in `hermes tools` to stop the rotation (the ring is then only used as failover succession on throttles). All free tiers are vendor-rate-limited under burst load; sustained normal usage goes through fine. Set `web.keyless_fallback: false` to turn the tier off — with it off and no credentials, web tools are unavailable until a provider is configured. A Nous identity (guest included) is unaffected by that switch: managed `web_search` still applies, though `web_extract` needs a configured provider.
 
 **One-shot keyless rescue for keyed backends:** when your chosen/keyed backend — including the Nous Tool Gateway route (`web.backend: nous`) — fails a call (bad key, outage, unreachable gateway, upstream 5xx), that single call automatically retries on the keyless free-tier ring instead of erroring — the result notes which vendor served it and why (`rescued_from` / `backend_error`). The failover is never sticky: the very next `web_search`/`web_extract` call attempts your chosen backend again. Disable with `web.keyless_rescue: false` (also off whenever `keyless_fallback` is off).
 
