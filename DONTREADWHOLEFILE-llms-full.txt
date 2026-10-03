@@ -5246,7 +5246,7 @@ auxiliary:
     model: "qwen2.5-vl"
 ```
 
-`base_url` takes precedence over `provider`, so this is the most explicit way to route an auxiliary task to a specific endpoint. For direct endpoint overrides, Hermes uses the configured `api_key` or falls back to `OPENAI_API_KEY`; it does not reuse `OPENROUTER_API_KEY` for that custom endpoint.
+`base_url` takes precedence over `provider`, so this is the most explicit way to route an auxiliary task to a specific endpoint. For direct endpoint overrides, Hermes uses the configured `api_key` or falls back to `OPENAI_API_KEY`; it does not reuse `OPENROUTER_API_KEY` for that custom endpoint. With neither set, the main model's key is reused only when `base_url` has the main endpoint's exact origin (scheme, host and port). The main endpoint is the one the session is running on (after a `/model` switch, that one), paired with its own key, never with a key from a different endpoint.
 
 **Using OpenAI API key for vision:**
 ```yaml
@@ -7402,7 +7402,9 @@ hermes sessions export ~/exports/ --session-id 20250305_091523_a1b2c3d4
 hermes sessions export backup.jsonl --redact
 ```
 
-Exported files contain one JSON object per line with full session metadata and all messages.
+Exported files contain one JSON object per line with full session metadata and every stored message, each with its `active`/`compacted` flags. That includes turns archived by in-place compaction and messages removed by rewind or edit. Importing the file (the dashboard's session import) restores those rows as archived history, not as live model context. A CLI or messaging `/save json` snapshot holds the same rows. Treat a backup as holding everything the session ever contained. To share a conversation, export a display format (`--format md` or `html`, which holds only the history the session shows) with `--redact`. Each session's backup is built in memory, so a session with more stored rows than `sessions.max_export_messages` is refused (see [Oversized-Transcript Guards](#oversized-transcript-guards)).
+
+Filtered exports include matching pinned and archived sessions. Pinning protects a session from pruning, rather than excluding it from a backup. If an explicit `--session-id` cannot be resolved, export exits with a non-zero status and creates no output file.
 
 Each record also carries a `timings` block derived from the message timestamps, so a reader of an export attached to a bug report can tell a single long model gap from many small tool round-trips without reconstructing it by hand. It holds only ids, roles, counts and durations — `wall_clock_ms`, `largest_gap_ms`, `role_counts`, `tool_calls_emitted` and per-message `intervals` — never prompt text, tool arguments or results, so it survives `--redact` unchanged. Hermes does not persist a model/tool stopwatch, so `complete` is always `false`; when a session has no timestamped messages, `available` is `false` and `unavailable_reason` says why. The block is rebuilt on every export and ignored (and not counted toward size limits) on import.
 
@@ -7473,7 +7475,7 @@ hermes sessions export --format md --model sonnet --min-messages 50 --redact
 hermes sessions export --format md --session-id 20250305_091523_a1b2c3d4 --delete-after-verified --yes
 ```
 
-Markdown/QMD export writes one `.md` or `.qmd` file per exported session plus a `manifest.jsonl` with the file path, message count, lineage ids, and SHA-256. Bulk export requires at least one filter; a bare bulk export is refused. `--delete-after-verified` is intentionally limited to `--session-id` and requires `--yes`. Because deleting a parent session also removes its delegate/subagent sessions, this mode exports and verifies each delegate in a separate file before deleting anything. Markdown/QMD files hold the full history shown by the session, including turns archived by in-place compaction. Deletion compares that exact display transcript and the delegate set again inside the same database transaction that performs the delete; any intervening append, rewrite, rewind, compaction, or delegate change refuses deletion. The same display-history rule applies to `--format html`, `--only user-prompts` (with either Markdown or JSONL output), and `/save md|html`. Full-session JSON/JSONL exports and `/save json` remain live-only because importing archived turns would restore them as live model context. `--redact` scrubs secrets (API keys, tokens, credentials) from message content and tool output before writing — recommended for any export you plan to share.
+Markdown/QMD export writes one `.md` or `.qmd` file per exported session plus a `manifest.jsonl` with the file path, message count, lineage ids, and SHA-256. Bulk export requires at least one filter; a bare bulk export is refused. `--delete-after-verified` is intentionally limited to `--session-id` and requires `--yes`. Because deleting a parent session also removes its delegate/subagent sessions, this mode exports and verifies each delegate in a separate file before deleting anything. Markdown/QMD files hold the full history shown by the session, including turns archived by in-place compaction. Deletion compares that exact display transcript and the delegate set again inside the same database transaction that performs the delete; any intervening append, rewrite, rewind, compaction, or delegate change refuses deletion. The same display-history rule applies to `--format html`, `--only user-prompts` (with either Markdown or JSONL output), and `/save md|html`. Full-session JSON/JSONL exports (`hermes sessions export` without `--only`) and CLI/messaging `/save json` are backups of every stored row, archived rows included (see [Export Sessions](#export-sessions)). `--redact` scrubs secrets (API keys, tokens, credentials) from message content and tool output before writing — recommended for any export you plan to share.
 
 ### Delete a Session
 
@@ -7507,6 +7509,13 @@ Pinning sets a durable "keep" flag: pinned sessions are exempt from the
 `sessions.auto_archive` stale sweep and always appear in listings. It is the
 same flag the Desktop sidebar's Pinned section uses — pin from either surface
 and both see it.
+
+Restoring a session export (the dashboard import, or a profile adopting a
+stranded session) keeps the pinned, archived and hidden flags, and whether an
+archive came from the `sessions.auto_archive` sweep. A restored pinned session
+stays exempt from retention cleanup, an adopted Bot Mode chat stays hidden, and
+a restored sweep archive still comes back when you resume it. Exports that
+predate these flags restore as ordinary, unpinned, visible sessions.
 
 ```bash
 # Pin one or more sessions (unique ID prefixes work)
@@ -8127,13 +8136,18 @@ never closed by this sweep.
 ### Oversized-Transcript Guards
 
 Two limits stop a runaway transcript from being loaded into memory all at once
-(both default to `20000` active messages; `0` disables the guard):
+(both default to `20000` messages; `0` disables the guard):
 
 ```yaml
 sessions:
   max_resume_messages: 20000   # interactive resume (CLI / TUI / Desktop)
   max_export_messages: 20000   # one-shot in-memory export of a single session
 ```
+
+`max_export_messages` applies per session to the JSON/JSONL backup (`hermes sessions export`,
+`sessions export` in `hermes console`, and CLI/messaging `/save json`). It counts every stored row, archived included, because
+the backup holds all of them. A heavily compacted session with a small live tail can still exceed it.
+The dashboard Sessions page's Export action streams the rows instead and is not capped.
 
 `max_resume_messages` bounds **what the resume actually loads**, not the whole
 history of the conversation:
@@ -8150,7 +8164,8 @@ history of the conversation:
 
 When a resume is refused the client receives error code `4130` with the count
 and the scope it was measured against (`across its lineage` or
-`in its tip segment`). `hermes sessions export` still works for such sessions.
+`in its tip segment`). `hermes sessions export` still works for such sessions; its JSON/JSONL
+backup needs each session to stay under `max_export_messages`.
 
 ### Manual Cleanup
 
@@ -16673,7 +16688,8 @@ computer wakes, while the VPN or Wi-Fi is still reconnecting — does not sit
 out a whole period. The scheduler re-runs it automatically after **5, 15, and
 30 minutes** (inspired by Claude Cowork's scheduled-task re-runs), then falls
 back to the normal schedule. Because zero API calls were made, the re-run is
-spend-neutral and cannot duplicate any side effect.
+spend-neutral and cannot duplicate any side effect. Re-runs also do not count
+toward a job's `repeat` limit: the occurrence they repeat already counted once.
 
 While a re-run is pending, the interim failure notice is suppressed — you get
 the real result when a re-run succeeds, or a normal failure alert once the
@@ -17594,6 +17610,8 @@ Ask the agent to manage jobs through the `cronjob_manage` tool, `hermes cron edi
 If a hand edit leaves `jobs.json` malformed, the scheduler repairs it on the next load instead of stopping: entries in the `jobs` list that are not JSON objects are dropped, and a `repeat.completed` that is not a non-negative integer is reset to a valid count (0 when it can't be read). Each repair is logged as a warning (value types only, never contents).
 
 Jobs may store `model` and `provider` as `null`. When those fields are omitted, Hermes resolves them at execution time from the global configuration. They only appear in the job record when a per-job override is set.
+
+A per-job `base_url` override needs an explicit `provider`. For a provider with a stored key (a named custom provider or a built-in one), the override must have the same origin as that provider's configured endpoint: the same scheme, host and port. Another scheme, port or subdomain is refused, so the stored key is only ever sent where you configured it. A bare `provider: custom` takes any `base_url` that no stored key goes with. When a stored key matches the URL's hostname (for example `DEEPSEEK_API_KEY` for `api.deepseek.com`), the same rule applies: the `base_url` must have the origin of an endpoint you configured or of a built-in provider.
 
 The storage uses atomic file writes so interrupted writes do not leave a partially written job file behind.
 
@@ -20108,6 +20126,7 @@ What you'll see:
 | Command | What it does |
 |---|---|
 | `/goal <text>` | Set (or replace) the standing goal. Kicks off the first turn immediately so you don't need to send a separate message. |
+| `/goal -- <text>` | Set goal text that starts with a control word (`/goal -- pause the nightly cron`). Without `--`, `resume`/`continue`/`unpause`/`pause`/`status`/`show`/`unwait` followed by words run the control command and ignore the rest. |
 | `/goal draft <text>` | Draft a structured completion contract from a plain-language objective, then set it. See [Completion contracts](#completion-contracts). |
 | `/goal show` | Print the active goal's completion contract. |
 | `/goal` or `/goal status` | Show the current goal, its status, and turns used. |
@@ -26997,6 +27016,21 @@ Notes:
   instance partially processed. Telegram's offset usually prevents this,
   but time-sensitive commands sent during a long outage will run on boot.
 
+### Concurrent update handling
+
+Updates from different chats are processed concurrently, so one slow turn
+(a long provider retry, a large download) no longer stalls every other chat.
+Updates from the same chat still run one after another, in arrival order.
+The cross-chat pool defaults to 32; an invalid value logs a warning and uses
+the default:
+
+```yaml
+platforms:
+  telegram:
+    extra:
+      max_concurrent_updates: 32   # 1 restores fully sequential processing
+```
+
 ### Repeated inbound updates
 
 Hermes suppresses repeated Telegram `update_id` values before message batching,
@@ -28617,7 +28651,7 @@ Discord behavior is controlled through two files: **`~/.hermes/.env`** for crede
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `DISCORD_BOT_TOKEN` | **Yes** | — | Bot token from the [Discord Developer Portal](https://discord.com/developers/applications). |
-| `DISCORD_ALLOWED_USERS` | Conditional | — | Comma-separated Discord user IDs allowed to interact with the bot. Without this **or** `DISCORD_ALLOWED_ROLES`, the gateway denies all users unless `DISCORD_ALLOW_ALL_USERS=true`, `GATEWAY_ALLOW_ALL_USERS=true`, or `DISCORD_ALLOWED_CHANNELS` explicitly scopes guild access. |
+| `DISCORD_ALLOWED_USERS` | Conditional | — | Comma-separated Discord user IDs allowed to interact with the bot. Without this **or** `DISCORD_ALLOWED_ROLES`, the gateway denies all users unless `DISCORD_ALLOW_ALL_USERS=true`, `GATEWAY_ALLOW_ALL_USERS=true`, or `DISCORD_ALLOWED_CHANNELS` explicitly scopes guild access. Usernames also work: they are resolved to IDs when the bot connects (requires the **Server Members Intent**). Display names and server nicknames are never matched, because any member can set them. |
 | `DISCORD_ALLOWED_ROLES` | No | — | Comma-separated Discord role IDs. Any member with one of these roles is authorized — OR semantics with `DISCORD_ALLOWED_USERS`. Auto-enables the **Server Members Intent** on connect. Useful when moderation teams churn: new mods get access as soon as the role is granted, no config push needed. |
 | `DISCORD_ALLOW_ALL_USERS` | No | `false` | Explicit opt-in to allow every Discord user who can reach the bot. This restores the pre-0.18 open behavior for Discord only; use only for trusted/private guilds or development. |
 | `GATEWAY_ALLOW_ALL_USERS` | No | `false` | Global allow-all opt-in for every gateway platform. Prefer the platform-specific `DISCORD_ALLOW_ALL_USERS` unless you intentionally want all connected platforms open. |
@@ -31144,7 +31178,7 @@ Email access is stricter by default than chat-style platforms:
 
 Allowlist entries match whole addresses. A bare entry such as `alice` (a chat username in `GATEWAY_ALLOWED_USERS`, say) never admits `alice@` at any domain, and mail from such an address is dropped rather than paired or declined.
 
-Unless open access is on, Hermes acts on a message only when the `Authentication-Results` header stamped by your receiving server authenticates its `From:` domain (DMARC, or aligned SPF/DKIM). `GATEWAY_ALLOW_ALL_USERS` counts as open access only while no allowlist is set, as it does for the gateway itself. Pairing codes and declines need an authenticated `From:` even with open access on, so neither is mailed to a forged address. If your mail server does not stamp that header, set `platforms.email.require_authenticated_sender: false` to accept the risk.
+Hermes acts on a message only when the `Authentication-Results` header stamped by your receiving server authenticates its `From:` domain (DMARC, or aligned SPF/DKIM). This applies with open access (`EMAIL_ALLOW_ALL_USERS` / `GATEWAY_ALLOW_ALL_USERS`) too: open access admits any sender, but each conversation and every reply is keyed on `From:`, so a forged `From:` would put the attacker's text into that address's session and make Hermes mail it. Pairing codes and declines likewise need an authenticated `From:`, so neither is mailed to a forged address. If your mail server does not stamp that header, set `platforms.email.require_authenticated_sender: false` (or `EMAIL_TRUST_FROM_HEADER=true`) to accept the risk; otherwise mail from an admitted sender that carries no such header is dropped with a `Dropping sender with unauthenticated From` warning in the gateway log. The same warning, pointing at `platforms.email.authserv_id` (`EMAIL_AUTHSERV_ID`) instead, fires when the topmost `Authentication-Results` header (the one your server prepends; lower ones are never consulted) does not name exactly the pinned `authserv_id`. `authserv_id` must equal the exact host your server writes; if that host varies per message, leave `authserv_id` unset. Mail from an address listed in `EMAIL_ALLOWED_USERS` / `GATEWAY_ALLOWED_USERS` that fails authentication otherwise (for example a sender whose DKIM is broken, or a forwarder that breaks alignment) is dropped with the same warning and its verdict, with no opt-out hint. Other senders' failing mail, such as forged `From:` under open access, is dropped quietly, logged at debug level only.
 
 :::warning
 **Use a dedicated inbox and configure `EMAIL_ALLOWED_USERS` for normal operation.** Email pairing is opt-in because shared inboxes often contain unrelated unread messages, and Hermes should not reply to those contacts by default.
@@ -31503,7 +31537,7 @@ matrix:
   session_scope: room             # auto|room|thread; room is recommended for project rooms
   auto_thread: true               # Auto-create threads for responses (default: true)
   dm_mention_threads: false       # Create thread when @mentioned in DM (default: false)
-  max_message_length: 16000       # Outbound chunk size in chars (default: 16000, max: 65535)
+  max_message_length: 15000       # Outbound chunk size in UTF-8 bytes (default and max: 15000)
 ```
 
 Or via environment variables:
@@ -51003,7 +51037,7 @@ hermes profile purge-identity mybot
 hermes profile export <name> [options]
 ```
 
-Exports a profile as a compressed tar.gz archive — a portable snapshot you can back up, move to another machine, or hand to someone else. `auth.json` and `.env` are always excluded.
+Exports a profile as a compressed tar.gz archive — a portable snapshot you can back up, move to another machine, or hand to someone else. `auth.json`, `.env` and the other credential stores are always excluded; see [what an export file contains](../user-guide/profile-distributions.md#what-an-export-file-contains).
 
 Also available in chat as [`/export`](./slash-commands.md), and in the desktop app via **⌘K → Export profile…** or a profile square's right-click menu. A desktop export additionally stages `desktop.json` (skin, light/dark mode, custom themes, rail color, window layout) into the archive.
 
@@ -51289,7 +51323,7 @@ Hermes reads environment variables from the process environment and, for user-ma
 | `NOUS_INFERENCE_BASE_URL` | Override Nous inference endpoint directly |
 | `AI_GATEWAY_API_KEY` | Vercel AI Gateway API key ([ai-gateway.vercel.sh](https://ai-gateway.vercel.sh)) |
 | `AI_GATEWAY_BASE_URL` | Override AI Gateway base URL (default: `https://ai-gateway.vercel.sh/v1`) |
-| `OPENAI_API_KEY` | OpenAI API key (`openai-api` provider), or the key for a custom OpenAI-compatible endpoint when `OPENAI_BASE_URL` is set. Counts as an OpenRouter key only when it starts with `sk-or-`; put OpenRouter keys in `OPENROUTER_API_KEY` |
+| `OPENAI_API_KEY` | OpenAI API key (`openai-api` provider), or the key for a custom OpenAI-compatible endpoint when `OPENAI_BASE_URL` is set; bound that way, it is sent only to that URL's exact origin (scheme, host and port), never to another port or to `http://` on the same host. Counts as an OpenRouter key only when it starts with `sk-or-`; put OpenRouter keys in `OPENROUTER_API_KEY` |
 | `OPENAI_BASE_URL` | Base URL for custom endpoint (VLLM, SGLang, etc.) |
 | `HERMES_CODEX_BASE_URL` | Route the `openai-codex` (ChatGPT subscription) provider through a proxy instead of the default Codex backend. Applies everywhere the credential is used: pool resolution, auxiliary/raw clients, and 401/429 credential rotation. `model.base_url` under `model.provider: openai-codex` is the secondary override when this is unset. |
 | `LM_API_KEY` | API key for LM Studio (`lmstudio` provider). Often a placeholder for local servers |
@@ -77879,7 +77913,7 @@ Manage providers, models, tools, and credentials from a real UI instead of editi
 - **Auxiliary-model warning** — if you switch the main model to a new provider while auxiliary tasks (titling, summarization, and similar helpers) are still pinned to another provider, the app warns you so you don't unknowingly split work across two providers.
 - **Per-task reasoning effort** — each row under **Settings → Model → Auxiliary models** has a reasoning selector next to its provider/model pick: a level, **Off**, or **inherit · main model effort** (the default, which removes the task's override). It is saved as `auxiliary.<task>.reasoning_effort` in `config.yaml`, the same key `hermes model` writes, and shows in the row's summary when set. Use it to run frequent helpers such as compression or titling at low or no reasoning while the main agent stays at high.
 - **VS Code Marketplace themes** — beyond the built-in theme presets, the appearance settings include a live VS Code Marketplace search: pick any color theme and the app downloads, converts, and installs it as a desktop theme. The same importer is available from the command palette (*Install theme*), and imported themes can be removed again from the appearance settings.
-- **Keep computer awake** — **Settings → Advanced → Keep computer awake** stops the machine from sleeping so long or overnight agent runs keep going (the display can still dim). This is a per-computer setting.
+- **Keep computer awake** — **Settings → Advanced → Keep computer awake** stops the machine from sleeping so long or overnight agent runs keep going (the display can still dim). **While working** holds the machine awake only while a turn is in flight and lets it sleep normally once the run finishes or fails; **Always** holds it whenever Hermes is open. This is a per-computer setting.
 
 First-run onboarding has been redesigned on a unified overlay design system, and you can pick **Choose provider later** to skip provider setup and get into the app first.
 
@@ -79803,6 +79837,7 @@ The kanban tools are gated by `HERMES_KANBAN_TASK` env var the dispatcher sets �
 | Codex sandbox (seatbelt/landlock, profiles) | — | yes (Codex built-in) |
 | ChatGPT subscription auth | — | yes (via `openai-codex` provider) |
 | Model selection (`model.default`, `/model`) | yes | yes — sent on `thread/start` and every `turn/start`, so a mid-session `/model` applies to the next turn; a `-900k` variant goes out as its base slug (codex applies the extended window itself), and on codex's own provider an `openai/` prefix is dropped |
+| Reasoning effort and `/fast` | yes | yes — an explicit `reasoning_effort` (clamped to what the model accepts; `ultra` goes out as codex's own Ultra mode on models whose ladder reaches `max`; disabled reasoning goes out as `none`) and `/fast` ride on `turn/start`; without a Hermes setting, codex's own configured defaults apply |
 | Native Codex plugins (Linear, GitHub, etc.) | — | yes (auto-migrated) |
 | User MCP servers | yes | yes (auto-migrated to codex) |
 | Memory + skill review (background) | yes | yes (via item projection) |
@@ -84711,15 +84746,22 @@ OpenAI-compatible client.
 
 ## Exposing on LAN
 
-By default the proxy binds `127.0.0.1` (localhost only). To let other
-machines on your network use it:
+By default the proxy binds `127.0.0.1` (localhost only). It refuses requests
+whose `Host` header is not its own address (`localhost`, `127.0.0.1`, `[::1]`
+or the bound IP) and any browser request from another site (an `Origin` other
+than its own, or a `Sec-Fetch-Site` of `cross-site`/`same-site`), so a web page
+open in your browser cannot use it. Clients such as SDKs and `curl` send
+neither header and are unaffected. To let other machines on your
+network use it:
 
 ```bash
 hermes proxy start --host 0.0.0.0 --port 8645
 ```
 
 ⚠ **Be aware:** anyone on your network can now use your Portal
-subscription. The proxy has no auth of its own — it accepts any bearer.
+subscription. A wildcard bind skips the `Host` check (any name may reach it),
+so it refuses every request a web page makes (any `Origin`, or a
+`Sec-Fetch-Site` other than `none`): browsers cannot use a wildcard-bound proxy. The proxy has no auth of its own — it accepts any bearer.
 Use a firewall, VPN, or reverse proxy with proper auth if you expose
 this beyond your trusted network.
 
@@ -87831,6 +87873,13 @@ Selecting a local model as your main model uses the standard
   **Linux:** Vulkan or CPU; the pinned release has no prebuilt CUDA archive.
   **macOS:** Metal or CPU. HIP/ROCm is an explicit choice on supported x64
   targets. Unsupported backend/target pairs fail before any download.
+- `backend: auto` prefers CUDA for NVIDIA and Vulkan for AMD and Intel GPUs,
+  then falls back to the builds listed above for your platform (CPU when no
+  GPU is found). Behind a Vulkan or HIP engine, a discrete card is sized from
+  its own memory (system RAM is spill space) and each launch subtracts what
+  other programs hold on it; an integrated GPU shares system RAM and is sized
+  from that. Quickstart installs the engine before choosing the model, so the
+  pick reflects the card.
 - A GPU with 8 GB+ of memory runs the small catalog models comfortably;
   16 GB+ runs the 27–35B models at high quality.
 - Model completeness is checked against the server's response, not catalog
@@ -95497,7 +95546,7 @@ Not a fit:
 
 - **You want to hand someone your setup once, right now.** A distribution needs a repo, a manifest, and a `.gitignore`. `/export` needs none of that — see [Export and import a profile file](#export-and-import-a-profile-file). Same for backing up or moving a profile to a new machine.
 - **You want to share your desktop theme and layout.** A distribution carries the agent — SOUL, config, skills, cron, MCP, plugins. An export made from the desktop app also carries the look: skin, light/dark mode, custom themes, rail color, and window layout.
-- **You want to share API keys alongside the agent.** `auth.json` and `.env` are deliberately excluded from distributions. Each installer brings their own credentials. (Export files strip them too.)
+- **You want to share API keys alongside the agent.** `auth.json`, `.env` and the other credential stores Hermes reads from a profile (`.op.env`, `npmrc`, OAuth and bot token files, `honcho.json`, `mem0.json`, `teams_pipeline_store.json`, `mcp-tokens/`, `vault/`, `proxy/`, browser profiles, platform sessions, and `.ssh/`, `.aws/`, `.gnupg/`, `.kube/` and `.envrc` at the root or nested under a skill) are deliberately excluded from distributions. Each installer brings their own credentials. (Export files strip them too.)
 - **You want to share memories / sessions / conversation history.** Those are user data, not distribution content. Never shipped. (Export files are different here — read [what an export contains](#what-an-export-file-contains) before sending one.)
 
 :::caution
@@ -95684,7 +95733,7 @@ When an installer updates to a new version, some things get replaced (author's d
 |---|---|---|
 | **Distribution-owned** | `SOUL.md`, `config.yaml`, `mcp.json`, `skills/`, `cron/jobs.json`, `distribution.yaml` | Files are replaced from the new clone. Skill directories are merged per entry. `cron/jobs.json` is merged by job id: shipped definitions update in place, your local jobs and each job's paused/enabled state survive, and newly shipped jobs arrive paused. Other `cron/` files and root-level hidden `skills/` metadata are runtime state and stay local. |
 | **Config override** | `config.yaml` | Actually preserved by default — the installer may have tuned model or provider. Pass `--force-config` on update to reset. |
-| **User-owned** | `memories/`, `sessions/`, `state.db*`, `auth.json`, `.env`, `logs/`, `workspace/`, `plans/`, `home/`, `*_cache/`, `local/` | Never touched |
+| **User-owned** | `memories/`, `sessions/`, `state.db*`, `auth.json`, `.env` and the other credential stores (including those below a distribution-owned directory, such as `platforms/pairing/` and `platforms/whatsapp/session/`) and the recovery copies Hermes keeps of them (`state-snapshots/`, `auth.json.corrupt`, `.env.bak-*`), `logs/`, `workspace/`, `plans/`, `home/`, `*_cache/`, `local/` | Never touched, and `distribution_owned` cannot claim a credential store. An update that ships a file where your profile has a directory holding one (a file named `platforms`) is refused before anything is written |
 
 You can override the distribution-owned list in the manifest:
 
@@ -96096,13 +96145,13 @@ You cannot import as `default` — that name is the built-in root profile (`~/.h
 
 ### What an export file contains
 
-Always excluded, both profiles types: `auth.json` and `.env`. Your API keys never leave the machine.
+Always excluded, both profile types: `auth.json`, `.env` and the other credential stores Hermes reads from a profile (OAuth and bot token files such as WeChat's `weixin/accounts/`, `honcho.json`, `mcp-tokens/`, `vault/`, the iron-proxy keys in `proxy/`, browser profiles including the `/browser connect` one in `chrome-debug/`, platform sessions and pairing stores, the Teams pipeline's `teams_pipeline_store.json` with its Graph webhook `clientState`), and `.ssh/`, `.aws/`, `.gnupg/`, `.kube/` and `.envrc`, at the root or nested under a skill. Your API keys never leave the machine. `honcho.json` and `mem0.json` can hold the provider's API key next to its settings, so after an import run `hermes honcho setup` or `hermes memory setup` again.
 
 **The default profile** (`~/.hermes`) is exported through an allow-list — only known Hermes artifacts, so an unrelated file sitting in your home directory can't get swept in:
 
 `config.yaml`, `SOUL.md`, `MEMORY.md`, `USER.md`, `todo.json`, `system_prompt.md`, `AGENTS.md`, `CLAUDE.md`, `.cursorrules`, `skills/`, `plugins/`, `cron/`, `scripts/`, `sessions/`, `memories/`, `knowledge/`, `preferences/`, and `desktop.json` when the desktop staged one.
 
-**A named profile** (`~/.hermes/profiles/<name>`) copies the whole directory minus `auth.json` / `.env`. That's broader — if the profile has `state.db`, logs, or caches, they go in the archive too, and the file gets big.
+**A named profile** (`~/.hermes/profiles/<name>`) copies the whole directory minus those credential stores, `home/` (the `HOME` of Hermes' tool subprocesses, where `git`, `ssh`, `gh`, `npm` and skill CLIs keep their credentials), and the recovery copies Hermes keeps of them (`backups/`, `state-snapshots/`, any `auth.json.*` or `.env.bak*`, and the `config.yaml.bak-<timestamp>` copies `hermes update` writes). A copy you name yourself, such as `config.yaml.bak-my-note`, is exported, with its secrets redacted like `config.yaml`'s. That's broader — if the profile has `state.db`, logs, or caches, they go in the archive too, and the file gets big.
 
 :::caution Read your archive before you send it
 An export is a snapshot of your profile, not a curated release. Unlike a distribution, it **can** include `memories/`, `sessions/`, and `USER.md` — and nothing scans skills, memories, or your persona for anything personal you wrote into them. Credentials are filtered by filename; content is not.
