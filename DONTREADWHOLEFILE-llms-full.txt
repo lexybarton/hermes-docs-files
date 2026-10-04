@@ -523,7 +523,7 @@ Only after the base chat works. Pick what you need:
 hermes gateway setup    # Interactive platform configuration
 ```
 
-Connect [Telegram](../user-guide/messaging/telegram.md), [Discord](../user-guide/messaging/discord.md), [Slack](../user-guide/messaging/slack.md), [WhatsApp](../user-guide/messaging/whatsapp.md), [Signal](../user-guide/messaging/signal.md), [Email](../user-guide/messaging/email.md), or [Home Assistant](../user-guide/messaging/homeassistant.md), or [Microsoft Teams](../user-guide/messaging/teams.md).
+Connect [Telegram](../user-guide/messaging/telegram.md), [Discord](../user-guide/messaging/discord.md), [Slack](../user-guide/messaging/slack.md), [WhatsApp](../user-guide/messaging/whatsapp.md), [Signal](../user-guide/messaging/signal.md), [Email](../user-guide/messaging/email.md), [Home Assistant](../user-guide/messaging/homeassistant.md) (plugin), or [Microsoft Teams](../user-guide/messaging/teams.md).
 
 ### Automation and tools
 
@@ -5873,7 +5873,7 @@ display:
 
 From the CLI, use the canonical path — `hermes config set display.platforms.telegram.streaming false`. The shorthand `hermes config set platforms.telegram.streaming false` is accepted too: because per-platform *display* settings (`streaming`, `show_reasoning`, `tool_progress`, …) are only ever read from `display.platforms`, `config set`/`get`/`unset` redirect that shorthand to the canonical key and print a note. Connection keys under the top-level `platforms.<name>` block (`token`, `enabled`, `reply_to_mode`, `extra`) are not redirected. Writing them under the nested prefix (`hermes config set gateway.platforms.telegram.enabled true`) is redirected to the top-level `platforms.telegram.enabled` with a note: the gateway reads both blocks, but the top-level one wins on shared keys, so a nested write would be silently shadowed by an existing top-level value.
 
-Platforms without an override fall back to the global `tool_progress` value. Valid platform keys: `telegram`, `discord`, `slack`, `signal`, `whatsapp`, `matrix`, `mattermost`, `email`, `sms`, `homeassistant`, `dingtalk`, `feishu`, `wecom`, `weixin`, `bluebubbles`, `qqbot`. The legacy `display.tool_progress_overrides` key still loads for backward compatibility but is deprecated and migrated into `display.platforms` on first load.
+Platforms without an override fall back to the global `tool_progress` value. Valid platform keys: `telegram`, `discord`, `slack`, `signal`, `whatsapp`, `matrix`, `mattermost`, `email`, `sms`, `dingtalk`, `feishu`, `wecom`, `weixin`, `bluebubbles`, `qqbot`, plus the name of any plugin platform (e.g. `homeassistant` from the Home Assistant plugin). The legacy `display.tool_progress_overrides` key still loads for backward compatibility but is deprecated and migrated into `display.platforms` on first load.
 
 Signal is listed as a valid platform key because the setting can be saved per platform, but the current Signal adapter cannot edit sent messages and does not render tool-progress bubbles. Keep Signal `tool_progress` set to `off`; use the CLI or an editing-capable messaging platform if you need to watch each tool call live.
 
@@ -7117,7 +7117,7 @@ Each session is tagged with its source platform:
 | `weixin` | Weixin (personal WeChat) |
 | `bluebubbles` | Apple iMessage via BlueBubbles macOS server |
 | `qqbot` | QQ Bot (Tencent QQ) via Official API v2 |
-| `homeassistant` | Home Assistant conversation |
+| `homeassistant` | Home Assistant events (plugin) |
 | `webhook` | Incoming webhooks |
 | `api-server` | API server requests |
 | `acp` | ACP editor integration |
@@ -8352,7 +8352,7 @@ before they bite.
   `google_chat_user_tokens/`, `<platform>_*`).
 
 Credentials that a messaging adapter shares with a non-channel capability — `HASS_TOKEN`/`HASS_URL`
-(also the Home Assistant tool), `TWILIO_*` (also the telephony skill), `EMAIL_*` (also
+(also the Home Assistant plugin's tools; plugin adapters declare these as `shared_env_prefixes`), `TWILIO_*` (also the telephony skill), `EMAIL_*` (also
 mail-sending scripts) — are stripped **only when the source's gateway would run that adapter**
 (the platform is enabled in its `config.yaml`, or its credential set is complete and not
 explicitly disabled). A source with `platforms.homeassistant.enabled: false` uses `HASS_TOKEN`
@@ -11206,7 +11206,7 @@ Tools are functions that extend the agent's capabilities. They're organized into
 
 ## Available Tools
 
-Hermes ships with a broad built-in tool registry covering web search, browser automation, terminal execution, file editing, memory, delegation, scheduled tasks, Home Assistant, and more.
+Hermes ships with a broad built-in tool registry covering web search, browser automation, terminal execution, file editing, memory, delegation, scheduled tasks, and more. Plugins add more tools — for example Home Assistant device control comes from the `homeassistant` catalog plugin.
 
 :::note
 **Honcho cross-session memory** is available as a memory provider plugin from the plugin catalog (`hermes plugins install honcho`), not as a built-in toolset. See [Memory Providers](./memory-providers.md#honcho).
@@ -11224,7 +11224,7 @@ High-level categories:
 | **Agent orchestration** | `todo`, `clarify`, `execute_code`, `delegate_task` | Planning, clarification, code execution, and subagent delegation. |
 | **Memory & recall** | `memory`, `session_search` | Persistent memory and session search. |
 | **Automation** | `cronjob` | Scheduled tasks with create/list/update/pause/resume/run/remove actions. Outbound delivery is handled by cron's own delivery, the `hermes send` CLI, and the gateway notifier — not by an agent-callable tool. |
-| **Integrations** | `ha_*`, MCP server tools | Home Assistant, MCP, and other integrations. |
+| **Integrations** | MCP server tools, plugin tools | MCP and plugin integrations, e.g. Home Assistant (`ha_*`, from the [`homeassistant` catalog plugin](../messaging/homeassistant.md)). |
 
 For the authoritative code-derived registry, see [Built-in Tools Reference](../../reference/tools-reference.md) and [Toolsets Reference](../../reference/toolsets-reference.md).
 
@@ -11245,7 +11245,7 @@ hermes tools
 hermes tools
 ```
 
-Common toolsets include `web`, `search`, `terminal`, `file`, `browser`, `vision`, `image_gen`, `skills`, `tts`, `todo`, `memory`, `session_search`, `cronjob`, `code_execution`, `delegation`, `clarify`, `homeassistant`, `messaging`, `spotify`, `discord`, `discord_admin`, `debugging`, and `safe`.
+Common toolsets include `web`, `search`, `terminal`, `file`, `browser`, `vision`, `image_gen`, `skills`, `tts`, `todo`, `memory`, `session_search`, `cronjob`, `code_execution`, `delegation`, `clarify`, `messaging`, `spotify`, `discord`, `discord_admin`, `debugging`, and `safe`.
 
 See [Toolsets Reference](../../reference/toolsets-reference.md) for the full set, including platform presets such as `hermes-cli`, `hermes-telegram`, and dynamic MCP toolsets like `mcp-<server>`.
 
@@ -12586,7 +12586,7 @@ The curator is triggered by an inactivity check, not a cron job. On CLI session 
 1. Enough time has passed since the last curator run (`interval_hours`, default **7 days**), and
 2. The agent has been idle long enough (`min_idle_hours`, default **2 hours**).
 
-Desktop and other `hermes serve` backends share the existing hourly maintenance timer (first poll after 90 seconds), independently of cron jobs. They measure inactivity from process startup and the most recent chat activity in the same profile, retaining that activity timestamp after a session closes or is reaped, and skip curator while a turn in that profile is running. A connected but inactive window does not block maintenance. This timer also polls personal and organization Skill Sync, subject to those features' own opt-in gates. A running messaging gateway for the same profile owns these chores instead.
+Desktop and other `hermes serve` backends share the existing hourly maintenance timer (first poll after 90 seconds), independently of cron jobs. They measure inactivity from process startup and the most recent chat activity in the same profile, retaining that activity timestamp after a session closes or is reaped, and skip curator while a turn in that profile is running. A connected but inactive window does not block maintenance. A running messaging gateway for the same profile owns these chores instead.
 
 The timer services its backend's profile. In-flight maintenance runs in a worker thread; closing the backend does not cooperatively interrupt that pass. Starting multiple independent serve processes for the same profile can still race the curator's interval check.
 
@@ -16889,7 +16889,7 @@ When scheduling jobs, you specify where the output goes:
 | `"mattermost"` | Mattermost home channel | |
 | `"email"` | Email | |
 | `"sms"` | SMS via Twilio | |
-| `"homeassistant"` | Home Assistant | |
+| `"homeassistant"` | Home Assistant (plugin) | Uses `HASS_HOME_CHANNEL`; requires the [`homeassistant` plugin](../messaging/homeassistant.md) |
 | `"dingtalk"` | DingTalk | |
 | `"feishu"` | Feishu/Lark | |
 | `"wecom"` | WeCom | |
@@ -21791,7 +21791,7 @@ def my_callback(session_id: str | None, platform: str, **kwargs):
 | `session_id` | `str` or `None` | The outgoing session ID. May be `None` if no active session existed. |
 | `platform` | `str` | `"cli"` or the messaging platform name (`"telegram"`, `"discord"`, etc.). |
 
-**Fires:** In CLI/TUI teardown and in gateway reset or shutdown paths. Gateway shutdown can finalize without a matching `on_session_reset`.
+**Fires:** In CLI/TUI teardown (including the end of a `hermes -z` one-shot run, success or failure) and in gateway reset or shutdown paths. Gateway shutdown can finalize without a matching `on_session_reset`.
 
 **Return value:** Ignored.
 
@@ -26014,7 +26014,7 @@ connected. An enabled platform can correctly show **Messaging gateway stopped**.
 | Signal | — | ✅ | ✅ | — | — | ✅ | — |
 | SMS | — | — | — | — | — | — | — |
 | Email | — | ✅ | ✅ | ✅ | — | — | — |
-| Home Assistant | — | — | — | — | — | — | — |
+| Home Assistant (plugin) | — | — | — | — | — | — | — |
 | Mattermost | ✅ | ✅ | ✅ | ✅ | — | ✅ | ✅ |
 | Matrix | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | DingTalk | — | ✅ | ✅ | — | ✅ | — | ✅ |
@@ -26706,7 +26706,7 @@ Each platform has its own toolset:
 | Signal | `hermes-signal` | Full tools including terminal |
 | SMS | `hermes-sms` | Full tools including terminal |
 | Email | `hermes-email` | Full tools including terminal |
-| Home Assistant | `hermes-homeassistant` | Full tools + HA device control (ha_list_entities, ha_get_state, ha_call_service, ha_list_services) |
+| Home Assistant (plugin) | `hermes-homeassistant` | Full tools + HA device control (ha_list_entities, ha_get_state, ha_call_service, ha_list_services) from the `homeassistant` catalog plugin |
 | Mattermost | `hermes-mattermost` | Full tools including terminal |
 | Matrix | `hermes-matrix` | Full tools including terminal |
 | DingTalk | `hermes-dingtalk` | Full tools including terminal |
@@ -26948,7 +26948,7 @@ Defaults to `false`. Only platforms whose adapter implements `delete_message` ho
 - [Signal Setup](signal.md)
 - [SMS Setup (Twilio)](sms.md)
 - [Email Setup](email.md)
-- [Home Assistant Integration](homeassistant.md)
+- [Home Assistant Integration](homeassistant.md) (plugin catalog)
 - [Mattermost Setup](mattermost.md)
 - [Matrix Setup](matrix.md)
 - [DingTalk Setup](dingtalk.md)
@@ -28534,6 +28534,10 @@ Any knob at `0` disables the whole WebSocket liveness probe. Values that fail to
 
 `websocket_event_max_silence_seconds` is the exception: it guards a single dimension (event dispatch), so `0` opts out of **that check only** — ready/ACK/latency keep guarding. A socket can stay ESTABLISHED and keep ACKing heartbeats while delivering zero Gateway events; heartbeat ACKs are frames without an event type, so no transport-side check can see that state. The default (4 hours) matches the outage window operators have observed in the field; a quiet guild can legitimately go hours without a single Gateway event, so keep this bound generous unless you know your traffic.
 
+:::tip[Shortcut: let the wizard do Steps 5–7]
+Create the application and copy the bot token (Steps 1–4), then run `hermes gateway setup` and pick **Discord**. Hermes checks the token with Discord, tells you if **Message Content Intent** is off (with a link straight to the toggle), prints a ready-made invite link for your server, and allowlists you as the bot's owner — no Developer Mode needed.
+:::
+
 ## Step 1: Create a Discord Application
 
 1. Go to the [Discord Developer Portal](https://discord.com/developers/applications) and sign in with your Discord account.
@@ -28561,7 +28565,7 @@ If you prefer to keep your bot private (Public Bot = OFF), you **must** use the 
 
 ## Step 3: Enable Privileged Gateway Intents
 
-This is the most critical step in the entire setup. Without the correct intents enabled, your bot will connect to Discord but **will not be able to read message content**.
+This is the most critical step in the entire setup. Hermes always asks Discord for message content, so if **Message Content Intent** is off, Discord **refuses the bot's connection** and the bot never comes online.
 
 On the **Bot** page, scroll down to **Privileged Gateway Intents**. You'll see three toggles:
 
@@ -28573,11 +28577,11 @@ On the **Bot** page, scroll down to **Privileged Gateway Intents**. You'll see t
 
 **Enable both Server Members Intent and Message Content Intent** by toggling them **ON**.
 
-- Without **Message Content Intent**, your bot receives message events but the message text is empty — the bot literally cannot see what you typed.
+- Without **Message Content Intent**, Discord rejects the connection; `gateway.log` shows "Discord rejected the connection because privileged Gateway Intents are not enabled".
 - Without **Server Members Intent**, the bot cannot resolve usernames for the allowed users list and may fail to identify who is messaging it.
 
 :::warning[This is the #1 reason Discord bots don't work]
-If your bot is online but never responds to messages, the **Message Content Intent** is almost certainly disabled. Go back to the [Developer Portal](https://discord.com/developers/applications), select your application → Bot → Privileged Gateway Intents, and make sure **Message Content Intent** is toggled ON. Click **Save Changes**.
+If your bot stays offline and `gateway.log` mentions privileged Gateway Intents, the **Message Content Intent** is disabled. Go back to the [Developer Portal](https://discord.com/developers/applications), select your application → Bot → Privileged Gateway Intents, and make sure **Message Content Intent** is toggled ON. Click **Save Changes**.
 :::
 
 **Regarding server count:**
@@ -28622,7 +28626,7 @@ This method requires **Public Bot** to be set to **ON** in Step 2. If you set Pu
 You can construct the invite URL directly using this format:
 
 ```
-https://discord.com/oauth2/authorize?client_id=YOUR_APP_ID&scope=bot+applications.commands&permissions=274878286912
+https://discord.com/oauth2/authorize?client_id=YOUR_APP_ID&scope=bot+applications.commands&permissions=309237763136
 ```
 
 Replace `YOUR_APP_ID` with the Application ID from Step 1.
@@ -28639,6 +28643,7 @@ These are the minimum permissions your bot needs:
 
 ### Recommended Additional Permissions
 
+- **Create Public Threads** — create isolated conversations with `/thread` and auto-threading
 - **Send Messages in Threads** — respond in thread conversations
 - **Add Reactions** — react to messages for acknowledgment
 
@@ -28646,8 +28651,13 @@ These are the minimum permissions your bot needs:
 
 | Level | Permissions Integer | What's Included |
 |-------|-------------------|-----------------|
-| Minimal | `117760` | View Channels, Send Messages, Read Message History, Attach Files |
-| Recommended | `274878286912` | All of the above plus Embed Links, Send Messages in Threads, Add Reactions |
+| Minimal | `117760` | View Channels, Send Messages, Embed Links, Attach Files, Read Message History |
+| Recommended | `309237763136` | All of the above plus Create Public Threads, Send Messages in Threads, Add Reactions |
+| Full (what `hermes gateway setup` prints) | `309240908864` | Recommended plus Connect and Speak (voice channels) |
+
+Existing installations do not gain newly requested permissions automatically.
+If you used an older Recommended URL, re-invite the bot with the URL above to
+grant **Create Public Threads**.
 
 ## Step 6: Invite to Your Server
 
@@ -28687,7 +28697,7 @@ Run the guided setup command:
 hermes gateway setup
 ```
 
-Select **Discord** when prompted, then paste your bot token and user ID when asked.
+Select **Discord** when prompted and paste your bot token. The wizard verifies it with Discord (a wrong or stale token is rejected before it is saved), checks the privileged intents, prints the invite link, and offers to allowlist the bot's owner — you. Extra users can be added by user ID or username.
 
 ### Option B: Manual Configuration
 
@@ -29282,7 +29292,7 @@ Refreshing the directory (`/channels refresh` on platforms that expose it, or a 
 
 ### Bot is online but not responding to messages
 
-**Cause**: Either Message Content Intent is disabled, or Discord auth is failing closed because no access policy is configured.
+**Cause**: Usually Discord auth is failing closed because no access policy is configured. (A disabled Message Content Intent keeps the bot offline instead; see Step 3.)
 
 **Fix**:
 
@@ -29334,6 +29344,12 @@ The gateway log should name the exact intent(s) Hermes requested. Until they are
 **Cause**: The bot is missing required permissions.
 
 **Fix**: Re-invite the bot with the correct permissions using the URL from Step 5, or manually adjust the bot's role permissions in Server Settings → Roles.
+
+If `/thread` reports Discord error `50001` (`Missing Access`), verify the bot's
+effective permissions in the parent channel. It needs **View Channel**, **Send
+Messages**, **Create Public Threads**, and **Send Messages in Threads**. Check
+the parent category and channel-specific permission overrides as well: an
+explicit deny there can override permissions granted by the server role.
 
 ### Bot is offline
 
@@ -30544,6 +30560,55 @@ WhatsApp periodically updates their Web protocol, which can temporarily break co
 with third-party bridges. When this happens, Hermes will update the bridge dependency. If the
 bot stops working after a WhatsApp update, pull the latest Hermes version and re-pair.
 :::
+
+## Multiple profiles
+
+The host multiplexer can serve a separate paired WhatsApp session for each profile.
+Run `hermes -p work whatsapp` to pair a secondary profile, then enable WhatsApp
+for that profile. An enabled profile without `creds.json` is skipped with the
+`whatsapp_unpaired` status and its pairing command.
+
+An explicit `platforms.whatsapp.extra.bridge_port` takes precedence. Otherwise,
+a secondary selects the first free port in 3001 to 3999 that no other profile's
+record claims, and saves it in its own `platforms/whatsapp/bridge_port` file for
+subsequent starts. Operators can pre-create that file with a port number; delete
+it to have a new port allocated. The launch profile uses port 3000 unless it
+already has that file (from serving as a secondary), in which case its gateway
+and `hermes send --to whatsapp:<chat_id>` both keep using the recorded port.
+
+A secondary adopts a bridge already running on its port only when its own
+session pidfile identifies that process (pid, kernel start time, and the port it
+was started on), which is
+what a gateway crash leaves behind. An unhealthy one is reaped by that same
+identity and restarted. Any other process bound on the port is a fatal error
+for that profile only. Set `platforms.whatsapp.extra.bridge_port` to a
+distinct free port, or stop the process holding it. Other
+profiles continue running. `hermes gateway status --profile work` reports the
+profile's own WhatsApp adapter rather than shared ingress.
+
+Profiles that each run their own gateway, rather than one multiplexed gateway,
+all use port 3000 unless configured otherwise. Give each one a distinct port in
+that profile's `config.yaml`:
+
+```yaml
+platforms:
+  whatsapp:
+    extra:
+      bridge_port: 3001        # one distinct port per profile
+```
+
+A gateway identifies a running bridge by the session directory the bridge
+reports in `/health`. A bridge serving another profile's session is never
+adopted and never stopped: the second profile's WhatsApp fails to start with
+`whatsapp_bridge_foreign_session`, naming the port and the other session. A
+process that holds the port but does not answer `/health` in time is left
+running too, and WhatsApp fails with the retryable
+`whatsapp_bridge_unresponsive`. `hermes send --to whatsapp:<chat_id>` and cron
+delivery check the same field and send nothing through another profile's bridge
+or through one whose `/health` fails. If you
+override `session_path`, keep it distinct per profile, or the profiles share one
+WhatsApp login. Bridges started by an older Hermes report no session directory
+and are restarted once, as after a bridge update.
 
 ## Two Modes
 
@@ -32759,10 +32824,30 @@ For more information on securing your Hermes Agent deployment, see the [Security
 
 # Home Assistant Integration
 
-Hermes Agent integrates with [Home Assistant](https://www.home-assistant.io/) in two ways:
+Hermes Agent integrates with [Home Assistant](https://www.home-assistant.io/) through the official **`homeassistant` plugin** from the [plugin catalog](../features/plugins.md). The plugin is maintained by Nous Research in [NousResearch/hermes-homeassistant](https://github.com/NousResearch/hermes-homeassistant) and is not part of Hermes core. It provides two things:
 
 1. **Gateway platform** — subscribes to real-time state changes via WebSocket and responds to events
-2. **Smart home tools** — four LLM-callable tools for querying and controlling devices via the REST API
+2. **Smart home tools** — four LLM-callable tools (the `homeassistant` toolset) for querying and controlling devices via the REST API
+
+## Install
+
+```bash
+hermes plugins install homeassistant
+```
+
+Plugins are installed per profile. To use Home Assistant in another profile, install it there too:
+
+```bash
+hermes -p <profile> plugins install homeassistant
+```
+
+The plugin declares its own Python dependency (`aiohttp`), so there is no pip extra to install. The old `hermes-agent[homeassistant]` extra has been removed.
+
+:::info Upgrading from a release that bundled Home Assistant
+Nothing to do. Every profile that was already using Home Assistant — `HASS_TOKEN` in its `.env`, `platforms.homeassistant` enabled (or given a `token`) in `config.yaml`, or the `homeassistant` toolset listed in `platform_toolsets` — gets the plugin installed automatically from the catalog by `hermes update` (for all profiles sharing the install). If that step could not run, Hermes installs it the first time the profile starts (agent or gateway start; this honours `security.allow_lazy_installs`). After a failed attempt (offline, catalog unreachable) starts retry at most once an hour; `hermes update` always retries. The outcome is reported in the terminal, the Desktop app and chat. This happens once per profile: if you later remove the plugin (`hermes plugins remove homeassistant`), it stays removed.
+
+Your configuration carries over unchanged: the same `HASS_TOKEN` / `HASS_URL` variables, the same `homeassistant` platform name and `platforms.homeassistant` keys, the same `homeassistant` toolset and tool names, and the same cron `deliver: homeassistant:<notify target>` syntax. One difference: like every plugin tool, the `ha_*` tools sit behind [Tool Search](../features/tools.md) (`tool_search` / `tool_call`) when it is on, instead of being listed directly.
+:::
 
 ## Setup
 
@@ -32784,10 +32869,13 @@ HASS_TOKEN=your-long-lived-access-token
 
 # Optional: HA URL (default: http://homeassistant.local:8123)
 HASS_URL=http://192.168.1.100:8123
+
+# Optional: default notify target for a bare `deliver: homeassistant`
+HASS_HOME_CHANNEL=mobile_app_my_phone
 ```
 
 :::info
-The `homeassistant` toolset is automatically enabled when `HASS_TOKEN` is set. Both the gateway platform and the device control tools activate from this single token.
+With the plugin installed, the `homeassistant` toolset is enabled automatically when `HASS_TOKEN` is set. Both the gateway platform and the device control tools activate from this single token.
 :::
 
 ### 3. Start the Gateway
@@ -32800,7 +32888,7 @@ Home Assistant will appear as a connected platform alongside any other messaging
 
 ## Available Tools
 
-Hermes Agent registers four tools for smart home control:
+The plugin registers four tools for smart home control in the `homeassistant` toolset:
 
 ### `ha_list_entities`
 
@@ -32889,6 +32977,7 @@ platforms:
   homeassistant:
     enabled: true
     extra:
+      url: http://192.168.1.100:8123   # optional; same as HASS_URL
       watch_domains:
         - climate
         - binary_sensor
@@ -32905,6 +32994,7 @@ platforms:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
+| `url` | `HASS_URL`, else `http://homeassistant.local:8123` | Home Assistant base URL |
 | `watch_domains` | *(none)* | Only watch these entity domains (e.g., `climate`, `light`, `binary_sensor`) |
 | `watch_entities` | *(none)* | Only watch these specific entity IDs |
 | `watch_all` | `false` | Set to `true` to receive **all** state changes (not recommended for most setups) |
@@ -32932,12 +33022,25 @@ State changes are formatted as human-readable messages based on domain:
 
 Outbound messages from the agent are delivered as **Home Assistant persistent notifications** (via `persistent_notification.create`). These appear in the HA notification panel with the title "Hermes Agent".
 
+The platform uses the `minimal` display defaults (no tool-progress or streaming chatter in notifications). Override them under `display.platforms.homeassistant` in `config.yaml` if you want more.
+
+### Cron and Webhook Delivery
+
+Scheduled jobs and webhook routes can deliver to Home Assistant:
+
+```yaml
+deliver: homeassistant:mobile_app_my_phone   # explicit notify target
+deliver: homeassistant                       # uses HASS_HOME_CHANNEL
+```
+
+The bare `homeassistant` form needs `HASS_HOME_CHANNEL` set to a default notify target. See [Scheduled Tasks](../features/cron.md) and [Webhooks](webhooks.md).
+
 ### Connection Management
 
 - **WebSocket** with 30-second heartbeat for real-time events
 - **Automatic reconnection** with backoff: 5s → 10s → 30s → 60s
 - **REST API** for outbound notifications (separate session to avoid WebSocket conflicts)
-- **Authorization** — HA events are always authorized (no user allowlist needed, since the `HASS_TOKEN` authenticates the connection)
+- **Authorization** — HA events are always authorized (no user allowlist or pairing needed: `HASS_TOKEN` authenticates the connection and there is no human sender)
 
 ## Security
 
@@ -33005,12 +33108,18 @@ Agent automatically:
 
 ## Troubleshooting
 
+**Platform or tools missing.**
+Check that the plugin is installed and enabled in the active profile with
+`hermes plugins list`. If it is missing, run `hermes plugins install homeassistant`
+(or `hermes -p <profile> plugins install homeassistant`) and restart the gateway.
+With `security.allow_lazy_installs` turned off, the automatic first-start install
+is skipped and you must install the plugin yourself.
+
 **Environment variables not picked up.**
 The adapter reads credentials from `~/.hermes/.env` (auto-merged at startup) or
 from `config.yaml`. Double-check the file lives under the active Hermes profile
 home and that there's no stray quoting around the URL/token. Restart the gateway
 after editing — env changes are only applied on process start.
-
 
 **REST auth failing (`401 Unauthorized`).**
 The token must be a *Long-Lived Access Token* created from your HA user profile
@@ -33107,7 +33216,7 @@ Routes define how different webhook sources are handled. Each route is a named e
 | `script` | No | Filter/transform script under `~/.hermes/scripts/`. The webhook payload is passed as JSON on stdin. JSON object stdout replaces the payload before templating; text stdout is exposed as `script_output`; empty stdout, `[SILENT]`, or a nonzero exit code ignores the webhook. |
 | `skills` | No | List of skill names to load for the agent run. |
 | `toolsets` | No | List of toolset keys (e.g. `["terminal", "file", "web"]`) that **replaces** the platform-level webhook toolset for runs triggered by this route only. Manual config edit only — not settable via `hermes webhook subscribe`, so agent-created subscriptions cannot self-grant elevated tools. Names are validated the same way as `platform_toolsets` entries (unknown or platform-restricted names are dropped). See [Per-route toolsets](#per-route-toolsets). |
-| `deliver` | No | Where to send the response: `github_comment`, `telegram`, `discord`, `slack`, `signal`, `sms`, `whatsapp`, `matrix`, `mattermost`, `homeassistant`, `email`, `dingtalk`, `feishu`, `wecom`, `weixin`, `bluebubbles`, `qqbot`, or `log` (default). |
+| `deliver` | No | Where to send the response: `github_comment`, `telegram`, `discord`, `slack`, `signal`, `sms`, `whatsapp`, `matrix`, `mattermost`, `homeassistant` (plugin), `email`, `dingtalk`, `feishu`, `wecom`, `weixin`, `bluebubbles`, `qqbot`, or `log` (default). |
 | `deliver_extra` | No | Additional delivery config — keys depend on `deliver` type (e.g. `repo`, `pr_number`, `chat_id`). Values support the same `{dot.notation}` templates as `prompt`. |
 | `deliver_only` | No | If `true`, skip the agent entirely — the rendered `prompt` template becomes the literal message that gets delivered. Zero LLM cost, sub-second delivery. See [Direct Delivery Mode](#direct-delivery-mode) for use cases. Requires `deliver` to be a real target (not `log`). |
 | `cron_job` | No | Fire an existing cron job (by ID or name) on each event instead of starting a fresh webhook agent session. The rendered `prompt` becomes transient per-run context; the job's own prompt, skills, model, and delivery settings apply. Mutually exclusive with `deliver_only`. See [Event-Triggered Cron Jobs](#event-triggered-cron-jobs). |
@@ -33371,7 +33480,7 @@ The `deliver` field controls where the agent's response goes after processing th
 | `whatsapp` | Routes the response to WhatsApp. Uses the home channel, or specify `chat_id` in `deliver_extra`. |
 | `matrix` | Routes the response to Matrix. Uses the home channel, or specify `chat_id` in `deliver_extra`. |
 | `mattermost` | Routes the response to Mattermost. Uses the home channel, or specify `chat_id` in `deliver_extra`. |
-| `homeassistant` | Routes the response to Home Assistant. Uses the home channel, or specify `chat_id` in `deliver_extra`. |
+| `homeassistant` | Routes the response to Home Assistant (requires the [`homeassistant` plugin](homeassistant.md)). Uses the home channel (`HASS_HOME_CHANNEL`), or specify `chat_id` in `deliver_extra`. |
 | `email` | Routes the response to Email. Uses the home channel, or specify `chat_id` in `deliver_extra`. |
 | `dingtalk` | Routes the response to DingTalk. Uses the home channel, or specify `chat_id` in `deliver_extra`. |
 | `feishu` | Routes the response to Feishu/Lark. Uses the home channel, or specify `chat_id` in `deliver_extra`. |
@@ -33816,7 +33925,7 @@ Speech-to-text supports eight providers: local faster-whisper (free, runs on-dev
 
 Hermes runs as a gateway bot on 27+ messaging platforms, all configured through the same `gateway` subsystem:
 
-- **[Telegram](../user-guide/messaging/telegram.md)**, **[Discord](../user-guide/messaging/discord.md)**, **[Slack](../user-guide/messaging/slack.md)**, **[WhatsApp](../user-guide/messaging/whatsapp.md)**, **[Signal](../user-guide/messaging/signal.md)**, **[Matrix](../user-guide/messaging/matrix.md)**, **[Mattermost](../user-guide/messaging/mattermost.md)**, **[Email](../user-guide/messaging/email.md)**, **[SMS](../user-guide/messaging/sms.md)**, **[DingTalk](../user-guide/messaging/dingtalk.md)**, **[Feishu/Lark](../user-guide/messaging/feishu.md)**, **[WeCom](../user-guide/messaging/wecom.md)**, **[WeCom Callback](../user-guide/messaging/wecom-callback.md)**, **[Weixin](../user-guide/messaging/weixin.md)**, **[BlueBubbles](../user-guide/messaging/bluebubbles.md)**, **[Buzz](../user-guide/messaging/buzz.md)**, **[QQ Bot](../user-guide/messaging/qqbot.md)**, **[Yuanbao](../user-guide/messaging/yuanbao.md)**, **[Home Assistant](../user-guide/messaging/homeassistant.md)**, **[Microsoft Teams](../user-guide/messaging/teams.md)**, **[Microsoft Teams Meetings](../user-guide/messaging/teams-meetings.md)**, **[Microsoft Graph Webhook](../user-guide/messaging/msgraph-webhook.md)**, **[Google Chat](../user-guide/messaging/google_chat.md)**, **[LINE](../user-guide/messaging/line.md)**, **[ntfy](../user-guide/messaging/ntfy.md)**, **[SimpleX](../user-guide/messaging/simplex.md)**, **[Open WebUI](../user-guide/messaging/open-webui.md)**, **[Webhooks](../user-guide/messaging/webhooks.md)**
+- **[Telegram](../user-guide/messaging/telegram.md)**, **[Discord](../user-guide/messaging/discord.md)**, **[Slack](../user-guide/messaging/slack.md)**, **[WhatsApp](../user-guide/messaging/whatsapp.md)**, **[Signal](../user-guide/messaging/signal.md)**, **[Matrix](../user-guide/messaging/matrix.md)**, **[Mattermost](../user-guide/messaging/mattermost.md)**, **[Email](../user-guide/messaging/email.md)**, **[SMS](../user-guide/messaging/sms.md)**, **[DingTalk](../user-guide/messaging/dingtalk.md)**, **[Feishu/Lark](../user-guide/messaging/feishu.md)**, **[WeCom](../user-guide/messaging/wecom.md)**, **[WeCom Callback](../user-guide/messaging/wecom-callback.md)**, **[Weixin](../user-guide/messaging/weixin.md)**, **[BlueBubbles](../user-guide/messaging/bluebubbles.md)**, **[Buzz](../user-guide/messaging/buzz.md)**, **[QQ Bot](../user-guide/messaging/qqbot.md)**, **[Yuanbao](../user-guide/messaging/yuanbao.md)**, **[Home Assistant](../user-guide/messaging/homeassistant.md)** (plugin), **[Microsoft Teams](../user-guide/messaging/teams.md)**, **[Microsoft Teams Meetings](../user-guide/messaging/teams-meetings.md)**, **[Microsoft Graph Webhook](../user-guide/messaging/msgraph-webhook.md)**, **[Google Chat](../user-guide/messaging/google_chat.md)**, **[LINE](../user-guide/messaging/line.md)**, **[ntfy](../user-guide/messaging/ntfy.md)**, **[SimpleX](../user-guide/messaging/simplex.md)**, **[Open WebUI](../user-guide/messaging/open-webui.md)**, **[Webhooks](../user-guide/messaging/webhooks.md)**
 
 See the [Messaging Gateway overview](../user-guide/messaging/index.md) for the platform comparison table and setup guide.
 
@@ -33840,7 +33949,7 @@ Each platform's setup page walks through what to do once you're there.
 
 ## Home Automation
 
-- **[Home Assistant](../user-guide/messaging/homeassistant.md)** — Control smart home devices via four dedicated tools (`ha_list_entities`, `ha_get_state`, `ha_list_services`, `ha_call_service`). The Home Assistant toolset activates automatically when `HASS_TOKEN` is configured.
+- **[Home Assistant](../user-guide/messaging/homeassistant.md)** — Control smart home devices via four dedicated tools (`ha_list_entities`, `ha_get_state`, `ha_list_services`, `ha_call_service`) and react to real-time state changes through the gateway. Ships as the `homeassistant` catalog plugin (`hermes plugins install homeassistant`); its toolset activates automatically when `HASS_TOKEN` is configured.
 
 ## Plugins
 
@@ -36341,7 +36450,7 @@ If you change MCP config, use:
 /reload-mcp
 ```
 
-This reloads MCP servers from config and refreshes the available tool list. It is also the explicit way to re-probe availability-gated tools (Docker, `HASS_TOKEN`, OAuth…): a session's tool set is otherwise frozen, so a credential or daemon that appears mid-session is only picked up on `/reload-mcp`, `/new`, or context compaction. For runtime tool changes pushed by the server itself, see [Dynamic Tool Discovery](#dynamic-tool-discovery) above.
+This reloads MCP servers from config and refreshes the available tool list. It is also the explicit way to re-probe availability-gated tools (Docker, plugin credentials such as `HASS_TOKEN`, OAuth…): a session's tool set is otherwise frozen, so a credential or daemon that appears mid-session is only picked up on `/reload-mcp`, `/new`, or context compaction. For runtime tool changes pushed by the server itself, see [Dynamic Tool Discovery](#dynamic-tool-discovery) above.
 
 A running messaging gateway (`hermes gateway run`) also watches `config.yaml` on its own: within about a minute of you removing an `mcp_servers` entry or setting `enabled: false`, that server's connection is torn down; a newly added entry is connected. A server whose first connect failed (an unreachable host, or an OAuth server on a headless box that had no token yet) is retried automatically on its connect cooldown schedule (30 s, doubling up to 10 min) once you fix the cause. No restart or `/reload-mcp` needed for the edit to take effect.
 
@@ -43686,8 +43795,9 @@ hermes-agent/
 │
 ├── plugins/platforms/        # Bundled platform plugins: telegram, discord, slack,
 │                             #   whatsapp, matrix, mattermost, email, sms, dingtalk,
-│                             #   feishu, wecom, homeassistant, irc, line, teams,
-│                             #   google_chat, buzz, ntfy, photon, raft, simplex
+│                             #   feishu, wecom, irc, line, teams, google_chat,
+│                             #   buzz, ntfy, photon, raft, simplex
+│                             #   (Home Assistant: `homeassistant` catalog plugin)
 │
 ├── acp_adapter/              # ACP server (VS Code / Zed / JetBrains)
 ├── cron/                     # Scheduler (jobs.py, scheduler.py)
@@ -45336,7 +45446,6 @@ plugins/platforms/                  # plugin-packaged adapters (one dir each)
 ├── line/adapter.py         # LINE Messaging API
 ├── teams/adapter.py        # Microsoft Teams
 ├── irc/adapter.py          # IRC (canonical scoped-lock example)
-├── homeassistant/adapter.py # Home Assistant conversation integration
 └── …                       # google_chat, ntfy, photon, raft, simplex, …
 
 gateway/platforms/                  # core base + legacy direct adapters
@@ -47199,6 +47308,47 @@ When you call `ctx.register_platform()`, the following integration points are ha
 | `hermes tools` / `hermes skills` | Plugin platforms in per-platform config |
 | Token lock (multi-profile) | Use `acquire_scoped_lock()` in your `connect()` |
 | Orphaned config warning | Descriptive log when plugin is missing |
+| Service-event authorization | `trusted_inbound=True` skips user allowlists/pairing (see below) |
+| Display defaults | `display_tier` picks the built-in tool-progress/streaming tier |
+| Profile clone credential strip | `shared_env_prefixes` keeps tool-shared keys when the adapter is not in use |
+
+### Service adapters: `trusted_inbound`, `display_tier`, `shared_env_prefixes`
+
+Three optional `ctx.register_platform(...)` / `PlatformEntry` fields exist for adapters that bridge a
+service rather than a chat network. The [Home Assistant plugin](https://github.com/NousResearch/hermes-homeassistant)
+is the reference consumer.
+
+| Field | Type / default | Effect |
+|---|---|---|
+| `trusted_inbound` | `bool = False` | Every inbound event comes from the service the adapter authenticated to with its own credential; there is no human sender. The gateway's user allowlists and DM pairing do not apply to this platform. Home Assistant's event bus is the consumer. **Never set it for a chat platform** — it would let anyone who can message the bot drive the agent. |
+| `display_tier` | `str = ''` | One of `'high'`, `'medium'`, `'low'`, `'minimal'`: the built-in per-platform display defaults tier (tool progress, streaming, interim messages) used when the user has no `display.platforms.<name>` override. Empty keeps the generic plugin default. Home Assistant uses `'minimal'`. |
+| `shared_env_prefixes` | `tuple[str, ...] = ()` | Env prefixes the platform shares with a non-channel capability, such as the same plugin's tools (Home Assistant: `('HASS_',)`). [Profile clones](../user-guide/profiles.md) strip keys under these prefixes only when the source profile actually runs the adapter, so a profile that only uses the tools keeps its credentials. |
+
+```python
+import dataclasses
+
+def register(ctx):
+    kwargs = dict(
+        name="my_service",
+        label="My Service",
+        adapter_factory=MyServiceAdapter,
+        check_fn=check_requirements,
+    )
+    # Feature-detect: older cores reject unknown register_platform kwargs.
+    from gateway.platform_registry import PlatformEntry
+    known = {f.name for f in dataclasses.fields(PlatformEntry)}
+    for key, value in (
+        ("trusted_inbound", True),
+        ("display_tier", "minimal"),
+        ("shared_env_prefixes", ("MY_SERVICE_",)),
+    ):
+        if key in known:
+            kwargs[key] = value
+    ctx.register_platform(**kwargs)
+```
+
+Feature-detect these fields with `dataclasses.fields(PlatformEntry)` as above so the plugin stays loadable on
+older Hermes cores that predate them.
 
 ## Standalone send-path extensions
 
@@ -51915,8 +52065,9 @@ These are set automatically by the Docker terminal backend when `proxy.enabled: 
 | `MATRIX_MAX_MEDIA_BYTES` | Maximum Matrix media upload/download size in bytes (default: `104857600`) |
 | `MATRIX_RECOVERY_KEY` | Recovery key for cross-signing verification after device key rotation. Recommended for E2EE setups with cross-signing enabled. |
 | `MATRIX_RECOVERY_KEY_OUTPUT_FILE` | Optional one-time path for a generated Matrix recovery key. Created with mode `0600` and never overwritten. |
-| `HASS_TOKEN` | Home Assistant Long-Lived Access Token (enables HA platform + tools) |
-| `HASS_URL` | Home Assistant URL (default: `http://homeassistant.local:8123`) |
+| `HASS_TOKEN` | Home Assistant plugin: Long-Lived Access Token (enables the HA platform + tools; requires the `homeassistant` catalog plugin, see [Home Assistant](../user-guide/messaging/homeassistant.md)) |
+| `HASS_URL` | Home Assistant plugin: Home Assistant URL (default: `http://homeassistant.local:8123`) |
+| `HASS_HOME_CHANNEL` | Home Assistant plugin: default notify target for a bare `deliver: homeassistant` (cron, webhooks) |
 | `WEBHOOK_ENABLED` | Enable the webhook platform adapter (`true`/`false`) |
 | `WEBHOOK_PORT` | HTTP server port for receiving webhooks (default: `8644`) |
 | `WEBHOOK_SECRET` | Global HMAC secret for webhook signature validation (used as fallback when routes don't specify their own) |
@@ -52359,7 +52510,7 @@ Use `hermes config set` to set environment variables — every `UPPER_SNAKE` nam
 
 This page documents Hermes' built-in tools, grouped by toolset. Availability varies by platform, credentials, and enabled toolsets.
 
-**Quick counts (current registry):** ~100 tools — 10 browser tools (core) + 2 CDP-gated browser tools + 5 browser-vault tools + `browser_exec`, 4 file tools, 4 Home Assistant tools, 2 terminal tools (`terminal`, `process_manage`), 11 desktop-GUI tools (`read_terminal`, `close_terminal`, `desktop_preview`, `drive_preview`, `annotate_preview`, `read_window_below`, `focus_pane`, `react_to_message`, `gui_tour`, `show_tip`, `apply_layout` — desktop-app sessions only), 2 web tools, 5 Feishu tools, 7 Spotify tools (registered by the bundled `spotify` plugin), 5 Yuanbao tools, 14 kanban tools (registered when the kanban dispatcher spawns the agent), 1 project tool (`desktop_project`; desktop/GUI sessions), 2 Discord tools, 3 video tools (`video_generate`, `xai_video_edit`, `xai_video_extend`), and a handful of standalone tools (`memory`, `clarify`, `delegate_task`, `execute_code`, `cronjob_manage`, `session_search`, `skill_view`/`skill_manage`/`skills_list`, `text_to_speech`, `image_generate`, `vision_analyze`, `video_analyze`, `todo_list`, `computer_use`, `x_search`).
+**Quick counts (current registry):** ~100 tools — 10 browser tools (core) + 2 CDP-gated browser tools + 5 browser-vault tools + `browser_exec`, 4 file tools, 2 terminal tools (`terminal`, `process_manage`), 11 desktop-GUI tools (`read_terminal`, `close_terminal`, `desktop_preview`, `drive_preview`, `annotate_preview`, `read_window_below`, `focus_pane`, `react_to_message`, `gui_tour`, `show_tip`, `apply_layout` — desktop-app sessions only), 2 web tools, 5 Feishu tools, 7 Spotify tools (registered by the bundled `spotify` plugin), 5 Yuanbao tools, 14 kanban tools (registered when the kanban dispatcher spawns the agent), 1 project tool (`desktop_project`; desktop/GUI sessions), 2 Discord tools, 3 video tools (`video_generate`, `xai_video_edit`, `xai_video_extend`), and a handful of standalone tools (`memory`, `clarify`, `delegate_task`, `execute_code`, `cronjob_manage`, `session_search`, `skill_view`/`skill_manage`/`skills_list`, `text_to_speech`, `image_generate`, `vision_analyze`, `video_analyze`, `todo_list`, `computer_use`, `x_search`).
 
 :::tip MCP Tools
 In addition to built-in tools, Hermes can load tools dynamically from MCP servers. MCP tools appear with the prefix `mcp__<server>__` (e.g., `mcp__github__create_issue` for the `github` MCP server). See [MCP Integration](../user-guide/features/mcp.md) for configuration.
@@ -52470,15 +52621,6 @@ Scoped to the Feishu document-comment handler. Drives comment read/write operati
 
 For local files, a full unredacted read (including all pages of the same file version) or a successful `write_file` supplies a whole-file baseline. Reading a smaller region afterward does not discard that baseline while the bytes remain unchanged. A changed file, an unread file, or a view with hidden/redacted or clamped content still needs a full current read before replacement; `patch` remains available for targeted edits. Writes made through terminal commands or `execute_code` do not establish a `write_file` baseline.
 
-## `homeassistant` toolset
-
-| Tool | Description | Requires environment |
-|------|-------------|----------------------|
-| `ha_call_service` | Call a Home Assistant service to control a device. Use ha_list_services to discover available services and their parameters for each domain. | — |
-| `ha_get_state` | Get the detailed state of a single Home Assistant entity, including all attributes (brightness, color, temperature setpoint, sensor readings, etc.). | — |
-| `ha_list_entities` | List Home Assistant entities. Optionally filter by domain (light, switch, climate, sensor, binary_sensor, cover, fan, etc.) or by area name (living room, kitchen, bedroom, etc.). | — |
-| `ha_list_services` | List available Home Assistant services (actions) for device control. Shows what actions can be performed on each device type and what parameters they accept. Use this to discover how to control devices found via ha_list_entities. | — |
-
 ## `computer_use` toolset
 
 | Tool | Description | Requires environment |
@@ -52488,6 +52630,8 @@ For local files, a full unredacted read (including all pages of the same file ve
 
 :::note
 **Honcho tools** (`honcho_profile`, `honcho_search`, `honcho_context`, `honcho_reasoning`, `honcho_conclude`) are no longer built-in. They are available via the Honcho memory provider plugin from the plugin catalog (`hermes plugins install honcho`). See [Memory Providers](../user-guide/features/memory-providers.md) for installation and usage.
+
+**Home Assistant tools** (`ha_list_entities`, `ha_get_state`, `ha_list_services`, `ha_call_service`, toolset `homeassistant`) are no longer built-in. They come from the `homeassistant` catalog plugin (`hermes plugins install homeassistant`). See [Home Assistant](../user-guide/messaging/homeassistant.md).
 :::
 
 ## `image_gen` toolset
@@ -52800,7 +52944,7 @@ Or in-session:
 ```
 /tools list
 /tools disable browser
-/tools enable homeassistant
+/tools enable spotify
 ```
 
 ## Core Toolsets
@@ -52820,7 +52964,6 @@ Or in-session:
 | `feishu_doc` | `feishu_doc_read` | Read Feishu/Lark document content. Used by the Feishu document-comment intelligent-reply handler. |
 | `feishu_drive` | `feishu_drive_add_comment`, `feishu_drive_list_comments`, `feishu_drive_list_comment_replies`, `feishu_drive_reply_comment` | Feishu/Lark drive comment operations. Scoped to the comment agent; not exposed on `hermes-cli` or other messaging toolsets. |
 | `file` | `patch`, `read_file`, `search_files`, `write_file` | File reading, writing, searching, and editing. |
-| `homeassistant` | `ha_call_service`, `ha_get_state`, `ha_list_entities`, `ha_list_services` | Smart home control via Home Assistant. Only available when `HASS_TOKEN` is set. |
 | `computer_use` | `computer_use` | Background desktop control via cua-driver — does not steal cursor/focus. Works with any tool-capable model. macOS, Windows, and Linux; requires `cua-driver` on `$PATH`. |
 | `context_engine` | (varies) | Runtime tools exposed by the active context-engine plugin (empty until a plugin populates it). |
 | `image_gen` | `image_generate` | Text-to-image generation via FAL.ai (with opt-in OpenAI / xAI backends). |
@@ -52850,8 +52993,8 @@ Platform toolsets define the complete tool configuration for a deployment target
 
 | Toolset | Differences from `hermes-cli` |
 |---------|-------------------------------|
-| `hermes-cli` | Full toolset — the default for interactive CLI sessions. Includes file, terminal, web, browser, memory, skills, vision, image_gen, todo, tts, delegation, code_execution, cronjob, session_search, clarify, computer_use, Home Assistant, and the kanban tools (all check_fn-gated at runtime). |
-| `hermes-acp` | Drops `clarify`, `cronjob`, `image_generate`, `text_to_speech`, `computer_use`, all four Home Assistant tools, and the kanban tools. Focused on coding tasks in IDE context. |
+| `hermes-cli` | Full toolset — the default for interactive CLI sessions. Includes file, terminal, web, browser, memory, skills, vision, image_gen, todo, tts, delegation, code_execution, cronjob, session_search, clarify, computer_use, and the kanban tools (all check_fn-gated at runtime). |
+| `hermes-acp` | Drops `clarify`, `cronjob`, `image_generate`, `text_to_speech`, `computer_use`, and the kanban tools. Focused on coding tasks in IDE context. |
 | `hermes-api-server` | Drops `clarify`, `text_to_speech`, `computer_use`, and the kanban tools. Keeps everything else — suitable for programmatic access where user interaction isn't possible. |
 | `hermes-cron` | Same as `hermes-cli`. |
 | `hermes-telegram` | Same as `hermes-cli`. |
@@ -52871,9 +53014,10 @@ Platform toolsets define the complete tool configuration for a deployment target
 | `hermes-wecom-callback` | Same as `hermes-cli`. |
 | `hermes-weixin` | Same as `hermes-cli`. |
 | `hermes-yuanbao` | Adds the five `yb_*` tools (DM/group/sticker) on top of `hermes-cli`. |
-| `hermes-homeassistant` | Same as `hermes-cli` (the Home Assistant tools are already present by default and activate when `HASS_TOKEN` is set). |
 | `hermes-webhook` | Restricted safe subset — only `web_search`, `web_extract`, `vision_analyze`, and `clarify`. Webhook-triggered runs get no terminal, file, or browser access. |
 | `hermes-gateway` | Internal gateway orchestrator toolset — union of every `hermes-<platform>` toolset; used when the gateway needs to accept any message source. |
+
+Platforms provided by plugins get an implicit `hermes-<platform>` bundle that is not part of `hermes-gateway`. For example, `hermes-homeassistant` still resolves once the `homeassistant` catalog plugin is installed, but it is no longer a built-in toolset.
 
 ## Dynamic Toolsets
 
@@ -52889,7 +53033,7 @@ mcp_servers:
     args: ["-y", "@modelcontextprotocol/server-github"]
 ```
 
-This creates a `mcp-github` toolset you can reference in `--toolsets` or platform configs. The bare server name (`github`) works as an alias. If a server is named like a built-in toolset (`homeassistant`, `browser`), that name resolves to the built-in tools **plus** the server's `mcp__<server>__*` tools; neither side shadows the other.
+This creates a `mcp-github` toolset you can reference in `--toolsets` or platform configs. The bare server name (`github`) works as an alias. If a server is named like a built-in toolset (`browser`, `web`), that name resolves to the built-in tools **plus** the server's `mcp__<server>__*` tools; neither side shadows the other.
 
 ### Plugin toolsets
 
@@ -52917,7 +53061,7 @@ custom_toolsets:
 
 A handful of tools have an additional availability check on top of toolset membership and are **not** turned on by `all`/`*` alone:
 
-- **Capability-gated** tools (browser, `computer_use`, `code_execution`, Feishu, Home Assistant, cronjob) appear only when their backend/credential prerequisite is configured.
+- **Capability-gated** tools (browser, `computer_use`, `code_execution`, Feishu, cronjob) appear only when their backend/credential prerequisite is configured.
 - **Workflow-gated** tools — the `kanban` toolset — are deliberately opt-in. `all`/`*` does **not** enable kanban; you must list `kanban` explicitly (or be a dispatcher-spawned worker with `HERMES_KANBAN_TASK` set). Kanban tools mutate shared board state, so they stay off by default even under `all`.
 
 ## Relationship to `hermes tools`
@@ -56734,7 +56878,7 @@ Most platforms also accept an optional thread/topic as a third segment: `platfor
 | Email | `email`, `email:<address>` | `email:alerts@example.com` |
 | Weixin | `weixin`, `weixin:<wxid>` | `weixin:wxid_abc123` |
 | Mattermost | `mattermost` or `mattermost:<channel_id>` | Bare name delivers to Mattermost home |
-| Home Assistant | `homeassistant` or `homeassistant:<conversation>` | Bare name delivers to HA conversation |
+| Home Assistant (plugin) | `homeassistant` or `homeassistant:<notify target>` | Bare name delivers to `HASS_HOME_CHANNEL`; needs the `homeassistant` catalog plugin |
 | DingTalk | `dingtalk` or `dingtalk:<chat_id>` | Bare name delivers to DingTalk |
 | WeCom | `wecom` or `wecom:<chat_id>` | Bare name delivers to WeCom |
 | BlueBubbles | `bluebubbles` or `bluebubbles:<chat_guid>` | Bare name delivers to iMessage via BlueBubbles |
@@ -72314,7 +72458,7 @@ Delivery targets are case-sensitive and require the correct platform to be confi
 | `local` | Write access to `~/.hermes/cron/output/` |
 | `origin` | Delivers to the chat where the job was created |
 
-Other supported platforms include `mattermost`, `homeassistant`, `dingtalk`, `feishu`, `wecom`, `weixin`, `bluebubbles`, `qqbot`, and `webhook`. You can also target a specific chat with `platform:chat_id` syntax (e.g., `telegram:-1001234567890`).
+Other supported platforms include `mattermost`, `homeassistant` (plugin), `dingtalk`, `feishu`, `wecom`, `weixin`, `bluebubbles`, `qqbot`, and `webhook`. You can also target a specific chat with `platform:chat_id` syntax (e.g., `telegram:-1001234567890`).
 
 If delivery fails, the job still runs — it just won't send anywhere. Check `hermes cron list` for updated `last_error` field (if available).
 
@@ -87852,6 +87996,12 @@ That's the whole flow. The server starts and stops with Hermes, restarts
 survive app restarts, and switching back to a cloud provider is one click
 in the model picker.
 
+From a terminal, `hermes model` → **Local models** runs the same setup: it
+lists the catalog priced for your machine (★ marks the recommendation),
+installs the pinned engine, downloads the model with live progress, starts
+the server, and makes the model your default. Models already on disk are
+offered too. Ctrl+C pauses a download; choosing the model again resumes it.
+
 ## How Hermes picks what to download
 
 Every model in the catalog is priced against **your machine** before you
@@ -87978,7 +88128,7 @@ Selecting a local model as your main model uses the standard
 ## Requirements and limits
 
 - **Windows:** CUDA on supported NVIDIA targets, Vulkan on x64, or CPU.
-  **Linux:** Vulkan or CPU; the pinned release has no prebuilt CUDA archive.
+  **Linux:** CUDA on x64 and arm64 NVIDIA (needs a CUDA 13 driver), Vulkan, or CPU.
   **macOS:** Metal or CPU. HIP/ROCm is an explicit choice on supported x64
   targets. Unsupported backend/target pairs fail before any download.
 - `backend: auto` prefers CUDA for NVIDIA and Vulkan for AMD and Intel GPUs,
@@ -94661,17 +94811,15 @@ no API server is enabled); it serves three kinds of profile-prefixed paths:
   adapter instance built without a port; the default listener forwards
   `/p/<profile>/<the adapter's usual path>` to it. See
   [Inbound-port platforms under the multiplexer](#inbound-port-platforms-under-the-multiplexer).
-- **WhatsApp (bridge) and Relay are shared ingress owned by the default profile.**
-  The multiplexer never starts them for a secondary: `WHATSAPP_ENABLED=true` in
-  `profiles/work/.env` does nothing on its own. Enable and configure them on the
-  default profile (their inbound is routed to profiles via `profile_routes`), or
-  disable them in the secondary. The gateway logs one INFO line per skipped
-  secondary platform, and if **no** profile runs it a WARNING says the platform
-  is not being served; `hermes gateway status --profile work` shows
-  `whatsapp: not served under multiplex (shared ingress owned by default)`.
-  The one exception is a profile that opted out with `gateway.standalone:
-  true` — it runs its own WhatsApp bridge and relay in its own gateway, as any
-  standalone gateway does.
+- **WhatsApp (bridge) runs per paired profile.** Pair each secondary with
+  `hermes -p work whatsapp`. Each profile uses its own session and bridge port;
+  an unpaired profile is skipped with `whatsapp_unpaired` and a pairing remedy.
+  See [WhatsApp multi-profile setup](messaging/whatsapp.md#multiple-profiles).
+- **Relay remains shared ingress owned by the default profile.** Enable and
+  configure Relay on the default profile, then route inbound to profiles via
+  `profile_routes`. A secondary-only Relay configuration is reported as not served.
+  A profile that opted out with `gateway.standalone: true` runs its own relay
+  in its own gateway, as any standalone gateway does.
 
 Authentication follows the profile named in the URL. Unprefixed endpoints keep
 using the default listener's existing credentials.
@@ -94916,7 +95064,7 @@ profile and never shares with the default or any sibling:
 | Working directory of a turn (unset `terminal.cwd`) | Same rule as a standalone gateway: `$HOME` for the local backend, sandbox default otherwise | Never the directory the multiplexer process was launched from |
 | Command approvals (`command_allowlist`, "always" choices) | The profile's own `config.yaml` | A default-profile "always" never pre-approves a secondary's command; a secondary's choice is saved to its own config |
 | Sandbox credential-file mounts (`terminal.credential_files`), `security.redact_secrets`, `browser.*` engine/headed flags, `lsp.*`, auxiliary-provider health marks, `logs/mcp-stderr.log` | The profile's own `config.yaml` / `.env` | Documented default — never the launch profile's cached value |
-| Cloud-SDK credential clients (Bedrock boto3 clients + model discovery, Azure Entra credential), credential-fetched catalogs (DeepInfra, Copilot context limits, Nous reasoning caps, Ramp Router efforts, xAI / OpenRouter image models, custom-endpoint `/models`), Camofox VNC address, computer-use aux-vision routing, skill-sync push, remote-backend probe text, learned image token costs, `display.skin`, guest-mint back-off, banner skills, Yuanbao "active" adapter, Langfuse client | The profile's own `.env` / `config.yaml` / `<home>/cache` | Documented default — never the launch profile's cached value or its credentials |
+| Cloud-SDK credential clients (Bedrock boto3 clients + model discovery, Azure Entra credential), credential-fetched catalogs (DeepInfra, Copilot context limits, Nous reasoning caps, Ramp Router efforts, xAI / OpenRouter image models, custom-endpoint `/models`), Camofox VNC address, computer-use aux-vision routing, remote-backend probe text, learned image token costs, `display.skin`, guest-mint back-off, banner skills, Yuanbao "active" adapter, Langfuse client | The profile's own `.env` / `config.yaml` / `<home>/cache` | Documented default — never the launch profile's cached value or its credentials |
 | Session-search knobs (`sessions.cjk_fts`, `sessions.search_slow_ms`) | The profile's `config.yaml` | Documented default — never the default profile's bridged value |
 | RoomLink capability catalog and the signed execution policy it advertises to a remote Bot (`approvals.mode`, `agent.max_turns`, `platform_toolsets.api_server`) | The served profile named by the request (`/p/<profile>/v1/room-members/...`, the RPC `profile` param); `target_profile` is **required** on every catalog — there is no `HERMES_PROFILE` fallback | Invitation/capabilities fail with the offending `target_profile` named; a profile that does not exist is refused, never resolved from the launch profile's config |
 | Platform proxies (`TELEGRAM_PROXY`, `DISCORD_PROXY`, `HTTPS_PROXY`, …) | The profile's own `.env` | Direct connection — never the default profile's proxy |

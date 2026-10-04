@@ -120,7 +120,7 @@ Repo: https://github.com/NousResearch/hermes-agent
 - [SMS](./user-guide/messaging/sms.md): Set up Hermes Agent as an SMS chatbot via Twilio
 - [Matrix](./user-guide/messaging/matrix.md): Set up Hermes Agent as a Matrix bot
 - [Mattermost](./user-guide/messaging/mattermost.md): Set up Hermes Agent as a Mattermost bot
-- [Home Assistant](./user-guide/messaging/homeassistant.md): Control your smart home with Hermes Agent via Home Assistant integration.
+- [Home Assistant](./user-guide/messaging/homeassistant.md): Control your smart home with Hermes Agent via the Home Assistant plugin from the plugin catalog.
 - [Webhooks](./user-guide/messaging/webhooks.md): Receive events from GitHub, GitLab, and other services to trigger Hermes agent runs
 - [A2A (Agent-to-Agent)](./user-guide/messaging/a2a.md)
 - [BlueBubbles (iMessage)](./user-guide/messaging/bluebubbles.md)
