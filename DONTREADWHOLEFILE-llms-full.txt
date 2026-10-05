@@ -1006,14 +1006,12 @@ git -C $repo rev-list --objects --missing=error --all | Out-Null; $LASTEXITCODE 
 
 The installer's checkout is a partial clone: git downloads trees and blobs on demand, and each
 on-demand download is written as its own small pack. `hermes update` and `hermes update --check`
-fold them back together with `git gc --auto` (git's own `gc.autoPackLimit`, 50 by default), so a
-healthy checkout pays a no-op. They also set `maintenance.commit-graph.enabled`,
-`gc.writeCommitGraph` and `fetch.writeCommitGraph` to `false` in that checkout, because a
-commit-graph write over commits the graph has not seen yet downloads every one of their trees. Leave those settings alone, and leave
-`gc.auto` at its default: `gc.auto=0` stops the fold. The first fold on a checkout that has
-piled up thousands of packs is a full repack and can take several minutes; the update says so
-before it starts, and if the fold runs past 20 minutes it stops and prints the command below.
-To fold by hand (with Hermes closed):
+set `maintenance.commit-graph.enabled`, `gc.writeCommitGraph` and `fetch.writeCommitGraph` to
+`false` in that checkout, because a commit-graph write over commits the graph has not seen yet
+downloads every one of their trees. Leave those settings alone, and leave `gc.auto` at its
+default so git's own automatic gc can still fold packs. The update does not fold them itself:
+on a large checkout that fold is a full repack that can run for many minutes. To fold by hand
+(with Hermes closed):
 
 ```bash
 git -C "$repo" -c gc.writeCommitGraph=false gc --auto
@@ -43402,6 +43400,123 @@ We value contributions in this order:
 6. **New tools** — rarely needed; most capabilities should be skills
 7. **Documentation** — fixes, clarifications, new examples
 
+## Contribution rubric
+
+The project's intent layer, summarised in the root `AGENTS.md`; this is the long form with the
+examples. Hermes ships a lot: most merges are bug fixes and the product surface (platforms,
+providers, models, desktop/TUI features) expands on purpose. The restraint targets the core agent
+and the model tool schema, where every addition is paid for on every API call: expansive at the
+edges, conservative at the waist.
+
+### What we want
+
+- **Fix real bugs, well.** Reproduce the symptom on current `main`, point to the exact line
+  where it manifests, and fix the whole bug class — sibling call paths included.
+- **Expand reach at the edges.** New adapters, channels, providers, models, desktop/TUI/
+  dashboard features land routinely, including large ones — as long as they integrate with
+  the existing setup/config UX (`hermes tools`, `hermes setup`, auto-install) rather than
+  bolting on a raw env var.
+- **Refactor god-files into clean modules.** Huge mechanical `+N/-N` extraction PRs are
+  wanted work. "Every line traces to the request" applies to *feature* PRs; a declared
+  refactor's request IS the extraction.
+- **Keep the core narrow.** Prefer, in order: extend existing code → CLI command + skill →
+  service-gated tool (`check_fn`) → plugin → MCP server in the catalog → new core tool (last
+  resort). See the Footprint Ladder below.
+- **Extend, don't duplicate.** Check whether existing infrastructure covers the use case
+  before adding a module/manager/hook. When 3+ open PRs integrate the same *category*
+  (memory backends, providers, notifiers), design an ABC + orchestrator, wrap the existing
+  built-in as the first provider, and turn the competing PRs into plugins against it.
+- **Behavior contracts over snapshots.** Tests assert how two pieces of data relate, never
+  freeze a current value (see `tests/AGENTS.md`).
+- **E2E validation, not just green unit mocks.** Anything touching resolution chains, config
+  propagation, security boundaries, remote backends, or file/network I/O must exercise the
+  real path with real imports against a temp `HERMES_HOME` — two of them (A→B→A) when the
+  change touches profile scope. Mocks hide integration bugs.
+- **Cache-, alternation-, and invariant-safe.** Preserve prompt caching, strict role
+  alternation (never two same-role messages in a row; never a synthetic user message injected
+  mid-loop), and a system prompt byte-stable for the life of a conversation.
+- **Contributor credit preserved.** Salvage external work by cherry-picking (rebase-merge) so
+  authorship survives; build on top rather than reimplementing.
+
+### What we don't want (rejected even when well-built)
+
+- **Speculative infrastructure.** Hooks/callbacks/extension points with no concrete consumer.
+  Adding a hook is easy; removing one after plugins depend on it is hard. A hook with a real,
+  stated use case is NOT speculative even if the consumer ships separately.
+- **New `HERMES_*` env vars for non-secret config.** `.env` is for secrets only. Behavioral
+  settings (timeouts, thresholds, flags, display prefs) go in `config.yaml`; bridge to an
+  internal env var in code if the mechanism needs one. Reject "set X in your .env" docs
+  unless X is a credential.
+- **A new core tool when terminal + file (or a skill) already do the job.** If the only
+  barrier is file visibility on a remote backend, fix the mount, not the toolset.
+- **Lazy-reading escape hatches on instructional tools.** No `offset`/`limit` pagination on
+  tools that load content the agent must read fully (skills, prompts, playbooks) — models
+  read page 1 and skip the rest.
+- **"Fixes" that destroy the feature they secure.** Read the original intent
+  (`git log -p -S`) before restricting behavior; find a fix that preserves the feature.
+- **Outbound telemetry / usage attribution without opt-in gating.** No analytics,
+  third-party identifier tagging, or attribution tags until a generic user-facing opt-in
+  (config gate + setup prompt + `hermes tools` toggle) exists. Park behind a label.
+- **Change-detector tests, cache-breaking mid-conversation, dead code wired in without E2E
+  proof, plugins that touch core files.** Plugins work within the ABCs/hooks we provide; if
+  one needs more, widen the generic plugin surface, never special-case it in core.
+- **Third-party products integrated into the core tree.** Observability backends, vendor
+  SaaS connectors, analytics dashboards, and other "someone else's product" plugins do NOT
+  land under `plugins/` — every one becomes our burden against a fast-moving core for a
+  backend we don't own. Ship as a **standalone plugin repo** (`~/.hermes/plugins/` or pip
+  entry point), promoted in the Nous Research Discord `#plugins-skills-and-skins`. This is a
+  coupling decision, not a quality bar; such PRs are closed with a pointer to publish.
+
+### Before you call it a bug — verify the premise (and when NOT to close)
+
+The most common reason a well-written PR is closed is a **wrong premise** or treating an
+**intentional design as a gap**. These patterns tell a reviewer what to scrutinize and tell
+the sweeper when a PR is NOT safe to close (when in doubt, leave it open for a human):
+
+- **"Intentional design, not a gap."** Ask whether the isolation IS the design. Profiles are
+  independent islands on purpose: a PR adding live config inheritance from the default
+  profile was closed because coupling profiles is exactly what the design prevents (`--clone`
+  already covers "start from my default"). Read `git log -p -S "<symbol>"` before assuming
+  something is unfinished.
+- **"The premise doesn't hold against how X actually works."** Trace the real runtime before
+  accepting a rationale. Real closes: a rate-limit "re-probe during cooldown" PR (the breaker
+  trips only on a *confirmed-empty* bucket, so re-probing hammers a bucket proven empty); a
+  usage fix whose new branch **never executes** because an earlier guard already popped the
+  state. If you can't point to the exact line where the bug manifests AND show the fix changes
+  that line's behavior, the premise is unverified.
+- **"The absence was deliberate."** Restoring "missing" `__init__.py` files made a test tree
+  importable as a dotted package that shadowed the real plugin and deleted its `register()`
+  at import time. The omission was load-bearing.
+- **"Overreached / resurrected an approach we moved past."** Scope creep beyond the agreed
+  base, or reviving a direction maintainers closed, is rejected even when it works. Offer the
+  rest as a focused follow-up.
+
+Throughline: **verify the claim AND the intent against the codebase before writing or merging
+a fix.** A reproduction on current `main` plus a line-level account beats a plausible
+rationale. When unsure about intent, asking is cheaper than shipping a fix that fights the
+design.
+
+### The Footprint Ladder (new capability decision)
+
+Choose the highest (least-footprint) rung that correctly solves the problem:
+
+1. **Extend existing code** — a variation of something that exists. Zero new surface.
+2. **CLI command + skill** — config/state/infra expressible as shell commands; the agent runs
+   `hermes <subcommand>` guided by a skill. Default for subscriptions, scheduled tasks,
+   service setup (`hermes webhook`, `hermes cron`, `hermes tools`).
+3. **Service-gated tool (`check_fn`)** — needs structured params/returns AND only appears when
+   a prerequisite is configured (Home Assistant tools, memory-provider tools). This rung gates
+   reachability/opt-in process-wide; a capability that varies per SESSION (who is watching) is
+   a named toolset folded in by the toolset resolver, not a `check_fn` — see `tools/AGENTS.md` § "Surface
+   capability is a property of the SESSION".
+4. **Plugin** — third-party/niche/user-specific; lives in `~/.hermes/plugins/` or a pip
+   package, discovered at runtime.
+5. **MCP server (in the catalog)** — genuinely a tool but not core-fundamental. Zero permanent
+   core-schema footprint, reusable by any MCP host, reached via the built-in MCP client.
+6. **New core tool** — only when fundamental, broadly useful to nearly every user, and
+   unreachable via terminal + file or an MCP server (terminal, read_file, web_search,
+   browser_navigate).
+
 ## Common contribution paths
 
 - Building a custom/local tool without modifying Hermes core? Start with [Build a Hermes Plugin](../developer-guide/plugins/index.md)
@@ -45575,6 +45690,70 @@ The gateway runs as a long-lived process, managed via:
 - PID file at `~/.hermes/gateway.pid` — profile-scoped process tracking
 
 **Profile-scoped vs global**: `start_gateway()` uses profile-scoped PID files. Standalone (one gateway per profile), `hermes -p x gateway stop` stops only that profile's gateway. Under multiplexing there is ONE gateway process per host, owned by whichever profile launched it (`gateway/host_rendezvous.py` publishes its PID, home and served set; `gateway/host_attach.py` is the attach/rescan/refuse decision every lifecycle verb goes through): `hermes gateway stop` on the owner takes every served profile down, and `hermes -p x gateway stop` for a served secondary refuses with exit 78 (it has no gateway of its own). A second `gateway run` for a served profile attaches and exits 0 — under a service supervisor it exits 75 (EX_TEMPFAIL) instead, so the redundant unit is RETRIED rather than parked: "someone else serves me right now" is a runtime observation that ends when that process does, and 78 (which systemd, s6 and launchd all treat as permanent) would strand the profile. ATTACH requires a live `identify` answer from the owner; a rendezvous record with nothing answering behind it proves an owner exists but never that it serves you, so it yields a transient refusal (exit 75), never an attach. An owner that answers `multiplex: False` to the rescan is another profile's *standalone* gateway, not a multiplexer that excluded you: the verb starts this profile's own gateway beside it (the one-process-per-profile topology), it does not refuse — refusing there exited 78 and parked every launchd unit but the first to claim the host lock. `hermes gateway stop --all` uses global `ps aux` scanning to kill all gateway processes (used during updates). Liveness is decided by `gateway.status.live_gateway_pid_for_home` (PID + start-time fingerprint), never bare PID existence.
+
+## Background process notifications
+
+`terminal(background=true, notify_on_complete=true)` starts a gateway watcher that detects
+completion and triggers a new agent turn. Verbosity: `display.background_process_notifications`
+(or `HERMES_BACKGROUND_NOTIFICATIONS`): `concise` (default; one line, failures append an output
+tail), `all` (running updates + final raw output), `result` (final raw output only), `error`
+(final raw output only on non-zero exit), `off`.
+
+The watcher is armed on the gateway loop at registration time (`terminal_tool_background.py::
+_register_completion_watcher` → `run_notifications.py::arm_process_watcher`); `pending_watchers`
+is only the fallback for processes registered before the gateway serves (checkpoint recovery) or
+while it stops, drained at startup and post-turn. Agent-notify watchers send no user-facing
+receipt (the agent's next turn is the report) unless the launching turn is still running at exit
+— then the injection only queues a follow-up, so the concise receipt goes out immediately.
+
+The idle completion watcher also drains `watch_match` / `watch_disabled`; no user follow-up is
+required. Notify-off drains these without waking. Transport failures are retried; unavailable
+durable completion owners/transports do not spend delivery attempts. Profile-namespaced process
+events keep their owning adapter, including raw progress/final notices. Adapter acceptance is
+at-least-once admission, not proof that a model turn or final outbound reply completed. API-server
+async completions remain durable delivery rows, never autonomous new model turns. Require the
+`admit_internal_event` receipt for completion/watch injection: a handler returning None is not
+acceptance. Refused admission refunds every claimed batch sibling without spending an attempt;
+actual delivery errors keep their bounded retry policy. Recognized raw API routes resolve after
+persisted messaging origins and defer quietly when unavailable; malformed routes still warn.
+
+Cron execution has its own session. Eligible continuable deliveries may mirror or seed the
+reply-facing conversation: origin, origin-less home fallback, user-written bare-platform home,
+or opted-in explicit targets. `all` expansions do not gain home mirror eligibility. Mirrored
+briefs are labelled user turns appended at a turn boundary, preserving role alternation
+(`cron/AGENTS.md`).
+
+## `/login` (off-turn, paired DM only)
+
+`/login` is registered in `hermes_cli/commands.py` with `busy_policy="dispatch"` and
+`desktop="settings"`, listed in `run_busy.py::_PLAIN_COMMANDS`, and handled by
+`GatewayLoginCommandsMixin` (`gateway/slash_commands_login.py`). It refuses outside a paired DM:
+`chat_type in {"dm","private"}`, a truthy `chat_id`, and a platform whose `"dm"` really is a paired
+conversation — ntfy, raft and a2a all report `chat_type="dm"` for a broadcast topic, a channel and
+an agent peer, so posting a consent link there would publish it.
+
+**It binds the whole install.** The sign-in writes the singleton `providers.nous`, so whoever
+approves the code owns this gateway's inference and connectors for every chat it serves. Slash
+gating is opt-in (`gateway/slash_access.py`): with no `allow_admin_from` set, every user allowed to
+DM the bot can run it. Operators of shared gateways must set it.
+
+The handler returns its ack at once and drains `anon_auth.run_sign_in` on a **private single-worker
+executor** (`_login_executor`), never the shared 10-thread gateway pool — a promotion wait can last
+the code's full expiry, and a live worker in the shared pool makes shutdown skip the SessionDB
+close/checkpoint. One attempt per process, stamped with the identity that started it: the same
+identity's second `/login` supersedes (the loser ends with the superseded copy pushed into its own
+chat); a different identity is refused. `task.cancel()` cannot interrupt a blocking poll inside a
+worker thread, so shutdown and supersede both work through `attempt.cancelled`, which
+`wait_for_promotion` now polls on a ≤1 s tick. A shutdown-cancelled attempt pushes nothing — the
+task is dying and its adapters may already be gone — but if the server had already completed the
+transfer it still persists, because that transfer is irreversible.
+
+On completion the handler **evicts** every cached agent still on `nous/welcome` and clears any
+session model override pinned to it. It does not switch agents in place and does not write a model
+override: `settle_after_upgrade` already moved `model.default`/`model.base_url` in the config, every
+turn re-resolves the config and the credentials, and `_agent_config_signature` already forces a
+rebuild when the route changes — so an in-place swap buys no cache warmth and an override would pin
+an expiring access token that nothing refreshes.
 
 ## Multiplexed profiles
 
@@ -56016,9 +56195,72 @@ Companion to `hermes_cli/AGENTS.md` (the rules) — this page holds the longer e
 
 ## Update pipeline
 
-The stage-by-stage contract (`plan → snapshot → apply → restart-per-kind → verify → report`) and the
-field failure each stage guards are documented in `hermes_cli/AGENTS.md`; user-facing behaviour
-(receipts, `--plan`, snapshot modes) is in [Updating](../getting-started/updating.md).
+User-facing behaviour (receipts, `--plan`, snapshot modes) is in
+[Updating](../getting-started/updating.md); `hermes_cli/AGENTS.md` carries the short form of the rules.
+
+Fleet-update campaign #91277 (Aug 2026). A PR that weakens a stage must answer for the failure class
+it guards. `plan → snapshot → apply → restart-per-kind → verify → report`
+
+- **Plan** (`update_inventory.py`, `hermes update --plan`): read-only inventory — install kind, all
+  profiles, every live gateway with supervisor + running code version. Deployment kinds are
+  first-class: `git` updates in place; `docker`/`nix`/`apt` are NOT in-place-updatable and the
+  updater reports the correct external command instead of fighting the deployment model.
+- **Snapshot** (`backup.py`): pre-update quick snapshot for EVERY profile (the code swap + fleet
+  restart touch all of them), each into its own `state-snapshots/`, identical file set, 1 GiB
+  per-file cap, keep=1. **Never add a partial/tiered snapshot set** — mixed coverage creates
+  torn-restore states across schema generations. Quick snapshots are FILE-LOSS RECOVERY (the
+  per-profile cron-jobs safety net restores from them), NOT code-rollback insurance; `--backup`
+  full mode owns rollback.
+- **Apply**: git pull, or the Windows ZIP fallback — which fires ONLY when git itself failed
+  (`_should_zip_fallback_on_update_error`, argv-classified; a dependency-install failure must never
+  trigger a tree-clobbering re-download), REFUSES a dirty working tree (`-uall` + a pre-swap TOCTOU
+  re-check — but classifies a `!!` line by whether the swap would destroy it: an ignored path under a
+  root entry the ZIP does not ship (`.bytecode-fingerprint`, `.hermes-bootstrap-complete`,
+  `hermes_agent.egg-info/`; tracked root entries stand in for the ZIP set before the download, the
+  re-check gets the real one), a nested `__pycache__`/`node_modules`, or a `_ZIP_PRESERVED_NESTED`
+  output is admitted; other ignored files under shipped dirs still block), and grafts the live nested
+  build outputs (`_ZIP_PRESERVED_NESTED`: `apps/desktop/{release,dist,node_modules,build}`,
+  `hermes_cli/web_dist`, `ui-tui/{dist,node_modules,packages/hermes-ink/dist}`, `web/node_modules`,
+  `scripts/whatsapp-bridge/node_modules`) into the staged swap by hardlink (the GitHub source ZIP has
+  none of them; without the graft the swap deletes them). Post-swap, the Desktop
+  rebuild decision also trusts the build stamp under HERMES_HOME, so an install that already lost
+  its artifacts in an earlier update is rebuilt instead of "forgotten" (#90495).
+- **Restart-per-kind**: systemd and launchd restarts are FLEET-WIDE within the updating install (every
+  `hermes-gateway*` unit / `ai.hermes.gateway*` LaunchAgent whose home is the updating root or one of its
+  `profiles/<name>`), drain-first (SIGUSR1), with per-unit/per-label failure isolation. Restarting only the
+  invoking profile's service leaves siblings on stale `sys.modules` until they crash — the largest dupe-PR
+  cluster in the repo's history came from that bug. The fleet is bounded by HOME, not by namespace:
+  `hermes_cli/update_fleet_scope.py` judges every unit/label/process by the home it actually runs on
+  (live environ, unit `Environment=`, plist `HERMES_HOME`), and a runtime of another `HERMES_HOME` on the
+  same account — a sibling install, the real `hermes-gateway.service` seen from a scratch home — is named and
+  left alone, never restarted (#93349).
+- **Verify**: gateways stamp `code_sha`/`code_version` into `gateway_state.json` on every
+  runtime-status write (`gateway/status.py`); the updater compares each live gateway against the
+  fresh checkout and prints a fleet version matrix. A provably-stale gateway fails the update
+  (exit 1) — automation must never treat a mixed-version fleet as healthy.
+- **Report**: every run writes a machine-readable receipt to `~/.hermes/logs/update_receipts/`
+  (`latest.json` pointer; steps, skips WITH reasons, restart outcome, plan, fleet snapshot).
+  Before a source swap, the parent captures plan/snapshots/receipt and its Windows pause token.
+  `update_completion.py` runs new-code PM preparation with site initialization disabled, then
+  selected-Python builds, maintenance, scans/restarts and verification. Git/current/ZIP share
+  this owner; never reload or purge modules to continue in the old interpreter. The parent keeps
+  the lock, waits, and accepts only a correlated terminal result. `cmd_update` still finalizes
+  early failures and missing/killed-child outcomes; PM refusal data survives the handoff.
+  See `website/docs/developer-guide/source-update-completion.md`. A begun-but-unwritten receipt is a bug.
+- **Nothing runs pulled code in the pre-pull interpreter.** This tree finishes updates through
+  `update_completion.run_completion` / `_update_takeover.py`.
+  `hermes_cli/update_handoff.py` and `hermes_cli/update_serve_obligations.py` are the
+  FROZEN COMPAT SURFACE for releases that lazily import those module
+  names from the NEW tree after the checkout swap.
+  Keep their public names importable and behavior-preserving. They call into
+  `_old_updater.stop_for_relaunch` → `_run_child`. Removing a name
+  bricks every release mid-update. see `tests/compat/old_updater_surface.json`.
+
+Process-scan coordination between updater, serve/dashboard, and gateway is being replaced by a
+gateway-owned control socket (#92091); scans are the fallback layer for old/crashed processes — read
+#92091 before adding any heuristic. Process identity rules (never argv substrings; canonical
+matchers; parser-derived flag sets; never blanket-exclude gateway ancestors, #87594): root
+`AGENTS.md` and `website/docs/developer-guide/cli-internals.md`.
 
 The systemd blunt-restart fallback waits for the unit's `TimeoutStopUSec` plus
 `TimeoutStartUSec`, with 15 seconds of client-side slack. It reads the target unit
@@ -56036,6 +56278,35 @@ weeks, months and years. The combined timeout is capped below the native signed
 32-bit millisecond poll limit (with rounding headroom), so exceptionally long
 unit limits cannot overflow subprocess polling. Zero/unknown/infinite phase
 limits use the bounded fallback. This does not change active-turn drain settings.
+
+## Nous free tier sign-in
+
+Sign-in completion is one function, `settle_after_upgrade`, called by every caller that persists an
+account over a free-tier identity (CLI `upgrade_guest`, the desktop poller): it moves a config on the
+welcome route to the account's host and the tier's recommended default
+(`models.recommended_nous_default_model`, shared with `GET /api/model/recommended-default`).
+
+The shared flow, states, and copy live in `anon_sign_in.py`; CLI rendering lives in
+`anon_sign_in_cli.py`. `anon_auth.py` keeps identity, promotion polling, and settlement, and
+re-exports the existing sign-in API. The flow resolves identity and persistence collaborators
+through `anon_auth` at call time to preserve module-attribute monkeypatch seams.
+
+The sign-in itself is one composition: `anon_auth.run_sign_in()` yields `SignInState`s (`Code`,
+`Waiting`, `Completed`, `Declined`, `Superseded`, `TimedOut`, `Retired`, `Failed`,
+`AlreadySignedIn`, `Unavailable`). It reads the current state itself, holds one absolute deadline
+across both waits, persists only after a completed promotion **and** a token grant, runs
+`settle_after_upgrade` exactly once per completion, and never lets a persist or settle failure
+escape as an exception — it becomes `Failed`. Every state carries its own `.copy` (the chat form,
+which never contains a raw exception, a URL or a `hermes` verb) and `.copy_terminal`, so no caller
+maps a reason to a string. `cancelled()` stops an attempt; `cancel_wins_after_promotion` decides
+what happens when the server had already completed the transfer — the desktop keeps `True` (a
+DELETE means "not on this machine"), the gateway passes `False` (a supersede must not discard a
+transfer the user actually approved). `scope` is entered only around the precondition and persist
+blocks, never across a `yield` or a network wait, because `run_in_executor` does not carry
+contextvars. `upgrade_guest` (`hermes auth upgrade`), the CLI `/login` handler and the desktop
+promotion poller are renderers over it; a surface that needs the cancel check and the save to be
+atomic passes `persist_guard`. The desktop's plain "connect another Nous account" device-code login
+is a separate path (`_nous_plain_poller`) and must stay one.
 
 ## Process identity: never infer it from argv substrings
 
@@ -65785,6 +66056,13 @@ the gallery. There is no separate listing to maintain.
 15. **No skins or forks of bundled plugins.** A change to a bundled plugin is a
    PR against `hermes-agent`, not a competing listing, and vendor-lookalike skins
    are not listed under Nous branding.
+16. **One listing per plugin lineage.** A fork of a listed community plugin is
+   listed only when it is materially different from the original: a different
+   transport or architecture, or capability the original lacks and its author
+   declined or has not answered a PR for 30 days. Improvements to a listed plugin
+   go upstream as a PR to its author. A fork that renames, rebrands or adds small
+   changes is declined in favour of the original. A listed fork names its origin
+   in its disclosure line (`Derived from <entry>`).
 <!-- admission-rules:end -->
 
 ## Updating your entry
@@ -77376,7 +77654,7 @@ before starting another Python process.
 ### Syncing after you edit pyproject.toml
 
 1. Edit `pyproject.toml`. Pin every dependency as the
-   [Dependency Pinning Policy](https://github.com/NousResearch/hermes-agent/blob/main/AGENTS.md#dependency-pinning-policy)
+   [Dependency Pinning Policy](https://github.com/NousResearch/hermes-agent/blob/main/pm/AGENTS.md#dependency-pinning-policy)
    requires. Express platform limits with PEP 508 markers, or gate a whole
    extra in `[tool.hermes.extras-platforms]`.
 2. Relock:
