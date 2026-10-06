@@ -1009,9 +1009,30 @@ and git downloads file contents on demand, each on-demand download written as it
 Installers from late September 2026 made treeless (`--filter=tree:0`) clones instead. git asks for
 a missing tree without saying which ones it already has, so a treeless checkout downloaded complete
 directory snapshots again on every checkout and path-filtered history walk. `hermes update`
-converts such a checkout once, at the end of the update: one `git fetch --refetch --filter=blob:none`
-brings every commit and tree (about 120 MB), and later updates stop re-downloading them. If that
-fetch fails, the update prints a warning, carries on, and retries the conversion next time. `hermes update` and `hermes update --check`
+converts such a checkout once, as its first step after pulling the new code and before the
+dependency work: one `git fetch --refetch --filter=blob:none` brings every commit and tree (about
+120 MB), and later updates stop re-downloading them. Re-running the installer over such a checkout
+converts it the same way. If that fetch fails, the update prints a warning, carries on, and retries
+the conversion next time.
+
+A Hermes Desktop built before the conversion existed runs path-filtered history walks every few
+minutes, so on a treeless checkout it could fill a disk with pack files (one report reached 434 GB)
+and keep going after a failed update. To recover when that already happened:
+
+1. Quit Hermes Desktop, then end any leftover `git rev-list`, `git maintenance` or
+   `git commit-graph` processes; quitting the app does not stop them.
+2. If the disk is completely full, delete the abandoned transfer files to get room back:
+   `rm -f "$repo"/.git/objects/pack/tmp_pack_*` (Windows: delete `tmp_pack_*` in
+   `.git\objects\pack`). Each update also removes them on its own once no git process is running.
+3. Run `hermes update`. It converts the checkout first, then cleans the pack pile down over this
+   and later updates as described below.
+
+If `hermes update` itself cannot start, the conversion by hand is:
+
+```bash
+git -C "$repo" fetch --refetch --filter=blob:none origin
+git -C "$repo" config remote.origin.partialclonefilter blob:none
+``` `hermes update` and `hermes update --check`
 set `maintenance.commit-graph.enabled`, `gc.writeCommitGraph` and `fetch.writeCommitGraph` to
 `false` in that checkout, because a commit-graph write over commits the graph has not seen yet
 downloads every one of their trees. Leave those settings alone, and leave `gc.auto` at its
@@ -4607,12 +4628,12 @@ Points at a custom OpenAI-compatible endpoint. Uses `OPENAI_API_KEY` for auth.
 | `nous` / `openrouter` / etc. | not set | Force that provider, use its auth |
 | any | set | Use the custom endpoint directly (provider ignored) |
 
-### Stream progress timeout (Responses routes)
+### Stream progress timeout
 
-When the summary runs over a Responses stream (the `openai-codex` provider, or any route the auxiliary client drives through the Responses API), two timeouts apply, and they are independent:
+When the summary streams (compression always streams over chat-completions and Responses routes, e.g. `openai-codex` or a custom OpenAI-compatible endpoint), two timeouts apply, and they are independent:
 
 - `auxiliary.compression.timeout` — the overall request budget (default 120s).
-- `auxiliary.compression.no_progress_timeout` — how long the stream may go without a **substantive** event (a text/reasoning delta or a completed output item) before the attempt aborts with `Codex auxiliary Responses stream stalled: no new output for Ns`. Default **60s** when unset. Keepalive and lifecycle frames (`response.in_progress`, pings) do not count as progress; every substantive event re-arms the window, so a slow but progressing summary is never cut off by it.
+- `auxiliary.compression.no_progress_timeout` — how long the stream may go without a **substantive** event (a text/reasoning delta or a completed output item) before the attempt aborts (`... stream stalled: no new output for Ns`) and the normal retry / fallback chain takes over. Default **60s** when unset. On a chat-completions stream the window starts at the first token. Before it, a remote endpoint gets the main loop's stale patience (the provider's `providers.<id>.stale_timeout_seconds` when set, else 180s raised for large prompts and to 600s for reasoning models such as o3 or DeepSeek R1; capped at `timeout`), so a model thinking silently is not cut. On a local endpoint (localhost, LAN, Tailscale) a silent prefill is bounded only by `timeout`. The same rule applies to every streamed auxiliary task, including MoA reference calls. Keepalive and lifecycle frames (`response.in_progress`, pings) do not count as progress; every substantive event re-arms the window, so a slow but progressing summary is never cut off by it.
 
 Raising `timeout` alone does **not** widen the progress window — a request configured for 600s still aborts after a 60s gap. Set `no_progress_timeout` to change that gap; the effective window is capped at `timeout`, and the host's hard deadline / cancellation still win. The host's own inactivity budget is the outer cap here: in-agent compaction gives up on a silent summariser after `compression.context_timeout_seconds` (default 120s, floored at the effective `auxiliary.compression.timeout`, itself at least 300s) and gateway hygiene after `compression.hygiene_timeout_seconds` (default 30s), so a `no_progress_timeout` larger than the applicable host budget is silently cut short by it. The key is per task (`auxiliary.<task>.no_progress_timeout`), so widening it for compression does not change other auxiliary tasks. A value that is not a positive number is ignored with a warning in the log and the 60s default applies.
 
@@ -5073,8 +5094,8 @@ auxiliary:
   # Context compression timeout (separate from compression.* config)
   compression:
     timeout: 120               # seconds — compression summarizes long conversations, needs more time
-    # no_progress_timeout: 60   # Responses-stream routes (openai-codex) only: seconds a summary stream
-    #                           # may go without a substantive event before the attempt fails fast
+    # no_progress_timeout: 60   # seconds a streamed summary may go without a substantive chunk
+    #                           # before the attempt fails fast into retry/fallback
     # fallback_chain:           # Optional — providers to try on rate-limit / connectivity failure
     #   - provider: nous
     #     model: deepseek/deepseek-chat
@@ -6871,6 +6892,28 @@ host, or model family. The marker layout follows the configured transport:
 `anthropic_messages` uses the native inner-block layout. Set
 `prompt_caching: false` to explicitly disable cache markers for a model; when
 omitted, Hermes keeps its normal provider and model capability detection.
+
+Some OpenAI-compatible servers return the whole answer in the `reasoning`
+field with empty `content`. Hermes does not show reasoning as the reply by
+default, because most providers put private chain-of-thought there. It retries
+instead. If your server's parser really does put the final answer in
+`reasoning`, opt that model in with `answer_in_reasoning`:
+
+```yaml
+providers:
+  local-vllm:
+    api: http://127.0.0.1:8000/v1
+    models:
+      my-reasoner:
+        answer_in_reasoning: true
+```
+
+To opt in every model on a provider, put the flag in a provider-level
+`capabilities:` block (`capabilities: {answer_in_reasoning: true}`). Hermes
+re-reads the opt-in on the active route on every turn, in the CLI, TUI and
+gateway alike, so it survives a `/model` switch to another model on the same
+provider. A fallback or any other provider does not inherit it, and OpenRouter
+routes are never trusted, even with the flag set.
 
 :::note Legacy format
 Older configs used a top-level `custom_providers:` list (with `base_url` instead of `api`). It still works and is auto-migrated to the `providers:` dict on `hermes update` (config v12).
@@ -13174,17 +13217,16 @@ When you try to add an entry that would exceed the limit, the tool returns an er
 ```json
 {
   "success": false,
-  "error": "Memory at 2,100/2,200 chars. Adding this entry (250 chars) would exceed the limit. Consolidate now: use 'replace' to merge overlapping entries into shorter ones or 'remove' stale or less important entries (see current_entries below), then retry this add — all in this turn.",
+  "error": "Memory at 2,100/2,200 chars; adding this entry (250 chars) would exceed the limit by 153 chars. Retry as ONE 'operations' batch that removes or shortens (replace) stale entries from current_entries below to free at least 153 chars AND adds this entry — the limit is checked only on the batch result.",
   "current_entries": ["..."],
   "usage": "2,100/2,200"
 }
 ```
 
-The agent should then:
-1. Read the current entries (shown in the error response)
-2. Identify entries that can be removed or consolidated
-3. Use `replace` to merge related entries into shorter versions
-4. Then `add` the new entry
+The agent then reissues one `operations` batch that frees at least the stated number of
+characters (removes, or `replace`s with shorter versions) and adds the new entry; the limit
+is checked only on the batch's final result. A `replace`/`remove` whose `old_text` matches no
+entry fails the same way, with the entries it most resembles under `closest_entries`.
 
 **Best practice:** When memory is above 80% capacity (visible in the system prompt header), consolidate entries before adding new ones. For example, merge three separate "project uses X" entries into one comprehensive project description entry.
 
@@ -13990,14 +14032,14 @@ Long-term memory with knowledge graph, entity resolution, and multi-strategy ret
 
 **Setup:**
 ```bash
-hermes plugins install hindsight   # from the plugin catalog
+hermes plugins install hindsight   # from the plugin catalog; answer "Use 'hindsight' as the memory provider now?"
 hermes memory setup                # select "hindsight"
 # Or manually:
 hermes config set memory.provider hindsight
 echo "HINDSIGHT_API_KEY=your-key" >> ~/.hermes/.env
 ```
 
-The plugin lands in `~/.hermes/plugins/hindsight/` (per profile home) and is enabled under `plugins.enabled` in `config.yaml`. `hermes memory setup`, `hermes memory status`, `hermes plugins list` and the dashboard Memory settings all work with the catalog-installed plugin. In local embedded mode the plugin installs `hindsight-all` on first use through Hermes' lazy-install path, which honours `security.allow_lazy_installs`.
+The plugin lands in `~/.hermes/plugins/hindsight/` (per profile home). A memory provider is activated by `memory.provider` in `config.yaml`, not `plugins.enabled`: accepting the install prompt (or passing `--enable`) sets it, and declining leaves it unchanged so `hermes memory setup` can pick it later. `hermes plugins enable hindsight` does not activate a memory provider. `hermes memory setup`, `hermes memory status`, `hermes plugins list` and the dashboard Memory settings all work with the catalog-installed plugin. In local embedded mode the plugin installs `hindsight-all` on first use through Hermes' lazy-install path, which honours `security.allow_lazy_installs`.
 
 **Local mode UI:** `hindsight-embed -p hermes ui start`
 
@@ -14028,6 +14070,7 @@ Hindsight used to ship inside the Hermes tree (and as the `hermes-agent[hindsigh
 - `hermes update` installs the catalog plugin into every profile home that names the provider. Each line names the profile it is about. In a terminal it asks before preparing the plugin's Python dependencies; when several profiles use the provider, the questions are asked once and the answers apply to all of them. Without a terminal (the Desktop app, a script, a service) nobody can answer, so each profile prepares them unattended when its `security.allow_lazy_installs` is on (the default); a profile with it off gets the exact `hermes -p <profile> plugins install hindsight` command instead, and the other profiles still migrate.
 - If the plugin is still missing on the first agent start (`hermes chat`, Desktop, the gateway, …), Hermes installs it, dependencies included, and shows ``✓ Memory provider 'hindsight' moved out of core — installed its plugin from the catalog (memory.provider and your stored memories are unchanged; check its settings with `hermes memory status`).`` Messaging platforms get the line with the first reply.
 - When the agent-start install cannot happen, you see why instead of silently running without external memory: with `security.allow_lazy_installs: false` the warning names the install command for that profile; offline or declined installs show the error and the same command.
+- Agent start never asks a question (the chat prompt owns the terminal). A catalog provider that never shipped with Hermes (for example `mnemosyne`) is therefore not installed on agent start: the warning names `hermes plugins install <name>` for that profile, or install it from the dashboard/Desktop Plugins page.
 
 What changes on disk: the plugin appears in `~/.hermes/plugins/hindsight/` and `config.yaml` gains `plugins.enabled: [hindsight]`. `memory.provider`, `$HERMES_HOME/hindsight/config.json`, `HINDSIGHT_API_KEY` in `.env` and your memory bank data are untouched. Verify with `hermes memory status` (provider active) and `hermes plugins list` (plugin installed and enabled).
 
@@ -15085,7 +15128,7 @@ Every `ctx.*` API below is available inside a plugin's `register(ctx)` function.
 | Add slash commands | `ctx.register_command(name, handler, description)` — adds `/name` in CLI and gateway sessions |
 | Dispatch tools from commands | `ctx.dispatch_tool(name, args)` — invokes a registered tool with parent-agent context auto-wired |
 | Add CLI commands | `ctx.register_cli_command(name, help, setup_fn, handler_fn)` — adds `hermes <plugin> <subcommand>` |
-| Inject messages | `ctx.inject_message(content, role="user", session_key=...)` - see [Injecting Messages](#injecting-messages) |
+| Inject messages | `ctx.inject_message(content, role="user", session_key=... \| origin=...)` - see [Injecting Messages](#injecting-messages) |
 | Ship data files | `Path(__file__).parent / "data" / "file.yaml"` |
 | Bundle skills | `ctx.register_skill(name, path)` — namespaced as `plugin:skill`, loaded via `skill_view("plugin:skill")` |
 | Gate on env vars | `requires_env: [API_KEY]` in plugin.yaml — prompted during `hermes plugins install` |
@@ -15095,6 +15138,7 @@ Every `ctx.*` API below is available inside a plugin's `register(ctx)` function.
 | Register a video-generation backend | `ctx.register_video_gen_provider(provider)` — see [Video Generation Provider Plugins](../../developer-guide/video-gen-provider-plugin.md) |
 | Register a context-compression engine | `ctx.register_context_engine(engine)` — see [Context Engine Plugins](../../developer-guide/context-engine-plugin.md) |
 | Register a terminal execution backend (cloud sandbox) | `ctx.register_terminal_environment_provider(provider)` — see [Terminal Environment Plugins](../../developer-guide/terminal-environment-plugin.md) |
+| Register a computer-use driver | `ctx.register_computer_use_provider(provider)` — selected by `computer_use.backend`; see [Computer-use backend plugins](../../developer-guide/plugins/index.md#computer-use-backend-plugins) |
 | Route human approval prompts | `ctx.register_approval_transport(name, present_fn)` — see [Approval transports](#approval-transports) |
 | Register a memory backend | Subclass `MemoryProvider` in `plugins/memory/<name>/__init__.py` — see [Memory Provider Plugins](../../developer-guide/memory-provider-plugin.md) (uses a separate discovery system) |
 | Run a host-owned LLM call | `ctx.llm.complete(...)` / `ctx.llm.complete_structured(...)` — borrow the user's active model + auth for a one-shot completion with optional JSON schema validation. See [Plugin LLM Access](../../developer-guide/plugin-llm-access.md) |
@@ -15172,7 +15216,7 @@ hermes plugins enable <name>      # add to allow-list
 hermes plugins disable <name>     # remove from allow-list + add to disabled
 ```
 
-After `hermes plugins install owner/repo`, you're asked `Enable 'name' now? [y/N]` — defaults to no. Skip the prompt for scripted installs with `--enable` or `--no-enable`.
+After `hermes plugins install owner/repo`, you're asked `Enable 'name' now? [y/N]` — defaults to no. Skip the prompt for scripted installs with `--enable` or `--no-enable`. A memory provider (a plugin whose `__init__.py` registers a `MemoryProvider`) asks `Use 'name' as the memory provider now?` instead: yes (or `--enable`) sets `memory.provider`, which is the only switch that activates a provider; no leaves it for `hermes memory setup`.
 
 For a reproducible install, pin a full immutable commit (tags, branches, and
 abbreviated SHAs are not accepted):
@@ -15342,6 +15386,7 @@ The table above shows the four plugin categories, but within "General plugins" t
 | A **context-compression strategy** | Context-engine plugin — `ctx.register_context_engine()` | [Context Engine Plugins](../../developer-guide/context-engine-plugin.md) |
 | An **image-generation backend** (DALL·E, SDXL, …) | Backend plugin — `ctx.register_image_gen_provider()` | [Image Generation Provider Plugins](../../developer-guide/image-gen-provider-plugin.md) |
 | A **video-generation backend** (Veo, Kling, Pixverse, Grok-Imagine, Runway, …) | Backend plugin — `ctx.register_video_gen_provider()` | [Video Generation Provider Plugins](../../developer-guide/video-gen-provider-plugin.md) |
+| A **computer-use driver** (desktop control behind the `computer_use` tool) | Single-select provider plugin — `ctx.register_computer_use_provider()`, selected by `computer_use.backend` | [Computer-use backend plugins](../../developer-guide/plugins/index.md#computer-use-backend-plugins) |
 | A **TTS backend** (any CLI — Piper, VoxCPM, Kokoro, xtts, voice-cloning scripts, …) | Config-driven (recommended) — declare under `tts.providers.<name>` with `type: command` in `config.yaml`. OR Python backend plugin — `ctx.register_tts_provider()` for Python-SDK / streaming engines that need more than a shell template. | [TTS Setup](./tts.md#custom-command-providers) · [Python plugin guide](./tts.md#python-plugin-providers) |
 | An **STT backend** (any CLI — whisper.cpp, custom whisper binary, local ASR CLI) | Config-driven (recommended) — declare under `stt.providers.<name>` with `type: command` in `config.yaml`, or set `HERMES_LOCAL_STT_COMMAND` for the legacy single-command escape hatch. OR Python backend plugin — `ctx.register_transcription_provider()` for Python-SDK engines (OpenRouter, SenseAudio, Gemini-STT, etc.). | [STT Setup](./tts.md#stt-custom-command-providers) · [Python plugin guide](./tts.md#python-plugin-providers-stt) |
 | **External tools via MCP** (filesystem, GitHub, Linear, Notion, any MCP server) | Config-driven — declare `mcp_servers.<name>` with `command:` / `url:` in `config.yaml`. Hermes auto-discovers the server's tools and registers them alongside built-ins. | [MCP](./mcp.md) |
@@ -15874,7 +15919,7 @@ In a running session, `/plugins` shows which plugins are currently loaded.
 
 ## Injecting Messages
 
-Plugins can inject messages into a CLI conversation or a known gateway session using `ctx.inject_message()`:
+Plugins can inject messages into a CLI conversation, a known gateway session, or a new gateway session in a given chat using `ctx.inject_message()`:
 
 ```python
 # Active CLI conversation
@@ -15886,9 +15931,22 @@ ctx.inject_message(
     role="user",
     session_key="agent:main:telegram:dm:123456789",
 )
+
+# Start (or continue) the session for a chat/thread, e.g. a Discord forum post the plugin just opened
+ctx.inject_message(
+    "Review the attached spec and post a plan here.",
+    origin={
+        "platform": "discord",
+        "chat_id": "1290000000000000000",   # the forum post (thread) id
+        "chat_type": "thread",
+        "thread_id": "1290000000000000000",
+        "user_id": "123456789012345678",    # who the turn runs as; must pass the gateway's allowlist
+        "user_name": "Desk Orchestrator",
+    },
+)
 ```
 
-**Signature:** `ctx.inject_message(content: str, role: str = "user", *, session_key: str | None = None) -> bool`
+**Signature:** `ctx.inject_message(content: str, role: str = "user", *, session_key: str | None = None, origin: Mapping[str, Any] | None = None) -> bool`
 
 In CLI mode:
 
@@ -15900,14 +15958,22 @@ In CLI mode:
 In gateway mode:
 
 - `session_key` is required and must identify an existing gateway session. It is the stable routing key, not the CLI session ID.
-- Hermes reuses that session's stored platform, chat, thread, profile, and conversation history. Plugins cannot supply a new chat route through this API.
+- Hermes reuses that session's stored platform, chat, thread, profile, and conversation history. Plugins cannot change that route through `session_key`.
 - Hermes rechecks the stored route against the gateway's current authorisation rules before dispatch.
 - Routes that relied only on an adapter-time or upstream authorisation decision are rejected unless Hermes can revalidate them from current core allowlists, pairing, or explicit allow-all configuration.
 - Injected text is always conversational input. It cannot invoke slash commands, approve tools, or resolve pending confirmation and clarification prompts.
 - The route and conversation are pinned while dispatch is pending. Hermes drops the request if topic recovery changes the route or the session rotates before handling starts.
 - The request enters the platform adapter's normal message path. Active sessions use the existing busy-session queue rather than starting a competing turn.
 - Returns `True` when the live gateway accepts the request for asynchronous dispatch. This does not confirm that the agent turn or platform delivery has completed.
-- Returns `False` when `session_key` is omitted, the permission is not granted, or no live host can accept the request. Unknown or unroutable session keys discovered after asynchronous acceptance are written to the gateway log.
+- Returns `False` when neither `session_key` nor `origin` is given (or both are), the permission is not granted, or no live host can accept the request. Unknown or unroutable session keys discovered after asynchronous acceptance are written to the gateway log.
+
+Starting a session with `origin` (gateway mode only):
+
+- `origin` uses the same shape as a stored session origin (`SessionSource.to_dict()`): `platform` and `chat_id` are required; `chat_type`, `thread_id`, `user_id`, `user_name`, `chat_name` and the other origin fields are optional. Use it when no session exists yet — for example, a bot-authored forum post, which platforms like Discord never deliver back to the bot as an inbound message.
+- The session is created in **the plugin's own profile** (the profile whose plugin manager loaded it) through the normal session path, with a fresh prompt and an empty history, and the reply is delivered to that chat/thread. If the chat already has a session in that profile, the text joins it exactly like a human message would (the busy-session queue applies), so a human follow-up in the same thread continues the same session.
+- A plugin can never target another profile. `False` is returned (with the reason in the gateway log) when the origin names a different `profile`, when the gateway's own profile routing sends that chat to a different profile, when the plugin's profile is not served by this gateway, or when that profile has no connected adapter for `platform` — another profile's bot is never borrowed. On a multiplexed gateway the turn runs under the plugin's profile home and secrets.
+- Authorisation is not bypassed: the origin's user must pass the gateway's current allowlists, pairing, or allow-all configuration for that profile, the same check as the `session_key` path. Choose a `user_id` that is authorised, or the request is dropped at dispatch and logged.
+- The same text rules apply: no slash commands, approvals, or prompt resolution. The permission below is read from the plugin's own profile `config.yaml`.
 
 Ink TUI (`hermes --tui`) and the desktop / dashboard chat are a third host. They do not set the classic CLI reference and they do not register on the messaging-gateway injector — those two hosts stay separate so a live gateway cannot clobber the TUI (or the reverse). Pass the session's durable `session_key` (the `ses_…` id), not the ephemeral UI session id. Hermes queues the text on that session's prompt queue: a busy session keeps the message for the next turn, an idle session starts one. A key that is not a live TUI session is left for the messaging gateway when one is running, and is never rerouted to a different chat.
 
@@ -15923,7 +15989,7 @@ plugins:
 ```
 
 :::warning
-Only grant gateway injection to plugins you trust. Hermes checks this host API permission and restricts it to existing session routes, but Python plugins run in-process and this setting is not a sandbox.
+Only grant gateway injection to plugins you trust. Hermes checks this host API permission, restricts it to existing session routes or new sessions in the plugin's own profile, and applies current authorisation, but Python plugins run in-process and this setting is not a sandbox.
 :::
 
 :::note
@@ -23577,6 +23643,7 @@ When the bot is in a voice channel:
 - Transcripts appear in the text channel: `[Voice] @user: what you said`
 - Agent responses are sent as text in the channel AND spoken in the VC
 - The text channel is the one where `/voice join` was issued
+- Running `/voice join` from another text channel moves the binding there; speech captured before the move, whether still being transcribed or not yet finished, is dropped, not posted to the new channel
 
 ### Echo Prevention
 
@@ -23584,7 +23651,7 @@ The bot automatically pauses its audio listener while playing TTS replies, preve
 
 ### Access Control
 
-Only users listed in `DISCORD_ALLOWED_USERS` can interact via voice. Other users' audio is silently ignored.
+Only users allowed by `DISCORD_ALLOWED_USERS` or `DISCORD_ALLOWED_ROLES` can interact via voice; a role is checked for the speaker each time they talk. Other users' audio is silently ignored.
 
 ```bash
 # ~/.hermes/.env
@@ -25722,7 +25789,7 @@ For TTS engines that can't be expressed as a single shell command — Python SDK
 | A single CLI reading text from a file/stdin and writing audio to a file/stdout | **Command provider** (no Python needed) |
 | Two or three CLIs chained with shell pipes | **Command provider** |
 | A Python SDK only — no CLI | **Plugin** |
-| Streaming bytes you want to deliver chunked (mid-generation voice bubbles) | **Plugin** (override `stream()`) |
+| An engine that emits audio as it synthesizes, and you want spoken replies to start on the first sentence | **Plugin** (set `streams_pcm`, override `stream()`) |
 | A voice-listing API used by `hermes setup` | **Plugin** (override `list_voices()`) |
 | OAuth refresh flow (not a static bearer token) | **Plugin** |
 
@@ -25785,7 +25852,8 @@ Override these on your provider class for richer integration:
 - `list_voices()` → list of `{id, display, language, gender, preview_url}` dicts shown in `hermes tools`.
 - `list_models()` → list of `{id, display, languages, max_text_length}` dicts.
 - `get_setup_schema()` → return `{name, badge, tag, env_vars: [{key, prompt, url}]}` to power the picker row in `hermes tools` / `hermes setup`. Without this, the plugin still works but its row in the picker is minimal.
-- `stream(text, *, voice, model, format, **extra)` → iterator yielding audio bytes for streaming delivery (default raises `NotImplementedError`).
+- `stream(text, *, voice, model, format, **extra)` → iterator yielding audio bytes (default raises `NotImplementedError`).
+- `streams_pcm = True` + `stream_sample_rate` (Hz) → join the streaming voice path (CLI/TUI voice mode, desktop read-aloud, gateway streaming audio). Hermes then calls `stream(text, format="pcm", voice=..., model=..., speed=...)` with the same `tts.voice` / `tts.model` / `tts.speed` that `synthesize()` gets, and expects raw int16 little-endian mono PCM at that rate. Both attributes and `is_available()` are read each time a reply starts, so they can be properties that reflect live state. Unlike `synthesize()`, `stream()` can be called for up to three consecutive sentences at once while earlier audio plays, so it must be thread-safe. Without a positive `stream_sample_rate`, or when `is_available()` is `False`, Hermes keeps synthesizing one sentence at a time.
 - `voice_compatible` property → set `True` if your output is Opus-compatible and the gateway should deliver it as a voice bubble (default `False` = regular audio attachment).
 - `warm()` / `release()` → called when a surface toggles speech output on / when the last lease across surfaces is released, while your provider is the configured `tts.provider` — preload or unload a local model server here. Both default to no-ops; exceptions are logged at debug and never fail the toggle.
 
@@ -55938,6 +56006,47 @@ Configurable via `config.yaml` under `browser.dialog_policy`:
 
 Policy is per-task; no per-dialog overrides.
 
+## Trusted plugin CDP access
+
+In-process plugin code can send raw CDP commands over a task's supervisor
+connection through one public call, instead of writing the supervisor's private
+call table or socket:
+
+```python
+from tools.browser_supervisor import SUPERVISOR_REGISTRY
+from tools.browser_supervisor_capture import CapturedCDPInvalid
+
+cdp = SUPERVISOR_REGISTRY.capture(task_id)  # raises CapturedCDPInvalid if no attached supervisor
+reply = cdp.call("Runtime.evaluate", {"expression": "document.title", "returnByValue": True},
+                 session_id=cdp.page_session_id, timeout=5)
+title = reply["result"]["result"]["value"]
+```
+
+- `SUPERVISOR_REGISTRY.capture(task_id, *, timeout=10.0) -> CapturedCDP` pins the
+  supervisor's current WebSocket and the default page session attached on it. It
+  never starts, reconnects or refocuses a supervisor.
+- `CapturedCDP.call(method, params=None, *, session_id=None, timeout=10.0) -> dict`
+  returns the raw CDP reply (`{"id", "result"}`). `session_id=None` addresses the
+  browser endpoint (`Target.*`); pass `page_session_id` or a session you attached
+  yourself for page domains. A CDP error reply raises `RuntimeError`; no reply
+  within `timeout` raises `TimeoutError`. The call blocks its thread, so call it
+  from a worker thread, never from the supervisor's own event loop.
+- `CapturedCDP.is_valid()` stays true until the supervisor reconnects, stops, or
+  is replaced in the registry. After that every `call` raises
+  `CapturedCDPInvalid`, including a call already in flight when the socket
+  drops. A handle never follows the supervisor to a new connection: capture
+  again and re-check whatever state you depend on.
+- `page_session_id` is the default page session at capture time. A later
+  `focus_page` on the supervisor does not change it.
+- Sessions you attach (`Target.attachToTarget`) are yours to detach. A reply
+  that arrives after `timeout` is dropped, so a timed-out attach can leave a
+  session attached until the connection closes; give attaches a generous timeout.
+
+This is a trusted, in-process seam. It grants nothing in-process Python could
+not already reach, and it enforces no origin, consent or target-ownership
+policy: a plugin that acts on pages must enforce its own. It is not exposed as a
+model tool and has no config switch.
+
 ## Agent surface
 
 ### `browser_dialog` tool
@@ -56020,6 +56129,7 @@ expiry, while the supervisor's long-lived connection keeps a valid session.
 ## File layout
 
 - `tools/browser_supervisor.py` — `CDPSupervisor`, `SupervisorRegistry`, `PendingDialog`, `FrameInfo`
+- `tools/browser_supervisor_capture.py` — `CapturedCDP` / `CapturedCDPInvalid`, the trusted-plugin CDP seam behind `SUPERVISOR_REGISTRY.capture`
 - `tools/browser_dialog_tool.py` — `browser_dialog` tool handler
 - `tools/browser_tool.py` — `browser_navigate` start-hook, `browser_snapshot` merge, `/browser connect` reattach, `_cleanup_browser_session` teardown
 - `toolsets.py` — registers `browser_dialog` in `browser`, `hermes-acp`, `hermes-api-server`, and core toolsets (gated on CDP reachability)
@@ -62174,6 +62284,7 @@ Full definition in `providers/base.py`. The most useful ones:
 | `display_name` | str | Human label shown in `hermes model` picker |
 | `description` | str | Picker subtitle |
 | `signup_url` | str | Shown during first-run setup ("get an API key here") |
+| `hidden` | bool | Pre-release: kept off every discovery surface (provider pickers, setup list, dashboard accounts tab) until `listed()` is true — by default once the user signs in by name (`hermes auth add <name>` writes a pool row). Resolution by name is never gated |
 | `env_vars` | `tuple[str, ...]` | API-key env vars in priority order; a final `*_BASE_URL` entry is used as the user base-URL override |
 | `base_url` | str | Default inference endpoint |
 | `models_url` | str | Explicit catalog URL (falls back to `{base_url}/models`) |
@@ -62553,6 +62664,13 @@ the listener binds the literal `127.0.0.1`; tokens, `state` and the PKCE verifie
 Optional fields: `audience`, `extra_authorize_params`, `extra_token_params`, `redirect_path`,
 `timeout_seconds`, `label`.
 
+A confidential client whose secret lives behind your own broker sets `token_request` instead of
+`token_url`: Hermes calls it with the grant fields (`grant_type`, `code` / `refresh_token`,
+`redirect_uri`, `code_verifier`) and stores whatever token-endpoint JSON it returns, keeping the old
+`refresh_token` when the response omits one. Raise `AuthError(..., relogin_required=True)` for a grant
+the broker reports dead. Rows rotate ahead of their stored `expires_at_ms`, so opaque (non-JWT) access
+tokens refresh on time; the auxiliary client (compression, titles) leases the same pooled row.
+
 ## Recovery and error classification
 
 A `kind: model-provider` plugin is loaded by provider discovery, **not** by the generic plugin manager, so
@@ -62576,7 +62694,7 @@ register_provider(ProviderProfile(name="example-oauth", auth_type="oauth_externa
 |---|---|
 | `classify_api_error(error, *, status_code, error_code, message, body, model)` | Consulted by `agent.error_classifier.classify_api_error` for failures of **this provider only**, after any generic `transform_api_error_classification` hooks and before the built-in pipeline. `message` is the lower-cased error text, `body` the parsed JSON body (may be empty). Return `{"reason": <FailoverReason name>}` plus optional `retryable` / `should_compress` / `should_rotate_credential` / `should_fallback` / `error_context` to override (for terminal reasons — billing, auth, model_not_found … — `should_fallback: True` implies `retryable: False` unless you set it, because the fallback chain only runs for non-retryable verdicts; rate-limit reasons keep the built-in retry-then-fallback shape); `None` (or an unknown reason) leaves the built-in verdict. Exceptions are swallowed and logged at DEBUG. The verdict drives the same recovery as for built-ins — e.g. `billing` benches the credential for the billing TTL instead of the transient 403 cooldown. |
 | 401 on a plugin credential | Handled by the credential pool, no core edit: the failing pooled row is refreshed through `refresh_credential` once per attempt (capped at two refreshes per row per session), the client is rebuilt with the rotated token and the request retried. A `None`/empty return or an exception benches the row — the request then rotates or falls to the generic "sign in again: `hermes auth add <name>`" copy, never to a built-in provider's guidance. |
-| Auxiliary calls | Auxiliary-client 401s take the same pool refresh (`try_refresh_current` → `refresh_credential`). |
+| Auxiliary calls | An `oauth_external` / `oauth_device_code` plugin that ships `create_client` serves auxiliary tasks on its pooled row (an expiring row is rotated first); auxiliary 401s take the same pool refresh (`try_refresh_current` → `refresh_credential`). |
 
 Recovery that remains name-keyed in core is behaviour with no safe generic shape (a provider-specific
 token store to re-sync, a plan-tier entitlement wall, a single-use refresh-token quarantine). A plugin
@@ -63768,11 +63886,53 @@ auxiliary:
 
 Plugins may supply provider/model registration defaults for their own
 tasks. Operator configuration in `auxiliary.<task>` overrides those
-defaults and controls the deployment choice. A plugin can only use a task
+defaults and controls the deployment choice. A registered task is a
+first-class slot on every model-assignment surface: the `hermes model` →
+*Configure auxiliary models* picker, the dashboard Models page, and Desktop
+Settings → Models → Auxiliary all list it (after the built-in tasks, under
+the plugin's `display_name`) and can pin, reset, or flag it as a stale
+provider pin like any built-in. A plugin can only use a task
 it registered itself; unknown or foreign task names fail before provider
 invocation. `allow_task_override: true` is an explicit operator grant for
 using Hermes built-in auxiliary tasks; it does not permit another plugin's
 tasks. Omit `task=` (or use `"auto"`) to keep the active main provider/model.
+
+#### Inheriting a built-in slot
+
+`inherit_from` names a built-in auxiliary task (`compression`, `mcp`,
+`vision`, ...) or a task your plugin (or one loaded before it) already
+registered. Your task then uses that slot's model until the operator pins
+one on your task directly:
+
+```python
+def register(ctx):
+    ctx.register_auxiliary_task(
+        "classifier",
+        display_name="Classifier",
+        description="Classify input.",
+        inherit_from="compression",         # use whatever compression uses...
+        defaults={"timeout": 90},           # ...but give slow classifiers more room
+    )
+```
+
+- **Resolved on every read, not copied at registration.** Change
+  `auxiliary.compression` (CLI, dashboard, Desktop, or `config.yaml`) and the
+  classifier follows on its next call, per profile.
+- **Precedence:** the inherited base, then the plugin's `defaults`, then the
+  operator's `auxiliary.<task>` block.
+- **An operator pin wins as a whole route.** Once `auxiliary.classifier` sets a
+  non-`auto` provider, a model or a `base_url`, the provider, model, endpoint,
+  key and reasoning effort all come from that block; nothing from the base's
+  route is mixed in. `provider: auto` with an empty model is "no preference",
+  so the task keeps following its base (that is what "Reset all" and Desktop's
+  *Follow &lt;base&gt;* button write).
+- **A bad base never breaks the plugin.** An unknown or self-referential
+  `inherit_from` logs a warning and the task registers without inheritance.
+
+The Models settings show an unpinned inheriting task as
+*inherits Compression · &lt;provider · model&gt;*, and
+`GET /api/model/auxiliary` returns `inherit_from` plus an `effective`
+`{provider, model, base_url}` on such rows.
 
 ### Result attributes
 
@@ -63980,6 +64140,7 @@ Hermes has several distinct pluggable interfaces — some use Python `register_*
 | A **video-generation backend** | [Video Generation Provider Plugins](../video-gen-provider-plugin.md) |
 | A **web-search / extract backend** | [Web Search Provider Plugins](../web-search-provider-plugin.md) |
 | A **cloud browser backend** (Browserbase-style CDP session provider) | [Browser Provider Plugins](../browser-provider-plugin.md) |
+| A **computer-use driver** (desktop control behind the `computer_use` tool) | [Computer-use backend plugins](#computer-use-backend-plugins) — `ctx.register_computer_use_provider()` |
 | A **secret-manager backend** (vault / password manager / OS keystore) | [Secret Source Plugins](../secret-source-plugin.md) |
 | A **dashboard OIDC/auth provider** | [Web Dashboard — custom providers](../../user-guide/features/web-dashboard.md#custom-providers) — `ctx.register_dashboard_auth_provider()` |
 | A **TTS backend** (any CLI — Piper, VoxCPM, Kokoro, voice cloning, …) | [TTS custom command providers](../../user-guide/features/tts.md#custom-command-providers) — config-driven, no Python needed |
@@ -65420,6 +65581,18 @@ def register(ctx):
 
 For running a full `hermes <subcommand>` (e.g. `hermes kanban show`), shell out with the `terminal` tool via `ctx.dispatch_tool("terminal", {"command": "hermes kanban show ..."})` — there is no in-process slash-command bridge for headless worker sessions, and tools are the supported way to drive Hermes from a hook.
 
+### Send raw CDP commands to the agent's browser
+
+A plugin that must drive the agent's browser below the browser tools can get a
+CDP handle pinned to a task's live supervisor connection with
+`SUPERVISOR_REGISTRY.capture(task_id)` and send commands with
+`call(method, params=None, *, session_id=None, timeout=10.0)`. The handle
+raises `CapturedCDPInvalid` once that connection is gone and never retargets a
+newer one. Use it instead of reading or writing `CDPSupervisor` private
+attributes, which the catalog rejects. It is trusted in-process transport only:
+it performs no origin, consent or ownership checks for you. Full contract:
+[Browser CDP Supervisor](../browser-supervisor.md#trusted-plugin-cdp-access).
+
 ### Know which cron run you are in
 
 `ctx.current_cron_execution()` returns the scheduled run the current code executes inside, or `None` outside cron. It works from any hook that fires during the run (`pre_tool_call`, `post_tool_call`, `pre_llm_call`, ...) and from tool handlers. The value is a frozen `CronExecution`:
@@ -65443,6 +65616,39 @@ def register(ctx):
             return {"action": "block", "message": "deploy only runs from its scheduled cron job"}
     ctx.register_hook("pre_tool_call", guard)
 ```
+
+### Add Automation Blueprints
+
+`ctx.register_automation_blueprint(key, *, title, description, schedule_template, prompt_template, category="general", slots=(), deliver_default="origin", skills=(), tags=())` adds a fill-in-the-blanks automation to the [Automation Blueprints catalog](../../reference/automation-blueprints-catalog.mdx). It appears next to the built-ins in `/blueprint` (CLI, TUI, messengers), the dashboard's Blueprints tab, and the Desktop Cron page, labelled with your plugin's name. The arguments are the fields of the built-in `AutomationBlueprint` (`cron/blueprint_catalog.py`); each slot is a dict of `BlueprintSlot` fields.
+
+```python
+def register(ctx):
+    ctx.register_automation_blueprint(
+        "standup",
+        title="Team standup digest",
+        description="Every weekday, summarize what changed in a repo since yesterday.",
+        category="work",
+        schedule_template="{minute} {hour} * * 1-5",
+        prompt_template="Summarize yesterday's commits and open PRs for {repo} as a short standup digest.",
+        slots=[
+            {"name": "repo", "type": "text", "label": "Which repo?", "default": "acme/app"},
+            {"name": "time", "type": "time", "label": "What time?", "default": "09:15"},
+            {"name": "deliver", "type": "enum", "label": "Where to deliver?", "default": "origin",
+             "options": ["origin", "local"], "strict": False},
+        ],
+        tags=["work", "daily"],
+    )
+```
+
+Users then run `/blueprint teamtools:standup` (or just `/blueprint standup`) or pick it in the Desktop/dashboard form.
+
+- **Keys are namespaced.** The catalog key is `<plugin>:<key>` (`teamtools:standup`), so a plugin can never replace a built-in or another plugin's blueprint. Pass the bare key; a key containing `:` is rejected.
+- **Slots and templates.** Slot `type` is `time` (`HH:MM`), `enum`, `weekdays`, or `text`. `prompt_template` may use any slot as `{name}`. `schedule_template` may use slot names plus `{minute}`/`{hour}` (from a slot named `time`) and `{dow}` (from a `recurrence`/`day` slot, else `*`). A slot named `deliver` gets the profile's real delivery targets in the Desktop and dashboard forms.
+- **Validated at registration.** An unknown placeholder, bad slot type, duplicate key, or schedule that does not parse logs a warning and skips that blueprint; the rest of your plugin still loads. When every slot has a default, Hermes fills the blueprint once at load, so a broken template fails then instead of on the user's first *Schedule it*.
+- **Per profile.** Plugins load per profile, so the blueprint is listed only in profiles where your plugin is enabled.
+- **Jobs outlive the plugin.** Scheduling a blueprint creates an ordinary cron job with the prompt and schedule already filled in. Disabling or uninstalling the plugin removes the blueprint from the catalog but leaves those jobs running. If a job's `skills` name a skill your plugin bundles, the job skips that skill (and logs it) while the plugin is disabled.
+
+This needs no manifest capability. It also works under plugin host isolation, because slots are plain dicts.
 
 ### Handle Slack Block Kit button clicks
 
@@ -65783,6 +65989,90 @@ description: Custom image generation backend
 **Full guide:** [Image Generation Provider Plugins](../image-gen-provider-plugin.md) — full `ImageGenProvider` ABC, `list_models()` / `get_setup_schema()` metadata, `success_response()`/`error_response()` helpers, base64 vs URL output, user overrides, pip distribution.
 
 **Reference examples:** `plugins/image_gen/openai/` (DALL-E / GPT-Image via OpenAI SDK), `plugins/image_gen/openai-codex/`, `plugins/image_gen/xai/` (Grok image gen).
+
+### Computer-use backend plugins
+
+The `computer_use` tool talks to exactly one **driver** through the `ComputerUseBackend` ABC
+(`tools/computer_use/backend.py`). `computer_use.backend` in `config.yaml` picks it; the default is the
+built-in cua-driver, which ships as an ordinary provider at `plugins/computer_use/cua/`. Another driver
+is a provider plugin in `~/.hermes/plugins/<name>/` whose `register(ctx)` calls
+`ctx.register_computer_use_provider()`. The directory name is the value you put in `computer_use.backend`.
+Computer-use providers are single-select, like memory providers and context engines:
+
+```python
+# ~/.hermes/plugins/my-driver/__init__.py
+from tools.computer_use.backend import (
+    ActionResult, CaptureResult, ComputerUseBackend, ComputerUseProvider,
+)
+
+class MyBackend(ComputerUseBackend):
+    def start(self): ...                    # open the driver session
+    def stop(self): ...                     # tear it down (also called at exit)
+    def is_available(self): return True
+    def capture(self, mode="som", app=None, pid=None, window_id=None):
+        return CaptureResult(mode=mode, width=1920, height=1080, png_b64=...)
+    def click(self, **kw): return ActionResult(ok=True, action="click")
+    def drag(self, **kw): return ActionResult(ok=True, action="drag")
+    def scroll(self, **kw): return ActionResult(ok=True, action="scroll")
+    def type_text(self, text, **kw): return ActionResult(ok=True, action="type")
+    def key(self, keys, **kw): return ActionResult(ok=True, action="key")
+    def list_apps(self): return []
+    def focus_app(self, app, raise_window=False): return ActionResult(ok=True, action="focus_app")
+    def set_value(self, value, element=None):
+        # A driver that can't do an action says so per call; the tool schema never changes.
+        return ActionResult(ok=False, action="set_value", code="unsupported_action",
+                            message="my-driver has no accessibility value setter")
+
+class MyDriverProvider(ComputerUseProvider):
+    name = "my-driver"
+    display_name = "My driver"
+
+    def create_backend(self, *, permission_mode):
+        return MyBackend()                  # permission_mode: standard | bounded | unrestricted
+
+    def is_available(self):                 # gates the tool; cheap, no network
+        return True
+
+    def doctor(self):                       # optional: `hermes computer-use doctor`
+        print("my-driver: ok")
+        return 0
+
+def register(ctx):
+    ctx.register_computer_use_provider(MyDriverProvider())
+```
+
+```yaml
+# ~/.hermes/plugins/my-driver/plugin.yaml
+name: my-driver
+version: 1.0.0
+description: Alternative computer-use driver   # shown in the picker
+```
+
+Select it in `hermes tools` → Computer Use (installed providers are listed under cua-driver, in the
+CLI and in the Desktop toolset panel), or set it directly. No `plugins.enabled` entry is needed:
+
+```yaml
+# config.yaml
+computer_use:
+  backend: my-driver     # default: cua
+```
+
+Rules:
+
+- **One provider is active at a time.** Only the selected one is imported and instantiated. Installed
+  providers that aren't selected stay on disk and are only listed (from `plugin.yaml`) as options. A
+  provider never activates itself.
+- **Selection is per profile and read when a session starts its driver.** If the configured name
+  doesn't resolve, the call fails with an error naming it and the installed providers. Hermes never
+  falls back to another driver.
+- **The model-facing schema is the same for every provider**, so the prompt cache survives a driver
+  swap. Report gaps per action with `ActionResult(ok=False, code="unsupported_action", ...)`.
+- Approval gating, the Bot Desktop lease, screenshot dedup, element caps and vision routing all run
+  in the tool, above the backend. The backend only drives the screen.
+- `hermes computer-use status`/`doctor`/`permissions` run cua-driver checks only when `cua` is
+  selected. For any other provider they report its `is_available()` and run its `doctor()` if it has one.
+- Providers return live driver sessions, so they load in-process only. Under
+  `plugins.isolation: host`, a user provider is refused and the call reports that it could not be loaded.
 
 ## Non-Python extension surfaces
 
@@ -67898,16 +68188,16 @@ itself ships.
 | `hermes.setup.completed` | surface (`cli`/`desktop`), provider | Which providers people choose at setup, and on which surface. |
 | `hermes.model_tokens.sum` | call role, model, provider, auxiliary task, token type | Token volume per model/provider, prompt-cache share, and what auxiliary work (compression, titles, vision, ...) costs. The value is a token sum, not an event count. |
 | `hermes.model_route.count` `ttft_bucket` | time to first token | Perceived latency per provider/model. |
-| `hermes.compression.count` | trigger, outcome, context-fill bucket | How often compaction runs, how full contexts get, and whether it fails. |
+| `hermes.compression.count` | trigger, outcome, context-fill bucket, failure class | How often compaction runs, how full contexts get, and whether it fails. `skipped` = nothing could fail: lock held elsewhere, nothing summarizable (no model call), user stop, or a newer attempt replaced it. Since package schema v4 the row also carries `failure_class`, the attempt log's own class name from a closed list: the skip reasons (`lock_contended`, `insufficient_messages`, `no_compressible_window`, `empty_post_handoff_window`, `explicit_interrupt`, `attempt_superseded`, `snapshot_stale`) on skipped rows; the failure reasons (`summary_auth_failure`, `summary_network_failure`, `summary_truncated_failure`, `summary_empty_content_failure`, `summary_overload_failure`, `summary_generation_aborted`, `summary_generation_failed`, `summary_overload_degraded`, `aux_model_fallback`, `feasibility_skip`, `stall_deterministic_fallback`, `stall_interrupted`, `would_grow`, `no_progress`, `commit_fence_cancelled`, `pool_saturated`, `session_split_failed`, `exception`, `rollback`) on failed rows; `none` on success. An exception's or rollback's Python type name is dropped (`exception:TimeoutError` reads `exception`), any other value reads `other`, a failure with no class `unknown`. |
 | `hermes.model_switch.count` | from/to provider, surface | Which providers people leave and move to. |
 | `hermes.fallback.count` | from/to provider, error class | How often fallback providers rescue a turn, and from what. |
 | `hermes.slash_command.count` | command, surface | Which built-in commands are used (`/retry`, `/undo`, `/new` are friction signals). Skill and plugin commands report `skill`/`plugin`. |
 | `hermes.extension.install.count` | kind, source, name, outcome | Which catalog skills, MCP servers and plugins get installed. `name` is a bundled/optional skill, `optional-mcps/` or `plugin-catalog/` entry, otherwise `custom`. |
-| `hermes.memory.op.count` | op (`add`/`replace`/`remove`/`read`/`search`/`other`), provider (`builtin`, a bundled memory plugin, else `plugin`), origin (`foreground`/`background_review`), outcome (`success`/`failed`/`rejected`) | Is the learning loop writing memory, who asks for it (the user's turn or the background review), and how often writes are refused or fail. Never the memory text. |
+| `hermes.memory.op.count` | op (`add`/`replace`/`remove`/`read`/`search`/`other`), provider (`builtin`, a bundled memory plugin, else `plugin`), origin (`foreground`/`background_review`), outcome (`success`/`failed`/`rejected`), failure class | Is the learning loop writing memory, who asks for it (the user's turn or the background review), and how often writes are refused or fail, and why. Since package schema v4 `failure_class` names the reason from a closed list mapped from each refusal/failure return of the built-in store: `no_match` (old_text matched no entry), `ambiguous` (it matched several), `over_budget` (the write would pass the char limit), `would_empty` (a batch would remove the last entry), `drift` (the file holds text the store cannot round-trip), `read_failed` (the file exists but cannot be read), `retry_cap` (the per-turn retry budget is spent), `scan_blocked` (the content matched a threat pattern), `missing_content`, `missing_old_text`, `invalid_args`, `stale_entry` (a staged write's entry changed), `disabled` (that target is off in config), `staged` (held for the user's approval), `gate_refused` (the write-approval gate blocked it); `provider_error` / `exception` for a plugin provider's tool that returned an error or raised; `none` on success; `other`/`unknown` otherwise. A batch applies all or none, so every op row of a refused batch carries the class of the op that stopped it. Never the memory text, the old_text or the error message. |
 | `hermes.curator.run.count` | trigger (`scheduled`/`manual`), outcome (`success`/`failed`/`skipped`), archived/merged/patched/created buckets | Does the skill curator run, and does it actually consolidate anything. Dry runs report `skipped`; a scheduled check that finds another process already running the pass records nothing. Never skill names. |
 | `hermes.delegation.run.count` | subagent-count bucket, depth (`1`–`3`, `gte_4`), mode (`foreground`/`background`), outcome (`success`/`partial`/`failed`/`cancelled`) | How wide and deep delegate_task fan-outs go and how often every child finishes. One row per call, however many completion units it splits into. |
 | `hermes.execution_backend.count` | kind (`terminal`/`browser`/`code`), backend, outcome, error class | Which sandboxes carry real work and how reliable each is. Terminal backends are the `terminal.backend` values (else `other`); browser backends are `local`, `lightpanda`, `cdp`, `camofox`, `extension` or a bundled cloud provider (else `other`); execute_code is `local` or `remote`. A command's own nonzero exit is still a backend success, but a foreground command that hits its timeout is `failed`/`timeout`; terminal and execute_code calls a guard refuses before they reach the backend, Hermes' own listings for TUI/Desktop path completion, and calls made by the background review and curator forks are not counted. |
-| `hermes.platform.health` | platform, event (`connect_ok`/`connect_failed`/`reconnect`/`disconnect`), error class (`auth`/`network`/`rate_limited`/`config`/`other`) | Which messaging platforms fail to connect or drop, and why. Classified from exception types, HTTP statuses and Hermes's own fatal codes, never error text. |
+| `hermes.platform.health` | platform, event (`connect_ok`/`connect_failed`/`reconnect`/`disconnect`), error class (`auth`/`network`/`rate_limited`/`config`/`other`) | Which messaging platforms fail to connect or drop, and why. `connect_failed` counts a failed-connect episode once per profile, platform and UTC day (the reconnect watcher's retries are not new rows; the next success ends the episode, and a platform still failing the next day counts again), with the error class of the episode's first failure. Classified from exception types, HTTP statuses and Hermes's own fatal codes, never error text. |
 | `hermes.platform.delivery` | platform, outcome (`sent`/`failed`), failure class (`rate_limited`/`too_long`/`auth`/`network`/`forbidden`/`other`) | How often replies fail to reach the user per platform (one count per logical reply, retries included). |
 | `hermes.gateway.reply_latency` | platform, first-response bucket (`lt_2s` … `gte_60s`) | Time from an accepted inbound message to the first visible reply text (stream first chunk or final message). |
 | `hermes.cron.run` | outcome (`success`/`failed`/`missed`/`skipped`), delivery kind (`local`/`platform`/`webhook`/`none`/`other`), duration bucket | Do scheduled jobs run, fail, get skipped by a gate or overlap, or get missed while Hermes was down. Job names, prompts, schedules and targets are never included. |
@@ -68051,7 +68341,7 @@ database and the count is not reported.
 | Metric | Dimensions | Question it answers |
 |---|---|---|
 | `hermes.tool_unavailable.count` | provider, model, tool name (shipped built-ins only) | Which toolsets should be on by default: the model called a tool Hermes ships that this session did not enable. Any other unknown name (plugin, MCP, hallucinated) stays a `model_tool_quality` `unknown_tool` issue only. A built-in the session enabled but deferred behind `tool_search` (reachable through `tool_call`) is not unavailable. Background reviews, delegated children and cron jobs, whose toolsets are narrowed on purpose, are excluded. |
-| `hermes.provider_setup.count` | provider (catalog name; custom endpoints read `custom`), surface (`cli_setup`, `cli_model`, `tui`, `desktop`, `dashboard`), event (`started`, `completed`, `failed`, `abandoned`), failure class (`auth`, `network`, `no_models`, `cancelled`, `other`; `none` unless failed) | Where connecting a provider breaks down. `started` counts once a provider is picked; the flow's end is recorded by the surface that ran it. In the CLI pickers Esc ends the flow `failed`/`cancelled`; Back (Left arrow) keeps it open, so picking the same provider again continues it (one `started`), while picking another provider or leaving the command ends it `cancelled`. A flow nobody finished leaves a local marker that the next setup start or Hermes start in the profile reports as `abandoned` (its process is gone, or it has been pending over an hour); an OAuth device code left to expire is also `abandoned`. A new or changed provider API key saved from a form (TUI/Desktop/dashboard) and a newly added custom endpoint start and complete in one action; clearing a key, re-saving the same key, editing an existing endpoint, ecosystem tokens (`GITHUB_TOKEN`, `GH_TOKEN`, `HF_TOKEN`) and keys a tool's settings panel also asks for (e.g. `GEMINI_API_KEY`, `XAI_API_KEY`, `DEEPINFRA_API_KEY`) are not counted from the generic key form (the Desktop's onboarding and model settings mark their saves as a provider connection, so those count). Never a key, token, base URL or error text. Leaving the provider picker before choosing one is not counted. |
+| `hermes.provider_setup.count` | provider (catalog name; custom endpoints read `custom`), surface (`cli_setup`, `cli_model`, `tui`, `desktop`, `dashboard`), event (`started`, `completed`, `failed`, `abandoned`), failure class (`auth`, `network`, `no_models`, `other`; `none` unless failed; `cancelled` is no longer recorded, a cancel is `abandoned`) | Where connecting a provider breaks down. `started` counts once a provider is picked; the flow's end is recorded by the surface that ran it. A flow the user walked away from is `abandoned`, never `failed`: Esc or Ctrl-C in the CLI pickers, Cancel/Back on a Desktop or dashboard sign-in, consent declined on the provider's page, and a sign-in code left to expire (any provider). Back (Left arrow) in the CLI keeps the flow open, so picking the same provider again continues it (one `started`), while picking another provider or leaving the command ends it `abandoned`. A flow nobody finished leaves a local marker that the next setup start or Hermes start in the profile reports as `abandoned` (its process is gone, or it has been pending over an hour). A Desktop/dashboard sign-in that dies mid-poll keeps the class of the error that ended it (`network` for a dropped connection, `auth` for a refusal), not a bare `other`. A new or changed provider API key saved from a form (TUI/Desktop/dashboard) and a newly added custom endpoint start and complete in one action; clearing a key, re-saving the same key, editing an existing endpoint, ecosystem tokens (`GITHUB_TOKEN`, `GH_TOKEN`, `HF_TOKEN`) and keys a tool's settings panel also asks for (e.g. `GEMINI_API_KEY`, `XAI_API_KEY`, `DEEPINFRA_API_KEY`) are not counted from the generic key form (the Desktop's onboarding and model settings mark their saves as a provider connection, so those count). Never a key, token, base URL or error text. Leaving the provider picker before choosing one is not counted. |
 | `hermes.feature_adoption.count` | feature (`memory`, `skills_created`, `delegation`, `cron`, `gateway_platform`, `desktop`, `tui`, `mcp`, `plugins`, `browser`, `voice`, `kanban`, `projects`, `bot_mode`, `curator`), days since install (`same_day`, `1d_to_7d`, `7d_to_30d`, `30d_to_90d`, `gte_90d`, `unknown`) | How long after install each major feature is first really used. Once per feature per install, latched in the local database, derived from the counters above (a foreground memory write, a skill created at the user's request (not by Hermes' background review), a successful MCP/plugin/browser/TTS/kanban tool call, a Desktop/TUI/gateway task, a cron run, a manual curator run; the scheduled curator pass does not count) plus direct first-use reports for Bot Mode messages and project creation. The age is the owning profile's (its first session). |
 | `hermes.feature_disabled.count` | kind (`toolset`, `skill`, `plugin`, `platform`, `setting`, `memory`, `curator`, `compression`), name, surface (`cli_tools`, `cli_config`, `cli_slash`, `tui`, `desktop`, `dashboard`), event (`disabled`, `re_enabled`) | What users turn off. Diffed at the config write itself: a default-on toolset removed, a skill or plugin added to its disabled list, a default-`true` setting set false (and each moved back). Names are public only when shipped — toolset key, bundled/catalog skill, bundled/catalog plugin (messaging-platform plugins report as `platform`), `DEFAULT_CONFIG` key path (never a value) — else `custom`. Uninstalling a catalog skill counts as `disabled`. Only user entry points record (`hermes tools` / `config` / `skills` / `plugins`, chat slash commands, TUI/Desktop, dashboard); setup and migrations do not, even when a migration runs inside one of them (`hermes config migrate`, a profile created from the dashboard). A setting whose value is a `${VAR}` template is not compared. The diff and the record run on a background thread after the write, outside every config lock. At most once per (kind, name, event) per day. |
 <!-- ---- end v5 signals ---- -->
@@ -68075,10 +68365,11 @@ platform strings, hostnames, and paths are never included. Fully packaged
 aggregate rows and successfully exported package rows and files are retained
 locally for 30 days. Pending package rows and counters with unexported deltas
 are never pruned.
-Package schemas v1 and v2 remain unchanged for existing outbox files. New
-packages use v3, which also accepts the v2 field sets of `hermes.model_route.count`,
-`hermes.tool_call.count` and the task counters so counters recorded before an upgrade
-drain safely.
+Package schemas v1, v2 and v3 remain unchanged for existing outbox files. New
+packages use v4, which adds `failure_class` to `hermes.compression.count` and
+`hermes.memory.op.count` and still accepts their v3 field sets, as v3 accepted the v2
+field sets of `hermes.model_route.count`, `hermes.tool_call.count` and the task
+counters, so counters recorded before an upgrade drain safely.
 Vocabularies derived from in-repo registries (tool names, platforms, memory
 providers, error classes) are bounded by pattern in the JSON schema; the
 authoritative allowlist is `shared_metrics_contract.py`.
@@ -68176,8 +68467,15 @@ Both keys are asked once per profile, with the same three answers everywhere
 "No thanks" is the default in the terminal, so pressing Enter never opts
 anyone in. Esc in the terminal and the dashboard banner's ✕ leave the question
 open, so it is asked again next time. Answering on any surface writes both keys
-to the profile's `config.yaml`, and a profile that already carries either key is
-never asked again. A managed install is never offered. To change the answer
+to the profile's `config.yaml`, plus `offer_version`, and a profile that already
+carries either key is never asked again. A managed install is never offered.
+
+One exception: before the type-ahead fix, an Enter pressed while `hermes chat`
+was starting could save "No thanks" before the question appeared. A "No thanks"
+recorded without `offer_version` is therefore offered once more on every surface,
+with a note saying why. Any response settles it for good, including Esc or the
+banner's ✕, which keep "No thanks". Answers that opted in are never re-asked.
+To change the answer
 later, use `hermes setup telemetry`, `hermes tools`, or Desktop's Settings ›
 Safety › Privacy & network.
 
@@ -69727,6 +70025,7 @@ tts:
 | gemini      | SSE (`streamGenerateContent?alt=sse`) | yes         | `GEMINI_API_KEY` / `GOOGLE_API_KEY` |
 | xai         | WebSocket (`wss://api.x.ai/v1/tts`)   | yes         | `XAI_API_KEY` preferred, else xAI OAuth (the subscription bearer 403s on metered TTS) |
 | edge, piper, kitten, neutts, mistral, minimax, deepinfra, … | — | no (per-sentence sync fallback) | as usual |
+| plugin `TTSProvider` with `streams_pcm` | the plugin's `stream(format="pcm")` | yes, at its `stream_sample_rate` | the plugin's own |
 
 All credential lookups go through `resolve_provider_secret()`
 (config > env/.env > credential pool) — never bare env reads. Streamed bodies
@@ -69745,6 +70044,24 @@ upstream-body invariant.
 The ABC enforces the contract; the registry makes the provider discoverable;
 the dispatcher (`stream_tts_to_speaker`) and the gateway consumer handle the
 sentence buffer, stop events, and audio sink for free.
+
+## Plugin providers
+
+A plugin `TTSProvider` (registered with `ctx.register_tts_provider()`) joins this
+path without core changes. It sets `streams_pcm = True` and a positive
+`stream_sample_rate`, and its `stream(text, format="pcm", voice=, model=, speed=)`
+yields int16 mono PCM. `resolve_streaming_provider` adapts it
+(`tools.tts_streaming._PluginPCMStreamer`) under the same routing rules as the
+sync dispatcher (`tools.tts_tool_plugins`): built-in names never reach the
+registry, a same-named `type: command` provider wins, and the plugin gets the
+same `tts.voice` / `tts.model` / `tts.speed` as `synthesize()`. A configured
+plugin streams first. Under `tts.streaming.provider: auto` it is tried only after
+the built-in priority list. `streams_pcm`, `stream_sample_rate` and
+`is_available()` are read every time a streamer is resolved. If the rate is
+missing or the provider reports unavailable, Hermes keeps per-sentence synthesis.
+As with the built-in streamers, the speaker pipeline prefetches up to three
+sentences, so a plugin's `stream()` must tolerate concurrent calls (the sync
+path serializes `synthesize()`; this path does not).
 
 ## Gateway streaming (platform adapters)
 
@@ -77292,12 +77609,27 @@ is created. Manage created jobs anytime with `/cron`.
 
 <AutomationBlueprintsCatalog />
 
+## Blueprints from plugins
+
+Plugins can add their own blueprints. They show up in the same catalog as the
+built-ins: in `/blueprint`, the dashboard's Blueprints tab, and the desktop Cron
+page, labelled with the plugin's name. Their keys are prefixed with the plugin
+name (`/blueprint teamtools:standup`), so a plugin can never replace a built-in.
+Plugins load per profile, so a plugin blueprint is listed only in profiles where
+that plugin is enabled.
+
+A job you create from a plugin blueprint is an ordinary cron job. Disabling the
+plugin removes the blueprint from the catalog, but jobs you already created keep
+running.
+
 ## Writing your own
 
 A blueprint is just a skill with a `metadata.hermes.blueprint` block in its
 `SKILL.md` frontmatter. See
 [Creating Skills → Automation Blueprints](../developer-guide/creating-skills.md) for the
-slot schema and how to publish one.
+slot schema and how to publish one. Plugin authors can register one directly
+with `ctx.register_automation_blueprint()`; see
+[Build a Plugin → Add Automation Blueprints](../developer-guide/plugins/index.md#add-automation-blueprints).
 
 ---
 
@@ -81518,11 +81850,10 @@ recipe). If the task exists but you want it gone, remove it with
 from an elevated shell — Hermes does not re-register it once
 `computer_use.autostart` is false.
 
-Swap the backend entirely (for testing):
-
-```
-HERMES_COMPUTER_USE_BACKEND=noop   # records calls, no side effects
-```
+Swap the driver entirely: `computer_use.backend` in `config.yaml` names the one
+active provider (`cua`, the default, or an installed provider plugin; see
+[computer-use backend plugins](../../developer-guide/plugins/index.md#computer-use-backend-plugins)).
+`hermes tools` → Computer Use lists every installed provider.
 
 ### Telemetry
 
