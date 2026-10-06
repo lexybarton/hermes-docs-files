@@ -933,7 +933,7 @@ For an admitted source checkout, `hermes update` runs these phases:
 3. **Post-pull syntax validation + auto-rollback** — after the pull, Hermes compiles the nine critical files every `hermes` invocation imports at startup. If any fails to parse (e.g. an orphan merge-conflict marker, an accidentally truncated file), Hermes rolls the install back so your shell stays bootable: it resets the checkout to the commit it ran before the pull (`git reset --hard <pre-pull-sha>`), or, when the update switched away from a detached checkout or a parked feature branch, returns there with `git checkout --detach <sha>` / `git checkout <branch>` (a branch it cannot check out again is restored detached at the same commit). Re-run `hermes update` once the upstream fix lands.
 4. **Dependency preparation** — PM provisions required tools and prepares a complete Python environment from the new lock, existing extras, and enabled plugin requirements. It validates that environment before publishing its selection. A plugin never fails the update. A plugin that no longer fits the new core is added to `plugins.disabled` in every profile that enables it (a memory provider has `memory.provider` cleared). That covers a `requires-python` that excludes Hermes's Python, a `manifest_version` newer than this Hermes supports, and dependencies that the resolver proves can't resolve alongside core and earlier plugins in config order, or that fail their own build. A download or network failure gets one retry and is disabled if it fails again. The update prints `⚠ Disabled plugin '<name>' in <home>: <reason>`, records it in the receipt's warnings, and continues. Re-enable it with `hermes plugins enable <name>` once the plugin ships a compatible release, or once the network is back. A `requires_hermes` range the running version misses never disables a plugin, because a source checkout without release tags can read as an older release. That plugin sits out instead (`⚠ Left plugin '<name>' … out of this update`), stays enabled, and rejoins once Hermes reports a version it accepts. A secondary profile whose config cannot be read sits out the same way until the config is fixed. Only a core that cannot build on its own fails this step.
 5. **Config migration** — detects new config options added since your version and prompts you to set them
-6. **Desktop rebuild (stage-and-swap)** — if the Hermes Desktop app was built from this checkout, it is rebuilt so the GUI matches the new code. The rebuild packs into a temporary staging directory next to `apps/desktop/release/`, verifies the staged app, and only then renames it over the previous build (on Windows a real-time scanner briefly holding `release/win-unpacked` is ridden out with a few short retries). A rebuild that fails at any point — corrupt Electron download, missing dependency, disk full — leaves the previous app untouched and launchable; the update fails at that step, and `hermes desktop --build-only --force-build` or the next `hermes update` retries the rebuild. On macOS the rebuilt bundle is then copied (with `ditto`, signature intact) over a stale `/Applications/Hermes.app` or `~/Applications/Hermes.app`, so the copy Finder and the Dock launch matches the backend; an installed copy that is currently running is left alone and the update tells you to quit it and run `hermes update` again. If a copy an earlier update installed has since been removed (including dragged to the Trash), the update rebuilds it if needed, puts it back and says so, so Finder, the Dock and Spotlight find Hermes again; `hermes uninstall` removes the app for good. On Windows, when the update finishes from inside the Desktop app it would rebuild (the app completing an interrupted update at launch), the rebuild is skipped with a notice instead: Windows locks a running app's files, and stopping the app would end the update with it. The rest of the update completes; quit Hermes Desktop and run `hermes desktop` from a terminal, or use **Update now** in **Settings → About**, to rebuild and reopen it.
+6. **Desktop rebuild (stage-and-swap)** — if the Hermes Desktop app was built from this checkout, it is rebuilt so the GUI matches the new code. The rebuild packs into a temporary staging directory next to `apps/desktop/release/`, verifies the staged app, and only then renames it over the previous build (on Windows a real-time scanner briefly holding `release/win-unpacked` is ridden out with a few short retries). A rebuild that fails at any point — corrupt Electron download, missing dependency, disk full — leaves the previous app untouched and launchable; the update prints a `⚠` line, still finishes the remaining steps (config migration, gateway restart) and exits 0 with a `build` follow-up in its receipt, and the next launch, `hermes update` or `hermes desktop --build-only --force-build` retries the rebuild. On macOS the rebuilt bundle is then copied (with `ditto`, signature intact) over a stale `/Applications/Hermes.app` or `~/Applications/Hermes.app`, so the copy Finder and the Dock launch matches the backend; an installed copy that is currently running is left alone and the update tells you to quit it and run `hermes update` again. If a copy an earlier update installed has since been removed (including dragged to the Trash), the update rebuilds it if needed, puts it back and says so, so Finder, the Dock and Spotlight find Hermes again; `hermes uninstall` removes the app for good. On Windows, when the update finishes from inside the Desktop app it would rebuild (the app completing an interrupted update at launch), the rebuild is skipped with a notice instead: Windows locks a running app's files, and stopping the app would end the update with it. The rest of the update completes; quit Hermes Desktop and run `hermes desktop` from a terminal, or use **Update now** in **Settings → About**, to rebuild and reopen it.
 7. **Gateway auto-restart**: running gateways are refreshed after the update completes. Service-managed gateways (systemd on Linux, launchd on macOS) restart through the service manager. Manual gateways are relaunched when Hermes can map their PID to a profile. Manually launched `hermes serve` / `hermes dashboard` backends are different: the updater leaves them running and asks their owner to restart them. See [Manual backend restart reminders](#manual-backend-restart-reminders). Backends owned by a running Desktop app remain the app's responsibility.
 8. **Multiplex migration (multi-profile installs)** — once the fleet is verified on the new code, an install with two or more profiles that still run **one gateway per profile** is folded into a single multiplexed default gateway when nothing blocks it (same as `hermes gateway migrate --multiplex --yes`); if a blocker exists (a bot token shared by two profiles, a secondary profile binding a port with no `/p/<profile>/` ingress) the update prints the blockers with their fixes and changes nothing. Single-profile installs are never touched. See [Migrating from per-profile gateways](../user-guide/multi-profile-gateways.md#migrating-from-per-profile-gateways).
 
@@ -1122,7 +1122,7 @@ The same inventory is embedded in every real update's receipt (`~/.hermes/logs/u
 
 ### Update receipts and the fleet version check
 
-Every `hermes update` run writes a machine-readable receipt to `~/.hermes/logs/update_receipts/` (last 20 kept, `latest.json` always points at the most recent): the pre-update fleet plan, each step taken, anything skipped and why, the gateway restart outcome, and the final fleet version matrix. The SQLite runtime repair is one of those steps (`sqlite_runtime_repair`): a failed repair records the actual reason (for example the `uv sync` error) and the SQLite version pair, a deferred or not-applicable repair lands in the skips with its reason. After the restart phase the updater compares each live gateway's running code against the freshly updated checkout and prints a per-profile matrix — a gateway still serving pre-update code is reported loudly with the exact restart command, and the update exits non-zero so automation never treats a mixed-version fleet as healthy. Both `--plan` and the fleet check ask each running gateway directly over its local control socket (`gateway.sock` in the profile's data directory, a named pipe on Windows) when available, so version and supervisor information comes from the gateway itself; gateways from older versions are still discovered through their state files as before.
+Every `hermes update` run writes a machine-readable receipt to `~/.hermes/logs/update_receipts/` (last 20 kept, `latest.json` always points at the most recent): the pre-update fleet plan, each step taken, anything skipped and why, the gateway restart outcome, and the final fleet version matrix. The SQLite runtime repair is one of those steps (`sqlite_runtime_repair`): a failed repair records the actual reason (for example the `uv sync` error) and the SQLite version pair, a deferred or not-applicable repair lands in the skips with its reason. After the restart phase the updater compares each live gateway's running code against the freshly updated checkout and prints a per-profile matrix — a gateway still serving pre-update code is reported loudly with the exact restart command and recorded as a `gateway_restart` follow-up in the receipt; the code is already in place, so the update still exits 0, and every later command warns until the fleet serves the new code, so a mixed-version fleet is never silently healthy. Both `--plan` and the fleet check ask each running gateway directly over its local control socket (`gateway.sock` in the profile's data directory, a named pipe on Windows) when available, so version and supervisor information comes from the gateway itself; gateways from older versions are still discovered through their state files as before.
 
 A multiplexed default gateway is one process serving several profiles, so it appears once in the matrix and vouches for every profile in its `served_profiles` record. The same coverage clears the "A previous `hermes update` pulled new code but did not restart running gateways" hint: once that gateway (or, after a manual `git pull`, every gateway an update restarted) runs the current code, `hermes gateway restart` is enough — the hint no longer waits for the next `hermes update` to write a fresh receipt. The same is true of the restart obligation left by an update that died before recording which gateways it owed (or by an older updater that never recorded them): once every live gateway runs the current checkout, the obligation is retired and the hint stops. On a host that runs no gateway at all (the Desktop app alone), it is retired once no profile has a gateway that went away without a clean stop and every running backend is restarted by its own supervisor or has its own reminder. That obligation is recorded once per HOST, in the cross-profile rendezvous directory (`$HERMES_GATEWAY_LOCK_DIR`, else `$XDG_STATE_HOME/hermes/gateway-locks`) as `host-update-restart.json`, so every profile's CLI sees the same one: `hermes -p coder update` and `hermes -p writer update` restart the shared multiplexed gateway once between them, not once each. An obligation left behind by an older per-profile updater (`fleet_restart_pending` in one profile's Hermes home) is still read and cleared. An update whose pre-update plan found no gateway at all owes nothing and leaves no breadcrumb. A backend supervised by Desktop, systemd or launchd is restarted by its supervisor and never blocks this settlement; only a manual backend whose reminder could not be saved keeps the obligation open.
 
@@ -1150,7 +1150,7 @@ fleet caused only by the deferral does not make the update `partial`.
 
 ### Interrupted gateway restarts
 
-If an earlier update pulled code but did not finish restarting the fleet, the next `hermes update` retries even when the checkout is already current. An empty process scan does not prove recovery: failed systemd units and installed launchd jobs may have no live PID. If discovery or restart fails, or a requested service cannot be verified active, the marker stays pending and the update exits nonzero. Recover the affected services with the printed commands and retry.
+If an earlier update pulled code but did not finish restarting the fleet, the next `hermes update` retries even when the checkout is already current. An empty process scan does not prove recovery: failed systemd units and installed launchd jobs may have no live PID. If discovery or restart fails, or a requested service cannot be verified active, the marker stays pending: the update still exits 0 (the new code is in place), prints a `⚠` line and a `gateway_restart` follow-up in its receipt, every CLI start warns about the owed restart, and the next `hermes update` retries it. Recover the affected services with the printed commands, or rerun `hermes update`.
 
 A failed historical receipt alone does not prove that gateways are still stale. Startup and gateway-status warnings, as well as update catch-up, check for a live successor on the current checkout for every gateway profile recorded in that receipt. A manual gateway restart can settle receipt-only advice without rewriting the historical outcome. Manual backend obligations must first transfer to their separate reminders.
 
@@ -1228,7 +1228,7 @@ If `git status --short` shows unexpected changes after `hermes update`, stop and
 tail -f ~/.hermes/logs/update.log
 ```
 
-- `Ctrl-C` (SIGINT) and system shutdown (SIGTERM) are still honored — those are deliberate cancellations, not accidents.
+- `Ctrl-C` (SIGINT) and system shutdown (SIGTERM) are still honored — those are deliberate cancellations, not accidents. A `Ctrl-C` after the new code is in place exits 130 and says so: the remaining steps (dependencies, builds, gateway restart) are owed, and the next launch or `hermes update` finishes them.
 
 You no longer need to wrap `hermes update` in `screen` or `tmux` to survive a terminal drop.
 
@@ -2188,14 +2188,6 @@ For optional extras declared in hermes-agent's `pyproject.toml`, use `extraDepen
 services.hermes-agent.extraDependencyGroups = [ "messaging" ];
 ```
 
-```nix
-# Enable a memory provider
-services.hermes-agent = {
-  extraDependencyGroups = [ "mem0" ];
-  settings.memory.provider = "mem0";
-};
-```
-
 These groups join the core dependency resolution at build time. Conflicting
 requirements can still fail that resolution. The table lists common groups;
 `pyproject.toml` is authoritative for the complete list and platform markers.
@@ -2212,7 +2204,6 @@ requirements can still fail that resolution. The table lists common groups;
 | `anthropic` | Native Anthropic SDK (not needed via OpenRouter) |
 | `bedrock` | AWS Bedrock (boto3) |
 | `azure-identity` | Azure Entra ID auth |
-| `mem0` | Mem0 memory provider |
 | `modal` | Modal terminal backend |
 | `daytona` | Daytona terminal backend |
 | `exa` | Exa web search |
@@ -11245,7 +11236,7 @@ Hermes Agent includes a rich set of capabilities that extend far beyond basic ch
 - **[Fallback Providers](fallback-providers.md)** — Automatic failover to backup LLM providers when your primary model encounters errors, including independent fallback for auxiliary tasks like vision and compression.
 - **[Credential Pools](credential-pools.md)** — Distribute API calls across multiple keys for the same provider. Automatic rotation on rate limits or failures.
 - **[Prompt caching](../configuration#prompt-caching)** — Built-in cross-session 1-hour prefix cache for Claude on native Anthropic, OpenRouter, and Nous Portal. Always-on; no configuration required.
-- **[Memory Providers](memory-providers.md)** — Plug in external memory backends (OpenViking, Mem0, Holographic, RetainDB, ByteRover, plus Honcho, Hindsight and Supermemory from the plugin catalog) for cross-session user modeling and personalization beyond the built-in memory system.
+- **[Memory Providers](memory-providers.md)** — Plug in external memory backends (OpenViking, Holographic, RetainDB, ByteRover, plus Honcho, Hindsight, Supermemory and Mem0 from the plugin catalog) for cross-session user modeling and personalization beyond the built-in memory system.
 - **[API Server](api-server.md)** — Expose Hermes as an OpenAI-compatible HTTP endpoint. Connect any frontend that speaks the OpenAI format — Open WebUI, LobeChat, LibreChat, and more.
 - **[IDE Integration (ACP)](acp.md)** — Use Hermes inside ACP-compatible editors such as VS Code, Zed, and JetBrains. Chat, tool activity, file diffs, and terminal commands render inside your editor.
 - **[Batch Processing](batch-processing.md)** — Run the agent over many prompts or tasks in parallel from the CLI, with structured outputs and trajectory capture suitable for evals or downstream training pipelines.
@@ -13552,7 +13543,7 @@ Full details in [Gating agent skill writes](./skills.md#gating-agent-skill-write
 
 ## External Memory Providers
 
-For deeper, persistent memory that goes beyond MEMORY.md and USER.md, Hermes ships with 5 external memory provider plugins — OpenViking, Mem0, Holographic, RetainDB and ByteRover — and more, such as Honcho, Hindsight and Supermemory, are available from the [plugin catalog](plugins.md) via `hermes plugins install <name>`.
+For deeper, persistent memory that goes beyond MEMORY.md and USER.md, Hermes ships with 4 external memory provider plugins — OpenViking, Holographic, RetainDB and ByteRover — and more, such as Honcho, Hindsight, Supermemory and Mem0, are available from the [plugin catalog](plugins.md) via `hermes plugins install <name>`.
 
 External providers run **alongside** built-in memory (never replacing it) and add capabilities like knowledge graphs, semantic search, automatic fact extraction, and cross-session user modeling.
 
@@ -13586,8 +13577,8 @@ Or set manually in `~/.hermes/config.yaml`:
 
 ```yaml
 memory:
-  provider: openviking   # or mem0, holographic, retaindb, byterover,
-                         # or honcho / hindsight / supermemory (plugin catalog — run
+  provider: openviking   # or holographic, retaindb, byterover,
+                         # or honcho / hindsight / supermemory / mem0 (plugin catalog — run
                          # `hermes plugins install <name>` first)
 ```
 
@@ -13932,23 +13923,27 @@ does not add a separate request.
 
 ### Mem0
 
+:::info Plugin catalog
+Mem0 is maintained by Mem0 and installed from the [plugin catalog](./plugins.md) rather than bundled with Hermes. Source: [mem0ai/mem0 — integrations/hermes-plugin-mem0](https://github.com/mem0ai/mem0/tree/main/integrations/hermes-plugin-mem0). Existing setups are migrated automatically — see [Migrating from bundled Mem0](#migrating-from-bundled-mem0).
+:::
+
 Server-side LLM fact extraction with semantic search, reranking, and automatic deduplication. Three connection modes: **Platform** (Mem0 Cloud), **self-hosted dashboard** (a Mem0 server you run via Docker), and **OSS** (Mem0 in-process with your own LLM + vector store).
 
 | | |
 |---|---|
 | **Best for** | Hands-off memory management — Mem0 handles extraction automatically |
-| **Requires** | `hermes memory setup` prepares the Mem0 SDK through PM; API key (platform), a running Mem0 server (self-hosted dashboard), or an LLM + vector store (OSS) |
+| **Requires** | `hermes plugins install mem0` (installs the Mem0 SDK with the plugin); API key (platform), a running Mem0 server (self-hosted dashboard), or an LLM + vector store (OSS) |
 | **Data storage** | Mem0 Cloud (platform), your own Mem0 server (self-hosted dashboard), or in-process (OSS) |
 | **Cost** | Mem0 pricing (platform) / free (self-hosted or OSS) |
 
-The `mem0` SDK extra is excluded on native Windows ARM64. An external Mem0
-server over HTTP is a separate mode; a remote service does not imply that the
-in-process SDK runs on that target.
+The mem0ai SDK sends anonymous PostHog usage telemetry unless `MEM0_TELEMETRY=false` is set in
+your shell or `~/.hermes/.env`.
 
 **Tools (4):** `mem0_search` (semantic search; optional reranking in platform mode, off by default), `mem0_add` (store verbatim facts), `mem0_update` (update by ID), `mem0_delete` (delete by ID)
 
 **Setup (Platform):**
 ```bash
+hermes plugins install mem0   # from the plugin catalog
 hermes memory setup    # select "mem0" → "Platform"
 # Or manually:
 hermes config set memory.provider mem0
@@ -14010,6 +14005,16 @@ The plugin authenticates with `X-API-Key` and uses the server's `/search` / `/me
 | Vector Store | qdrant (local/server), pgvector |
 
 **Switching modes:** Re-run `hermes memory setup mem0 --mode <platform|selfhosted|oss>` or edit `mem0.json` directly.
+
+### Migrating from bundled Mem0
+
+Mem0 used to ship inside the Hermes tree (and as the `hermes-agent[mem0]` pip extra). If your `config.yaml` already has `memory.provider: mem0`, there is nothing to do for most users:
+
+- `hermes update` installs the catalog plugin into every profile home that names the provider.
+- If the plugin is still missing on the first agent start (`hermes chat`, the gateway, Desktop), Hermes installs it and tells you it did.
+- With `security.allow_lazy_installs: false` the agent-start path does not install anything; it prints the exact `hermes plugins install mem0` command instead.
+
+`memory.provider`, `$HERMES_HOME/mem0.json`, the `MEM0_*` keys in `.env` and the memories stored in Mem0 Cloud, your Mem0 server or the local OSS store are untouched. Verify with `hermes memory status` and `hermes plugins list`.
 
 ---
 
@@ -14310,7 +14315,7 @@ package command. Restart Hermes after successful dependency preparation.
 |----------|---------|------|-------|-------------|----------------|
 | **Honcho** (plugin catalog) | Cloud/Self-hosted | Paid/Free | 5 | `hermes plugins install honcho` | Dialectic user modeling + session-scoped context |
 | **OpenViking** | Self-hosted | Free | 6 | `openviking` + server | Filesystem hierarchy + tiered loading |
-| **Mem0** | Cloud/Self-hosted | Free/Paid | 4 | `mem0ai` | Server-side LLM extraction + self-hosted/OSS modes |
+| **Mem0** (plugin catalog) | Cloud/Self-hosted | Free/Paid | 4 | `hermes plugins install mem0` | Server-side LLM extraction + self-hosted/OSS modes |
 | **Hindsight** (plugin catalog) | Cloud/Local | Free/Paid | 3 | `hermes plugins install hindsight` | Knowledge graph + reflect synthesis |
 | **Holographic** | Local | Free | 2 | None | HRR algebra + trust scoring |
 | **RetainDB** | Cloud | $20/mo | 10 | `requests` | Delta compression |
@@ -14332,8 +14337,9 @@ Each provider's data is isolated per [profile](../profiles.md):
 Memory providers are moving out of the Hermes tree into their maintainers' own repositories,
 published through the [plugin catalog](./plugins.md). Hindsight moved first (see
 [Migrating from bundled Hindsight](#migrating-from-bundled-hindsight)), then Honcho (see
-[Upgrading from the bundled Honcho](#upgrading-from-the-bundled-honcho)) and Supermemory (see
-[Migrating from bundled Supermemory](#migrating-from-bundled-supermemory)). Nothing changes for you: the
+[Upgrading from the bundled Honcho](#upgrading-from-the-bundled-honcho)), Supermemory (see
+[Migrating from bundled Supermemory](#migrating-from-bundled-supermemory)) and Mem0 (see
+[Migrating from bundled Mem0](#migrating-from-bundled-mem0)). Nothing changes for you: the
 provider name, the settings it reads, its data directory and its tools stay the same.
 When a provider you have configured stops shipping with Hermes, `hermes update` installs its
 catalog plugin for every profile that names it; if you update through the Desktop app, the
@@ -34106,7 +34112,7 @@ Speech-to-text supports eight providers: local faster-whisper (free, runs on-dev
 ## Memory & Personalization
 
 - **[Built-in Memory](../user-guide/features/memory.md)** — Persistent, curated memory via `MEMORY.md` and `USER.md` files. The agent maintains bounded stores of personal notes and user profile data that survive across sessions.
-- **[Memory Providers](../user-guide/features/memory-providers.md)** — Plug in external memory backends for deeper personalization. Five providers ship with Hermes: OpenViking (tiered retrieval), Mem0 (cloud extraction), Holographic (local SQLite), RetainDB (hybrid search) and ByteRover (CLI-based); Honcho (dialectic reasoning), Hindsight (knowledge graphs) and Supermemory (semantic recall) are available from the plugin catalog via `hermes plugins install <name>`.
+- **[Memory Providers](../user-guide/features/memory-providers.md)** — Plug in external memory backends for deeper personalization. Four providers ship with Hermes: OpenViking (tiered retrieval), Holographic (local SQLite), RetainDB (hybrid search) and ByteRover (CLI-based); Honcho (dialectic reasoning), Hindsight (knowledge graphs), Supermemory (semantic recall) and Mem0 (cloud extraction) are available from the plugin catalog via `hermes plugins install <name>`.
 
 ## Messaging Platforms
 
@@ -50491,7 +50497,7 @@ See [Hooks](../user-guide/features/hooks.md) for event signatures and payload sh
 hermes memory <subcommand>
 ```
 
-Set up and manage external memory provider plugins. Bundled providers: openviking, mem0, holographic, retaindb, byterover; honcho, hindsight and supermemory (plugin catalog) after `hermes plugins install <name>` (`hermes update` does this automatically for a provider already named in `memory.provider`). Only one external provider can be active at a time. Built-in memory (MEMORY.md/USER.md) is always active.
+Set up and manage external memory provider plugins. Bundled providers: openviking, holographic, retaindb, byterover; honcho, hindsight, supermemory and mem0 (plugin catalog) after `hermes plugins install <name>` (`hermes update` does this automatically for a provider already named in `memory.provider`). Only one external provider can be active at a time. Built-in memory (MEMORY.md/USER.md) is always active.
 
 Subcommands:
 
@@ -50938,8 +50944,8 @@ external update owner. See [Updating & Uninstalling](../getting-started/updating
 Additional behavior:
 
 - **Gateway restart.** After a successful update, Hermes attempts to restart all running gateway profiles of the home being updated (its root and every `profiles/<name>` under it) automatically so they pick up the new code. Gateways and `hermes-gateway*` services that belong to a different `HERMES_HOME` on the same machine — another install, or a scratch home running `hermes update` — are named in the output and left alone. Use `hermes gateway restart` when you want to restart a gateway without applying an update.
-- **Restart-phase recovery.** If the in-process restart phase aborts while importing the freshly pulled tree, supervised gateway profiles are retried through a clean Python process. Only restarts independently confirmed by systemd (`systemctl --user is-active`) are reported as verified; a relaunch that merely exited 0 is recorded as `relaunch_attempted` and still fails the update conservatively. Manual gateways and serve/dashboard runtimes are never killed without a relaunch authority; they are recorded as skipped with a reason and remain in the incomplete-update report with the exact restart command.
-- **Update receipts + fleet version check.** Every run writes a machine-readable receipt to `~/.hermes/logs/update_receipts/` (pre-update fleet plan, steps, skips with reasons, restart outcome; `latest.json` points at the newest). After the restart phase the updater verifies each live gateway's running code against the updated checkout and prints a per-profile version matrix; a gateway still on pre-update code fails the update (exit 1) with the exact restart command.
+- **Restart-phase recovery.** If the in-process restart phase aborts while importing the freshly pulled tree, supervised gateway profiles are retried through a clean Python process. Only restarts independently confirmed by systemd (`systemctl --user is-active`) are reported as verified; a relaunch that merely exited 0 is recorded as `relaunch_attempted` and the restart stays owed (a `gateway_restart` follow-up; the update itself still exits 0 because the code is in place). Manual gateways and serve/dashboard runtimes are never killed without a relaunch authority; they are recorded as skipped with a reason and remain in the incomplete-update report with the exact restart command.
+- **Update receipts + fleet version check.** Every run writes a machine-readable receipt to `~/.hermes/logs/update_receipts/` in the root Hermes home, even from a sticky profile (pre-update fleet plan, steps, skips with reasons, restart outcome, follow-ups; `latest.json` points at the newest and reads `running` while an update is in progress). After the restart phase the updater verifies each live gateway's running code against the updated checkout and prints a per-profile version matrix. A gateway still on pre-update code does not fail the update once the new code is in place: the update prints a `⚠` line with the exact restart command, exits 0, records a `gateway_restart` follow-up, and keeps the restart owed — every CLI start warns about it and the next `hermes update` retries it.
 - **Local source changes.** For git installs, dirty tracked files and untracked files are auto-stashed before branch checkout or pull (`git stash push --include-untracked`). Interactive terminal updates ask before restoring the stash. Non-interactive updates restore it by default; set `updates.non_interactive_local_changes: discard` only on managed installs where local source edits should be thrown away after a successful pull. If stash restore conflicts or the pull fails, the stash is left in place for manual recovery.
 - **npm lockfile churn.** Before stashing or switching branches, Hermes makes a best-effort cleanup of tracked `package-lock.json` diffs produced by npm install/build steps. Commit or manually stash intentional lockfile edits before running `hermes update`.
 - **Pairing data snapshot.** Even when `--backup` is off, `hermes update` takes a lightweight snapshot of `~/.hermes/pairing/` and the Feishu comment rules before `git pull`. You can roll it back with `hermes backup restore --state pre-update` if a pull rewrites a file you were editing.
@@ -56447,10 +56453,28 @@ it guards. `plan → snapshot → apply → restart-per-kind → verify → repo
   left alone, never restarted (#93349).
 - **Verify**: gateways stamp `code_sha`/`code_version` into `gateway_state.json` on every
   runtime-status write (`gateway/status.py`); the updater compares each live gateway against the
-  fresh checkout and prints a fleet version matrix. A provably-stale gateway fails the update
-  (exit 1) — automation must never treat a mixed-version fleet as healthy.
-- **Report**: every run writes a machine-readable receipt to `~/.hermes/logs/update_receipts/`
-  (`latest.json` pointer; steps, skips WITH reasons, restart outcome, plan, fleet snapshot).
+  fresh checkout and prints a fleet version matrix. After the commit point (the tree moved) nothing
+  fails `hermes update` (exit 0 unless the code was rolled back): a provably-stale or stopped
+  gateway, a failed build/launcher/config migration/bytecode sweep/channel adoption/Windows resume
+  each print `⚠`, land in the receipt as `outcome: "success"` with `followups: [{step, reason}]`,
+  and keep their own obligation armed (`source-completion-pending` for the tail, the fleet-restart
+  obligation for gateways) so the next launch or `hermes update` — including "Already up to date" —
+  retries them. The owed-fleet-restart CLI startup warning is what keeps a mixed-version fleet from
+  ever looking healthy. A completion process that could not be started (temporary directory,
+  request file, spawn) or died without a correlated result (OOM, SIGKILL) is the same kind of
+  debt: an owed `completion` follow-up with the source-update tail re-armed, exit 0. Exit 2
+  (refused/concurrent) and exit 1 (nothing committed / rolled back) keep their meaning; the one
+  committed run that exits 1 is an autostash whose restore conflicted and stays parked: the
+  receipt is `partial` with a `user_action`, since nothing retries what only the user can re-apply
+  (#122557).
+- **Report**: every run writes a machine-readable receipt to the ROOT home's
+  `logs/update_receipts/` (never a sticky profile's; `update.log` likewise) — `latest.json` pointer;
+  steps, skips WITH reasons, restart outcome, plan, fleet snapshot, `followups`. The receipt is on
+  disk as `outcome: "running"` from the start and refreshed at each stage boundary; the next
+  update marks a `running` record whose processes are gone `interrupted` and says so. Readers
+  (`hermes logs update`, debug bundle, dashboard status, pm receipts) use the root home too.
+  A dependency-sync failure in the completion bootstrap is a `dependencies` follow-up (A6), and
+  Ctrl-C after the commit point finalizes `interrupted` (exit 130), never `failed`.
   Before a source swap, the parent captures plan/snapshots/receipt and its Windows pause token.
   `update_completion.py` runs new-code PM preparation with site initialization disabled, then
   selected-Python builds, maintenance, scans/restarts and verification. Git/current/ZIP share
@@ -69318,13 +69342,64 @@ fleet restart, Windows resume, dashboard deduplication and verification.
 The existing per-kind restart and abort-recovery algorithms remain; transient
 supervisor/process failures are real even without mixed-generation imports. Only
 the purge/reload workaround and independent retry/ZIP tail compositions disappear.
-Gateway exit status is written before a restart can terminate the updater's cgroup,
-and is demoted on later failure. Verification publishes the final receipt.
+Gateway exit status is written before a restart can terminate the updater's cgroup.
+Verification publishes the final receipt.
+
+## After the commit point nothing fails the update
+
+Once the tree has moved, `hermes update` exits 0 unless the code itself was rolled back.
+Every completion step is independent: a failed launcher publish, product build (each of
+TUI/web/desktop is attempted even when another failed), config migration,
+bytecode sweep, gateway restart/verification, Windows resume or retired-channel adoption
+prints a `⚠` line and is appended to the receipt's `followups` as `{step, reason}` while the
+receipt's `outcome` stays `"success"`. The step's own obligation stays armed:
+`source-completion-pending` for the tail (launchers, build, maintenance, config migration),
+the host fleet-restart obligation for gateways (the CLI startup warning keeps naming it; an
+owed restart records the pre-update gateways on the obligation, so a gateway that died at boot
+stays owed until it serves the checkout instead of being settled by the gateway-less discharge),
+the unstamped bytecode fingerprint for the sweep. The next launch or `hermes update` —
+including the "Already up to date" path, which runs the same completion — retries it. A host
+stamped "restarted" for this commit whose fleet is still off the checkout restarts again
+instead of dead-ending. Exit 2 (refused / concurrent) and exit 1 (nothing committed, or
+rolled back) keep their meaning.
+
+Profile sync is best-effort: `_sync_profiles_after_update` prints a per-profile error and
+carries on, so that error is not owed. Only a sync that escapes the step (for example with
+`SystemExit`) becomes a `profile_sync` follow-up and keeps `source-completion-pending` armed.
+
+A Windows gateway resume is attempted once after the commit point: by the completion child, or
+by the parent when dependencies are owed. Its failure is the `windows_resume` follow-up. The
+command's own exit path and its atexit net do not run it again, and a resume they still owe
+(the child never answered) is reported the same way instead of raising. The historical takeover
+completion (`update_finish`) also records the failure as a follow-up and keeps its exit status.
+
+The receipt is durable while the run is open: `begin_update_receipt` writes it as
+`outcome: "running"` to the run's own archive file and `latest.json`, and each stage
+boundary refreshes it, so a killed update leaves its own record. The next update marks a
+`running` record whose processes are gone `interrupted` (naming its last stage) and reports
+it. Receipts and the `update.log` tee resolve to the root home
+(`hermes_constants.get_default_hermes_root()`), never a sticky profile's; so do their readers
+(`hermes logs update`, the debug bundle, the dashboard's update status, pm's sync receipts).
+
+The completion bootstrap's dependency preparation (`ensure_tools_for_sync`, `pm.sync_venv`) also
+runs after the tree moved: its failure is a `dependencies` follow-up ("dependencies not installed
+yet — the next launch retries"), exit 0, with the tail obligation armed; a prepared child that
+dies without a result is a `completion` follow-up. A Ctrl-C after the commit point closes the run
+as `interrupted` (exit 130, never `failed`) and says the new code is in place with its remaining
+steps owed.
+
+Two more post-commit channels follow the same rule. The gateway `/update` marker
+(`.update_exit_code`) keeps the committed result when a gateway restart fails (systemd unit,
+abort recovery or Windows service resume): the restart debt is the `gateway_restart` follow-up,
+the host obligation and the `⚠` lines in the forwarded output, never a "failed" notice. A receipt
+store that refuses the terminal write prints `⚠ Update receipt not written` and the completion
+child answers its parent with the correlated terminal record it finalized in memory, so the exit
+status stays 0; only a user action (local changes left in the stash) still exits 1.
 
 ## Parent lifecycle and failures
 
 The parent waits and propagates the child's exact nonzero result (a signal is
-mapped to shell-style 128+signal). A child cannot succeed by merely exiting zero:
+mapped to shell-style 128+signal); post-commit step failures never produce one. A child cannot succeed by merely exiting zero:
 a terminal response with the matching receipt identity is required. The response
 returns the mutated Windows token so the parent's registered emergency resume does
 not repeat completed work. Normal parent completion performs no maintenance.
@@ -72386,7 +72461,8 @@ Hermes routes each model family through the API that serves it best:
 | Model family | API route | Why |
 |---|---|---|
 | Anthropic Claude | Anthropic SDK (`AnthropicBedrock`) | Prompt caching, thinking budgets, adaptive thinking — features not exposed via Converse |
-| OpenAI GPT-5.5 / GPT-5.6 (Sol, Terra, Luna) | Bedrock Mantle **OpenAI Responses** endpoint (`bedrock-mantle.<region>.api.aws/openai/v1`) | These models are Mantle-only — their model cards list bedrock-runtime/Converse as unsupported |
+| OpenAI GPT-6 (Astra, Sol, Luna), GPT-6.1 Sol, GPT-5.6 (Sol, Terra, Luna), GPT-5.5 with a bare `openai.*` ID | Bedrock Mantle **OpenAI Responses** endpoint (`bedrock-mantle.<region>.api.aws/openai/v1`) | Bedrock Mantle serves the bare in-Region ID. `bedrock-runtime` does not accept it |
+| The same OpenAI models with a `us.` or `global.` inference-profile ID | Native **Converse API** (`bedrock-runtime`) | Cross-Region profiles exist only on `bedrock-runtime`, and the model cards list Converse as supported there |
 | Everything else (Nova, DeepSeek, Llama, GPT-OSS, …) | Native **Converse API** (`bedrock-runtime`) | Full Bedrock feature set: Guardrails, inference profiles, streaming |
 
 All three routes share the same AWS credential chain and region resolution — no separate configuration is needed. Requests to the Mantle endpoint are authenticated with `AWS_BEARER_TOKEN_BEDROCK` when set, or SigV4-signed via the standard boto3 credential chain otherwise.
@@ -72462,7 +72538,7 @@ bedrock:
 
 The guardrail is attached on the Converse route (`guardrailConfig`) and on the Claude route (InvokeModel headers via the Anthropic Bedrock SDK, so prompt caching and thinking are kept). A blocked request surfaces as a content-filter refusal rather than as model text. `stream_processing_mode` only applies to Converse.
 
-AWS does not apply Guardrails to the Mantle Responses endpoint used by `openai.gpt-5.x` models ([AWS docs](https://docs.aws.amazon.com/bedrock/latest/userguide/bedrock-mantle.html)); use a Converse-served model when a guardrail is required.
+AWS does not apply Guardrails to the Mantle Responses endpoint used by bare `openai.gpt-*` IDs ([AWS docs](https://docs.aws.amazon.com/bedrock/latest/userguide/bedrock-mantle.html)). Use a Converse-served model, such as a `us.` or `global.` OpenAI inference profile, when a guardrail is required.
 
 ### Model Discovery
 
@@ -72484,6 +72560,8 @@ Hermes automatically applies prompt caching on the Bedrock **Converse API** path
 
 For models whose context window isn't in Hermes' static table, Hermes can probe the real limit by sending oversized requests at fixed tiers (~1.3M and ~2.2M tokens) and parsing the `maximum` reported in Bedrock's length-validation error. Probed values feed the same metadata cache as the static table; stale cached entries that under-report a model's window (e.g. entries seeded before a model's 1M window went GA) are dropped automatically in favor of the larger known value.
 
+When neither the probe nor the static table knows a model, Hermes uses a 128,000-token fallback and logs a WARNING naming the model. Set `model.context_length` in `config.yaml` to the model's real window.
+
 **Application inference profiles.** An ARN such as `arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/abcdef123456` names no model, so neither the probe nor the static table can size it. Hermes calls `bedrock:GetInferenceProfile` in the ARN's region and sizes the window from the model the profile wraps (1M for a profile wrapping Claude Sonnet 4.6). Without that permission the 128,000-token default applies and a WARNING names the profile; set `model.context_length` explicitly to override either way.
 
 ## Available Models
@@ -72495,17 +72573,23 @@ Bedrock models use **inference profile IDs** for on-demand invocation. The `herm
 | Claude Sonnet 4.6 | `us.anthropic.claude-sonnet-4-6` | Recommended — best balance of speed and capability |
 | Claude Opus 4.6 | `us.anthropic.claude-opus-4-6-v1` | Most capable |
 | Claude Haiku 4.5 | `us.anthropic.claude-haiku-4-5-20251001-v1:0` | Fastest Claude |
-| OpenAI GPT-5.6 Sol | `openai.gpt-5.6-sol` | OpenAI frontier model (via Bedrock Mantle) |
-| OpenAI GPT-5.6 Terra | `openai.gpt-5.6-terra` | Balanced (via Bedrock Mantle) |
-| OpenAI GPT-5.6 Luna | `openai.gpt-5.6-luna` | Fast, affordable (via Bedrock Mantle) |
-| OpenAI GPT-5.5 | `openai.gpt-5.5` | Previous OpenAI flagship (via Bedrock Mantle) |
+| OpenAI GPT-6 Astra | `openai.gpt-6-astra` | Most capable OpenAI model, 1,050,000-token window |
+| OpenAI GPT-6.1 Sol | `openai.gpt-6.1-sol` | 1M-token window. Mantle in-Region access is `us-east-1` only |
+| OpenAI GPT-6 Sol | `openai.gpt-6-sol` | Coding and agentic work, 1,050,000-token window |
+| OpenAI GPT-6 Luna | `openai.gpt-6-luna` | Focused, high-volume tasks, 1,050,000-token window |
+| OpenAI GPT-5.6 Sol | `openai.gpt-5.6-sol` | 1,050,000-token window |
+| OpenAI GPT-5.6 Terra | `openai.gpt-5.6-terra` | Balanced, 1,050,000-token window |
+| OpenAI GPT-5.6 Luna | `openai.gpt-5.6-luna` | Fast, affordable, 1,050,000-token window |
+| OpenAI GPT-5.5 | `openai.gpt-5.5` | Mantle only, no inference profiles |
 | Amazon Nova Pro | `us.amazon.nova-pro-v1:0` | Amazon's flagship |
 | Amazon Nova Micro | `us.amazon.nova-micro-v1:0` | Fastest, cheapest |
 | DeepSeek V3.2 | `deepseek.v3.2` | Strong open model |
 | Llama 4 Scout 17B | `us.meta.llama4-scout-17b-instruct-v1:0` | Meta's latest |
 
 :::info Cross-Region Inference
-Models prefixed with `us.` use cross-region inference profiles, which provide better capacity and automatic failover across AWS regions. Models prefixed with `global.` route across all available regions worldwide. OpenAI `openai.*` model IDs are served by Bedrock Mantle in the configured region and don't use inference-profile prefixes.
+Models prefixed with `us.` use cross-region inference profiles, which provide better capacity and automatic failover across AWS regions. Models prefixed with `global.` route across all available regions worldwide.
+
+OpenAI models have two endpoint forms. The bare `openai.*` ID is in-Region and Hermes sends it to Bedrock Mantle's Responses endpoint in the configured region. The `us.openai.*` and `global.openai.*` IDs are cross-Region inference profiles. Hermes sends them to `bedrock-runtime` through the Converse API, the same path as other inference profiles. Each AWS model card lists the profiles a model offers and the regions Mantle serves it in.
 :::
 
 ## Switching Models Mid-Session
@@ -86050,6 +86134,18 @@ web:
   backend: firecrawl   # Hermes now uses FIRECRAWL_API_KEY from .env
 ```
 
+### Mixing your own key and the gateway (web only)
+
+Web search and web extract can each choose their own route. In the desktop app, open **Capabilities → Tools → Web Search & Scraping**: **Use for Search** / **Use for Extract** on the **Nous Subscription** row sends that capability through the gateway, and the same buttons on a direct row (e.g. **Firecrawl**) send it through your own key. The **Search:** / **Extract:** pills at the top show which route each one takes right now. In `config.yaml` the managed choice is the value `nous` on the per-capability key:
+
+```yaml
+web:
+  search_backend: firecrawl   # your FIRECRAWL_API_KEY
+  extract_backend: nous       # the Nous Tool Gateway (managed Firecrawl)
+```
+
+Picking **Nous Subscription** for the whole tool (or running `hermes tools`) clears both per-capability keys, so search and extract both go back through the gateway.
+
 ### Legacy `use_gateway` flag (deprecated)
 
 Older Hermes versions used a per-tool `use_gateway: true` boolean to route through the gateway. That flag is **legacy**: it is never written anymore, and the `hermes tools` picker removes it from a category's config when it rewrites the selection. Old configs that still contain `use_gateway: true` are interpreted at read time as the `nous` selection, so existing setups keep working. Don't set `use_gateway` in new configs — select the provider in `hermes tools` instead.
@@ -88438,7 +88534,7 @@ web:
 When a per-capability key is empty, that capability falls through to `web.backend`. Only when no **shared** web selection has ever been written (`web.backend` or the managed `hermes tools` row) is the backend auto-detected from whichever API key/URL is present — once a shared selection exists, the runtime always uses it, and adding a key to `.env` does not reroute web traffic. A per-capability key affects only its own capability: setting `web.extract_backend` alone leaves `web_search` on its auto-detected backend.
 
 **Priority order (per capability):**
-1. `web.search_backend` / `web.extract_backend` (explicit per-capability)
+1. `web.search_backend` / `web.extract_backend` (explicit per-capability; `nous` = managed Tool Gateway for that capability only, see [Tool Gateway](./tool-gateway.md#mixing-your-own-key-and-the-gateway-web-only))
 2. `web.backend` (shared fallback; `nous` = managed Tool Gateway)
 3. Auto-detect from environment variables (no shared selection written)
 
@@ -98434,7 +98530,7 @@ unavailable; WSL is an alternative, not a requirement of the current design.
 
 - Matrix's native encrypted adapter is Linux-only; use a supported proxy route
   or a Linux backend on Windows.
-- Native Windows ARM64 excludes the `mem0` and `google-chat` SDK extras, and
+- Native Windows ARM64 excludes the `google-chat` SDK extra and
   the openWakeWord engine. Sherpa supports native Windows ARM64 and is the
   automatic wake-word default on that target.
 - Local Faster-Whisper STT is excluded on native Windows ARM64. Use a cloud
