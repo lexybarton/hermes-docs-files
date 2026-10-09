@@ -11312,7 +11312,7 @@ hermes tools
 hermes tools
 ```
 
-Common toolsets include `web`, `search`, `terminal`, `file`, `browser`, `vision`, `image_gen`, `skills`, `tts`, `todo`, `memory`, `session_search`, `cronjob`, `code_execution`, `delegation`, `clarify`, `messaging`, `spotify`, `discord`, `discord_admin`, `debugging`, and `safe`.
+Common toolsets include `web`, `search`, `terminal`, `file`, `browser`, `vision`, `image_gen`, `skills`, `tts`, `todo`, `memory`, `session_search`, `cronjob`, `code_execution`, `delegation`, `clarify`, `messaging`, `discord`, `discord_admin`, `debugging`, and `safe`.
 
 See [Toolsets Reference](../../reference/toolsets-reference.md) for the full set, including platform presets such as `hermes-cli`, `hermes-telegram`, and dynamic MCP toolsets like `mcp-<server>`.
 
@@ -13324,6 +13324,7 @@ memory:
   memory_char_limit: 2200   # ~800 tokens
   user_char_limit: 1375     # ~500 tokens
   write_approval: false     # false = write freely (default) | true = require approval
+  prefetch_spill_enabled: false  # external recall stays intact unless explicitly enabled
 ```
 
 Setting **both** `memory_enabled` and `user_profile_enabled` to `false` turns the
@@ -13340,6 +13341,24 @@ it backs the profile store — but the system prompt swaps the full memory
 guidance for a narrower profile-only block. The tool schema advertises only the
 `user` target, and direct or staged writes to disabled `MEMORY.md` are rejected.
 The inverse configuration advertises only `memory` and rejects `USER.md` writes.
+
+### External recall size
+
+External memory providers return their full prefetched context by default,
+up to a safety ceiling of 10× `hooks.output_spill.max_chars` (at least 100,000
+characters); recall above that still spills so a runaway provider can't overflow
+the context window.
+`memory.prefetch_spill_enabled: true` opts the active profile into replacing
+oversized recall with a head/tail preview and a file path. This can reduce
+replayed context, but the relevance-ranked middle is no longer immediately
+visible to the model. Prefer your provider's own recall budget when available.
+
+The opt-in uses the shared `hooks.output_spill` threshold, preview lengths, and
+directory; `hooks.output_spill.enabled: false` still disables it. Normal plugin
+hooks continue to spill by default, independently of the memory opt-in. Settings
+are captured at provider registration: restart Hermes after changing them.
+See [oversized prefetch results](../../developer-guide/memory-provider-plugin.md#oversized-prefetch-results)
+for the configuration details.
 
 ## Controlling memory writes (`write_approval`)
 
@@ -14108,7 +14127,7 @@ Hindsight used to ship inside the Hermes tree (and as the `hermes-agent[hindsigh
 
 - `hermes update` installs the catalog plugin into every profile home that names the provider. Each line names the profile it is about. In a terminal it asks before preparing the plugin's Python dependencies; when several profiles use the provider, the questions are asked once and the answers apply to all of them. Without a terminal (the Desktop app, a script, a service) nobody can answer, so each profile prepares them unattended when its `security.allow_lazy_installs` is on (the default); a profile with it off gets the exact `hermes -p <profile> plugins install hindsight` command instead, and the other profiles still migrate.
 - If the plugin is still missing on the first agent start (`hermes chat`, Desktop, the gateway, …), Hermes installs it, dependencies included, and shows ``✓ Memory provider 'hindsight' moved out of core — installed its plugin from the catalog (memory.provider and your stored memories are unchanged; check its settings with `hermes memory status`).`` Messaging platforms get the line with the first reply.
-- When the agent-start install cannot happen, you see why instead of silently running without external memory: with `security.allow_lazy_installs: false` the warning names the install command for that profile; offline or declined installs show the error and the same command.
+- When the agent-start install cannot happen, you see why instead of silently running without external memory: with `security.allow_lazy_installs: false` the warning names the install command for that profile; offline or declined installs show the error and the same command. After a failed attempt, agent starts in the next hour skip the install and only repeat the command; `hermes update` always retries.
 - Agent start never asks a question (the chat prompt owns the terminal). A catalog provider that never shipped with Hermes (for example `mnemosyne`) is therefore not installed on agent start: the warning names `hermes plugins install <name>` for that profile, or install it from the dashboard/Desktop Plugins page.
 
 What changes on disk: the plugin appears in `~/.hermes/plugins/hindsight/` and `config.yaml` gains `plugins.enabled: [hindsight]`. `memory.provider`, `$HERMES_HOME/hindsight/config.json`, `HINDSIGHT_API_KEY` in `.env` and your memory bank data are untouched. Verify with `hermes memory status` (provider active) and `hermes plugins list` (plugin installed and enabled).
@@ -16146,7 +16165,6 @@ The repo ships these bundled plugins under `plugins/`. All are opt-in — enable
 | `security-guidance` | hooks | Pattern-match dangerous code on `write_file`/`patch` and append a security warning (or block) — 25 rules (Apache-2.0 fork of Anthropic's `claude-plugins-official` patterns) |
 | `observability/langfuse` | hooks | Trace turns / LLM calls / tools to [Langfuse](https://langfuse.com) |
 | `teams_pipeline` | standalone | Microsoft Teams meeting pipeline — Graph-backed, transcript-first meeting summaries |
-| `spotify` | backend (7 tools) | Native Spotify playback, queue, search, playlists, albums, library |
 | `google_meet` | standalone | Join Meet calls, live-caption transcription, optional realtime duplex audio |
 | `image_gen/openai` | image backend | OpenAI GPT Image 2 and 2.5 Flare/Sunburst generation and editing (API key) |
 | `image_gen/openai-codex` | image backend | OpenAI image generation via Codex OAuth |
@@ -26928,6 +26946,8 @@ hermes ALL=(root) NOPASSWD: /usr/bin/systemctl --no-ask-password reset-failed he
 :::
 
 Avoid keeping both the user and system gateway units installed at once unless you really mean to. Hermes will warn if it detects both because start/stop/status behavior gets ambiguous.
+
+An installed unit (or launchd plist) belongs to the `HERMES_HOME` it pins. A gateway started from a different home, such as a test or scratch home that happens to resolve to the same service name, never rewrites it: `gateway run`, `start`, `restart` and `install --force` refuse with a message naming both homes and leave the file alone. To deliberately point an existing service at the current home, run `hermes gateway install --force-unit-path`.
 
 :::note Inside a container, only the system scope is offered
 `hermes gateway install` (and the `hermes gateway setup` wizard) refuse to install a **user** service when Hermes detects it is running inside a container. A user unit lands in `~/.config/systemd/user`, and when that home is bind-mounted from the host (podman/distrobox), the host's own `systemd --user` enables and starts the same unit — a second gateway polling the same bot token. Run the gateway as the container's main process (`hermes gateway run`, with a container restart policy), or in a systemd container (systemd as PID 1) install the isolated system scope: `sudo hermes gateway install --system --run-as-user <user>`.
@@ -49752,10 +49772,9 @@ hermes auth reset openrouter 2                           # Clear the cooldown on
 hermes auth refresh openai-codex work                    # Refresh one OAuth credential and clear its cooldown
 hermes auth status anthropic                             # Show auth status for a provider
 hermes auth logout anthropic                             # Log out and clear stored auth state
-hermes auth spotify                                      # Authenticate Hermes with Spotify via PKCE
 ```
 
-Subcommands: `add`, `list`, `remove`, `reset`, `priority`, `refresh`, `status`, `logout`, `spotify`. When called with no subcommand, launches the interactive management wizard.
+Subcommands: `add`, `list`, `remove`, `reset`, `priority`, `refresh`, `status`, `logout`. Spotify login moved to the `spotify` catalog plugin's `hermes spotify login`. When called with no subcommand, launches the interactive management wizard.
 
 ## `hermes usage`
 
@@ -53021,7 +53040,7 @@ Use `hermes config set` to set environment variables — every `UPPER_SNAKE` nam
 
 This page documents Hermes' built-in tools, grouped by toolset. Availability varies by platform, credentials, and enabled toolsets.
 
-**Quick counts (current registry):** ~100 tools — 10 browser tools (core) + 2 CDP-gated browser tools + 5 browser-vault tools + `browser_exec`, 4 file tools, 2 terminal tools (`terminal`, `process_manage`), 11 desktop-GUI tools (`read_terminal`, `close_terminal`, `desktop_preview`, `drive_preview`, `annotate_preview`, `read_window_below`, `focus_pane`, `react_to_message`, `gui_tour`, `show_tip`, `apply_layout` — desktop-app sessions only), 2 web tools, 5 Feishu tools, 7 Spotify tools (registered by the bundled `spotify` plugin), 5 Yuanbao tools, 14 kanban tools (registered when the kanban dispatcher spawns the agent), 1 project tool (`desktop_project`; desktop/GUI sessions), 2 Discord tools, 3 video tools (`video_generate`, `xai_video_edit`, `xai_video_extend`), and a handful of standalone tools (`memory`, `clarify`, `delegate_task`, `execute_code`, `cronjob_manage`, `session_search`, `skill_view`/`skill_manage`/`skills_list`, `text_to_speech`, `image_generate`, `vision_analyze`, `video_analyze`, `todo_list`, `computer_use`, `x_search`).
+**Quick counts (current registry):** ~100 tools — 10 browser tools (core) + 2 CDP-gated browser tools + 5 browser-vault tools + `browser_exec`, 4 file tools, 2 terminal tools (`terminal`, `process_manage`), 11 desktop-GUI tools (`read_terminal`, `close_terminal`, `desktop_preview`, `drive_preview`, `annotate_preview`, `read_window_below`, `focus_pane`, `react_to_message`, `gui_tour`, `show_tip`, `apply_layout` — desktop-app sessions only), 2 web tools, 5 Feishu tools, 5 Yuanbao tools, 14 kanban tools (registered when the kanban dispatcher spawns the agent), 1 project tool (`desktop_project`; desktop/GUI sessions), 2 Discord tools, 3 video tools (`video_generate`, `xai_video_edit`, `xai_video_extend`), and a handful of standalone tools (`memory`, `clarify`, `delegate_task`, `execute_code`, `cronjob_manage`, `session_search`, `skill_view`/`skill_manage`/`skills_list`, `text_to_speech`, `image_generate`, `vision_analyze`, `video_analyze`, `todo_list`, `computer_use`, `x_search`).
 
 :::tip MCP Tools
 In addition to built-in tools, Hermes can load tools dynamically from MCP servers. MCP tools appear with the prefix `mcp__<server>__` (e.g., `mcp__github__create_issue` for the `github` MCP server). See [MCP Integration](../user-guide/features/mcp.md) for configuration.
@@ -53143,6 +53162,8 @@ For local files, a full unredacted read (including all pages of the same file ve
 **Honcho tools** (`honcho_profile`, `honcho_search`, `honcho_context`, `honcho_reasoning`, `honcho_conclude`) are no longer built-in. They are available via the Honcho memory provider plugin from the plugin catalog (`hermes plugins install honcho`). See [Memory Providers](../user-guide/features/memory-providers.md) for installation and usage.
 
 **Home Assistant tools** (`ha_list_entities`, `ha_get_state`, `ha_list_services`, `ha_call_service`, toolset `homeassistant`) are no longer built-in. They come from the `homeassistant` catalog plugin (`hermes plugins install homeassistant`). See [Home Assistant](../user-guide/messaging/homeassistant.md).
+
+**Spotify tools** (`spotify_playback`, `spotify_devices`, `spotify_queue`, `spotify_search`, `spotify_playlists`, `spotify_albums`, `spotify_library`, toolset `spotify`) are no longer built-in. They come from the `spotify` catalog plugin (`hermes plugins install spotify`, then `hermes spotify login`). See [Spotify](../user-guide/features/spotify.md).
 :::
 
 ## `image_gen` toolset
@@ -53401,20 +53422,6 @@ Registered on the `hermes-discord` platform toolset. Moderation actions require 
 |------|-------------|----------------------|
 | `discord_admin` | Manage a Discord server via the REST API: list guilds/channels/roles, create/edit/delete channels, manage role grants, timeouts, kicks, and bans. | `DISCORD_BOT_TOKEN` + bot permissions |
 
-## `spotify` toolset
-
-Registered by the bundled `spotify` plugin. Requires an OAuth token — run `hermes auth spotify` once to authorize.
-
-| Tool | Description | Requires environment |
-|------|-------------|----------------------|
-| `spotify_playback` | Control Spotify playback, inspect the active playback state, or fetch recently played tracks. | Spotify OAuth |
-| `spotify_devices` | List Spotify Connect devices or transfer playback to a different device. | Spotify OAuth |
-| `spotify_queue` | Inspect the user's Spotify queue or add an item to it. | Spotify OAuth |
-| `spotify_search` | Search the Spotify catalog for tracks, albums, artists, playlists, shows, or episodes. | Spotify OAuth |
-| `spotify_playlists` | List, inspect, create, update, and modify Spotify playlists. | Spotify OAuth |
-| `spotify_albums` | Fetch Spotify album metadata or album tracks. | Spotify OAuth |
-| `spotify_library` | List, save, or remove the user's saved Spotify tracks or albums. | Spotify OAuth |
-
 ## `hermes-yuanbao` toolset
 
 Registered only on the `hermes-yuanbao` platform toolset. Yuanbao is Tencent's chat app; these tools drive its DM/group/sticker APIs.
@@ -53473,7 +53480,7 @@ Or in-session:
 ```
 /tools list
 /tools disable browser
-/tools enable spotify
+/tools enable discord
 ```
 
 ## Core Toolsets
@@ -53508,7 +53515,6 @@ Or in-session:
 | `setup` | `setup_choose` | Onboarding-only surface of the desktop setup profile: ask the user one question or picker card at a time. The setup profile's own config enables it (`platform_toolsets.cli`), and only desktop sessions get its tools. `all` does not include it. Not listed by `hermes tools`. |
 | `start_chat` | `start_chat` | Start a new desktop chat in an existing profile (this chat's own profile when none is named) and send it its first message, so the task runs there in view of the user. Every call opens another chat. A profile's own config enables it (`platform_toolsets.cli`), and only desktop sessions get its tool. `all` does not include it. Not listed by `hermes tools`. Subagents never get it. |
 | `skills` | `skill_manage`, `skill_view`, `skills_list` | Skill CRUD and browsing. |
-| `spotify` | `spotify_albums`, `spotify_devices`, `spotify_library`, `spotify_playback`, `spotify_playlists`, `spotify_queue`, `spotify_search` | Native Spotify control (playback, queue, search, playlists, albums, library). Registered by the bundled `spotify` plugin. |
 | `terminal` | `process_manage`, `terminal` | Shell command execution and background process management. |
 | `todo` | `todo_list` | Task list management within a session. |
 | `tts` | `text_to_speech` | Text-to-speech audio generation. |
@@ -56189,11 +56195,14 @@ title = reply["result"]["result"]["value"]
 - `SUPERVISOR_REGISTRY.capture(task_id, *, timeout=10.0) -> CapturedCDP` pins the
   supervisor's current WebSocket and the default page session attached on it. It
   never starts, reconnects or refocuses a supervisor.
-- `CapturedCDP.call(method, params=None, *, session_id=None, timeout=10.0) -> dict`
+- `CapturedCDP.call(method, params=None, *, session_id=None, timeout=10.0, before_send=None) -> dict`
   returns the raw CDP reply (`{"id", "result"}`). `session_id=None` addresses the
   browser endpoint (`Target.*`); pass `page_session_id` or a session you attached
   yourself for page domains. A CDP error reply raises `RuntimeError`; no reply
-  within `timeout` raises `TimeoutError`. The call blocks its thread, so call it
+  within a finite `timeout` raises `TimeoutError`. Finite timeouts fence queue
+  admission with a monotonic deadline. `timeout=None` retains the reply until
+  response or connection closure; acquisition owners can keep late attach IDs
+  for cleanup beyond their own outer deadline. The call blocks its thread, so call it
   from a worker thread, never from the supervisor's own event loop.
 - `CapturedCDP.is_valid()` stays true until the supervisor reconnects, stops, or
   is replaced in the registry. After that every `call` raises
@@ -56204,7 +56213,11 @@ title = reply["result"]["result"]["value"]
   `focus_page` on the supervisor does not change it.
 - Sessions you attach (`Target.attachToTarget`) are yours to detach. A reply
   that arrives after `timeout` is dropped, so a timed-out attach can leave a
-  session attached until the connection closes; give attaches a generous timeout.
+  session attached until the connection closes. Use `timeout=None` with a retained
+  acquisition worker to own and detach late replies, rather than guessing a large timeout.
+- `before_send` is a trusted synchronous, nonblocking validator on the supervisor
+  loop immediately before dispatch. Return `None`, or raise to refuse; do not call
+  capture/CDP APIs from it. It does not revoke commands already dispatched.
 
 This is a trusted, in-process seam. It grants nothing in-process Python could
 not already reach, and it enforces no origin, consent or target-ownership
@@ -57828,6 +57841,8 @@ interface PluginContext {
   addEventListener: (target: EventTarget, type: string, listener: EventListener, options?: AddEventListenerOptions | boolean) => () => void
   /** The curated OS door: native notification, open-external, reveal-in-file-manager, clipboard. */
   os: PluginOs
+  /** Lines in the core pet's speech bubble, attributed to this plugin (see "Pet bubble"). */
+  pet: PluginPet
   /** Plugin-scoped JSON persistence (keys live under `hermes.plugin.<id>.`). */
   storage: PluginStorage
 }
@@ -58173,7 +58188,8 @@ A multi-session plugin keeps its per-session state on its side (which session
 its panel is editing) and passes that id here; the bus guarantees one
 plugin write can never land in another session's composer.
 
-**Migrating off DOM reach-in** (the held catalog plugins that motivated this API):
+**Migrating off DOM reach-in** (the held catalog plugins that motivated this API
+and its siblings; the pet-wallet row uses the [pet bubble](#pet-bubble) door):
 
 | Plugin | Was | Now |
 |---|---|---|
@@ -58182,6 +58198,7 @@ plugin write can never land in another session's composer.
 | prompt-enhancer (#116031) | walks the editor's child nodes to serialize, rebuilds chip DOM, `replaceChildren` + synthetic `InputEvent` | `const draft = await host.composer.getDraft(sid)` → transform → `await host.composer.setDraft(sid, enhanced)` (chips hydrate app-side); revert is another `setDraft` |
 | memory-review (#115966) | `host.request('slash.exec', { session_id, command })` for `/memory …` — already SDK-only | optional: `host.composer.insertText(sid, '/memory pending', { mode: 'prefix' })` to seat the command for the user instead of executing it |
 | intelligent-tool-break (#115964) | "Message" button only toasts "type /break" (no composer write) | `host.composer.setDraft(host.state.focusedSessionId.get(), '/break ')` then `host.composer.focus(null)` restores the intended behaviour |
+| pet-wallet (#135178) | `document.querySelector('canvas[aria-label$=" pet"]')` to find the core pet, a `position:fixed; z-index:9999` overlay on `document.body` that follows it every frame, document-wide capture-phase pointer listeners | `ctx.pet.say(text, { id: 'balance', tone?, ttlMs? })` — the core bubble shows it over the pet, in-window and popped out, labelled with the plugin name; `ctx.pet.visible` tells you when there is no pet so you can fall back to your status-bar chip |
 
 `sessionId` in the table is the id the plugin's UI is bound to; for a composer
 slot render it is `host.state.focusedSessionId.get()`.
@@ -58715,6 +58732,9 @@ ctx.os.notify({ title, body?, silent?, icon?, activate?, onActivate?, actions? }
 ctx.os.openExternal(url)                   // OS default handler (browser, mail, spotify:) → Promise<boolean>
 ctx.os.revealPath(path)                    // reveal in Finder / Explorer → Promise<boolean>
 ctx.os.writeClipboard(text)                // system clipboard → Promise<boolean>
+ctx.pet.say(text, { id?, tone?, ttlMs? })   // line in the core pet's speech bubble → disposer
+ctx.pet.clear(id?)                         // drop one line (or all of yours)
+ctx.pet.visible                            // ReadableAtom<boolean> — is a pet on screen?
 host.navigate('/route')                    // hash-route navigation
 host.openSession(id, { profile?, intent? }) // open a stored session core-style;
                                            //   profile: soft-swap to that profile's backend first
@@ -58867,6 +58887,70 @@ happens on user click — never from a background event alone.
 The other doors (`openExternal`, `revealPath`, `writeClipboard`) resolve
 `false` instead of throwing when the capability isn't available (older desktop
 shell, plain browser) — branch on the result rather than sniffing the bridge.
+
+### Pet bubble — `ctx.pet` {#pet-bubble}
+
+The core pet (the petdex mascot, in-window or popped out into its own OS
+window) has a speech bubble. `ctx.pet` lets a plugin put a short line in it,
+so you never have to find the pet in the app DOM or float your own overlay
+over it:
+
+```ts
+register(ctx) {
+  // Shows "DeepSeek ¥12.40 left" over the pet for 8 s, labelled "Pet Wallet".
+  const dispose = ctx.pet.say('DeepSeek ¥12.40 left', { id: 'balance', ttlMs: 8000 })
+
+  // Same id → replaces the line in place (a refreshed balance, a countdown).
+  ctx.pet.say('DeepSeek ¥11.90 left', { id: 'balance' })
+
+  // Tones: 'info' (default), 'wait' (clock glyph), 'error' (alert glyph).
+  ctx.pet.say('Codex 5h quota at 90%', { id: 'quota', tone: 'wait' })
+
+  dispose()              // remove early, or
+  ctx.pet.clear('quota') // by id, or ctx.pet.clear() for all of yours
+
+  // No pet on screen? Fall back to your own status-bar chip or pane.
+  const visible = ctx.pet.visible.get()
+}
+```
+
+```ts
+interface PluginPet {
+  say(text: string, options?: { id?: string; tone?: 'info' | 'wait' | 'error'; ttlMs?: number }): () => void
+  clear(id?: string): void
+  visible: ReadableAtom<boolean>
+}
+```
+
+What the host guarantees, so you don't have to:
+
+- **Plain text.** Control characters and bidi overrides are stripped,
+  whitespace collapses to one line, and the text is capped at 120 characters.
+  It renders as a text node; markup shows literally.
+- **Attributed.** Your plugin's name (from the Plugins inventory) is printed
+  above the line, so the user can tell your words from the pet's.
+- **Short-lived.** Each line expires after `ttlMs` (default 6 s, clamped to
+  1–30 s). Re-`say` with the same `id` to keep a value up. At most 3 lines per
+  plugin are live (the oldest is evicted) and the bubble shows the newest
+  line from any plugin.
+- **Rate-limited.** 10 `say` calls per plugin per 10 s; extra calls are dropped
+  with a console warning and return a no-op disposer.
+- **Core first.** When the agent hits an error or is waiting on the user, the
+  core status bubble wins; your line shows again once that clears (if it
+  hasn't expired).
+- **The user's pet setting wins.** If no pet is adopted, or it is turned off,
+  nothing shows. `ctx.pet.visible` lets you branch on that.
+- **Cleaned up with you.** Disabling, unloading, or hot-reloading your plugin
+  removes every line it still has up.
+
+In-window, the bubble appears only for plugin lines (the app itself shows the
+agent's status). In the popped-out overlay, plugin lines share the bubble with
+the core status lines. The overlay is a separate window that loads no plugin
+code; the main window sends it the live lines with the rest of the pet state.
+
+Pointer input on the pet (drag, shift-click pop-out, overlay click) belongs to
+the host and has no plugin hook. Use a palette command, a status-bar item, or
+your own pane for actions.
 
 ### Desktop appearance settings — `host.settings`
 
@@ -59450,7 +59534,7 @@ pipeline as a trust boundary.
 | Category | Exports |
 |----------|---------|
 | Host | `host` (`.state.*`, `.settings`, `.notify`, `.notifyError`, `.navigate`, `.onEvent`, `.logs`, `.status`, `.restartGateway`, `.request`, `.composer`, `.sessions`, `.skills`, `.toolsets`, `.profiles`, `.pluginDecisions`) |
-| Plugin contract | `HermesPlugin`, `PluginContext`, `PluginContribution`, `PluginStorage`, `PluginOs`, `PluginRestOptions`, `PluginNativeNotificationInput`, `PluginNotificationAction`, `HermesOpenTarget`, `Contribution` |
+| Plugin contract | `HermesPlugin`, `PluginContext`, `PluginContribution`, `PluginStorage`, `PluginOs`, `PluginPet`, `PetSayOptions`, `PetMessageTone`, `PluginRestOptions`, `PluginNativeNotificationInput`, `PluginNotificationAction`, `HermesOpenTarget`, `Contribution` |
 | Area constants | `PANES_AREA`, `ROUTES_AREA`, `SIDEBAR_NAV_AREA`, `STATUSBAR_AREAS`, `TITLEBAR_AREAS`, `WORKSPACE_PAGE_HEADER_AREA`, `PALETTE_AREA`, `KEYBINDS_AREA`, `THEMES_AREA`, `COMPOSER_AREAS`, `MODEL_MENU_ROW_AREA`, `SESSION_ROW_AREAS`, `SIDEBAR_NAV_PREFS_AREA`, `APPEARANCE_AREAS`, `SETTINGS_PLUGINS_AREA` |
 | Area payloads | `PluginSettingsPage`, `PluginSettingsSubpage` (+ `pluginSettingsHref`), `RouteContribution`, `SidebarNavContribution`, `StatusbarItem`, `TitlebarTool`, `PaletteContribution`, `KeybindContribution`, `ComposerMiddleware`, `ComposerAttachmentProvider`, `SessionRowSlotContribution`, `SidebarNavPrefsContribution` |
 | React / state | `useValue`, `atom`, `computed`, `useQuery`, `useMutation`, `useQueryClient`, `queryClient`, `Contribute`, `WorkspacePageHeaderControl` |
@@ -61388,13 +61472,29 @@ identity should skip destructive mirroring when it is absent.
 
 ### Oversized prefetch results
 
-External `prefetch()` results above the configured spill threshold are written
-to a private spill file and replaced with the configured head/tail preview.
-The preview includes the path so the agent can read the full result when it is
-actually needed. Results at or below the threshold are returned unchanged.
+External `prefetch()` results are returned in full by default, preserving the
+provider's relevance-ranked recall, up to a safety ceiling of 10×
+`hooks.output_spill.max_chars` (at least 100,000 characters) above which they
+still spill. Keep your own recall budget well under that. To opt into spilling oversized results for
+the active profile, set:
 
-This uses the shared `hooks.output_spill` settings (`10,000` characters by
-default); see [Plugins — oversized-context spill](./plugins/index.md#oversized-context-spill).
+```yaml
+memory:
+  prefetch_spill_enabled: true  # default: false
+```
+
+When enabled, results above the shared `hooks.output_spill.max_chars` threshold
+(default `10,000` characters) are written to a private spill file and replaced
+with the configured head/tail preview plus its path. The default preview keeps
+only the first and last `500` characters; the model must read the file to recover
+the middle. Results at or below the threshold remain unchanged.
+
+The shared `hooks.output_spill` preview lengths and directory still apply, and
+`hooks.output_spill.enabled: false` disables spilling even with memory opt-in.
+Both settings are snapshotted when the external provider is registered; restart
+Hermes to apply changes to existing sessions. Built-in memory and normal
+plugin-hook spilling are unaffected. See
+[Plugins — oversized-context spill](./plugins/index.md#oversized-context-spill).
 
 ## Pre-Compress Checkpoints (fail-closed)
 
@@ -75596,7 +75696,7 @@ hermes auth logout minimax-oauth
 
 # OAuth over SSH / Remote Hosts
 
-Some Hermes providers — **Spotify** and **remote MCP servers** (Linear, Sentry, Atlassian, Asana, Figma, …) — use a *loopback redirect* OAuth flow. The auth server redirects your browser to `http://127.0.0.1:<port>/callback` so a tiny HTTP listener started by Hermes can grab the authorization code.
+Some Hermes providers — **Spotify** (the `spotify` catalog plugin) and **remote MCP servers** (Linear, Sentry, Atlassian, Asana, Figma, …) — use a *loopback redirect* OAuth flow. The auth server redirects your browser to `http://127.0.0.1:<port>/callback` so a tiny HTTP listener started by Hermes can grab the authorization code.
 
 This works perfectly when Hermes and your browser are on the same machine. It breaks the moment they aren't: your laptop's browser tries to reach `127.0.0.1` on **your laptop**, but the listener is bound to `127.0.0.1` on **the remote server**.
 
@@ -75611,7 +75711,7 @@ The fix is a one-line SSH local-forward. For MCP servers on an interactive termi
 ssh -N -L 43827:127.0.0.1:43827 user@remote-host
 
 # In your existing SSH session on the remote machine:
-hermes auth spotify --no-browser
+hermes spotify login --no-browser
 # → Hermes prints an authorize URL. Open it in a browser on your laptop.
 # → Your browser redirects to 127.0.0.1:43827/callback, the tunnel forwards
 #   the request to the remote listener, login completes.
@@ -75691,7 +75791,7 @@ ssh -N -L 43827:127.0.0.1:43827 user@remote-host
 
 ```bash
 ssh user@remote-host
-hermes auth spotify --no-browser
+hermes spotify login --no-browser
 ```
 
 Hermes detects the SSH session, skips the browser auto-open, and prints an authorize URL plus a `Waiting for callback on http://127.0.0.1:<port>/callback` line.
@@ -79529,6 +79629,8 @@ Preview GUI cleanup with `hermes uninstall --gui --dry-run`. It lists the remova
 :::note
 Running `hermes uninstall --gui` from a **source checkout** (a `hermes desktop` dev build) removes `apps/desktop/{dist,release,node_modules}` and the desktop build stamp. The workspace-root `node_modules` stays installed because it is shared with the TUI, dashboard and other workspaces. Rebuild the GUI with `hermes desktop` if you need it again.
 :::
+
+`hermes update` keeps a desktop app current once it has been built in the checkout, even on a server that never opens it. On a headless Linux host, or when the desktop app's own Node dependencies fail to install (for example a compiler too old for `node-pty`), the update still builds the TUI and web UI, reports the desktop build as owed, and suggests `hermes uninstall --gui`. After that uninstall, later updates skip the desktop app.
 
 ## CLI reference: `hermes desktop`
 
@@ -85794,49 +85896,45 @@ Hermes Mod respects the `HERMES_HOME` environment variable, so it works with [pr
 
 # Spotify
 
-Hermes can control Spotify directly — playback, queue, search, playlists, saved tracks/albums, and listening history — using Spotify's official Web API with PKCE OAuth. Tokens are stored in `~/.hermes/auth.json` and refreshed automatically on 401; you only log in once per machine (refresh tokens expire after ~6 months; re-run `hermes auth spotify` when they do).
+Hermes can control Spotify — playback, queue, search, playlists, saved tracks/albums, and listening history — through the official **`spotify` plugin** from the [plugin catalog](./plugins.md). It uses Spotify's Web API with PKCE OAuth. The plugin is maintained by Nous Research in [NousResearch/hermes-spotify](https://github.com/NousResearch/hermes-spotify) and is not part of Hermes core. Tokens are stored in `~/.hermes/auth.json` and refreshed automatically on 401; you only log in once per machine (refresh tokens expire after ~6 months; re-run `hermes spotify login` when they do).
 
-Unlike Hermes' built-in OAuth integrations (Google, GitHub Copilot, Codex), Spotify requires every user to register their own lightweight developer app. Spotify does not let third parties ship a public OAuth app that anyone can use. It takes about two minutes and `hermes auth spotify` walks you through it.
+Unlike Hermes' built-in OAuth integrations, Spotify requires every user to register their own lightweight developer app. Spotify does not let third parties ship a public OAuth app that anyone can use. It takes about two minutes and `hermes spotify login` walks you through it.
+
+## Install
+
+```bash
+hermes plugins install spotify
+```
+
+Plugins are installed per profile. To use Spotify in another profile, install it there too (`hermes -p <profile> plugins install spotify`).
+
+:::info Upgrading from a release that bundled Spotify
+Nothing to do. Every profile that was already using Spotify (a Spotify login in its `auth.json`, or the `spotify` toolset listed in `platform_toolsets`) gets the plugin installed automatically from the catalog by `hermes update`, or the first time the profile starts if that step could not run (this honours `security.allow_lazy_installs`). Your login, the `spotify` toolset and the tool names carry over unchanged. The one visible change: `hermes auth spotify` is now `hermes spotify login` (and `hermes auth status spotify` / `hermes auth logout spotify` are `hermes spotify status` / `hermes spotify logout`); the old spelling prints the new one. If you later remove the plugin (`hermes plugins remove spotify`), it stays removed.
+:::
 
 ## Prerequisites
 
 - A Spotify account. **Free** works for search, playlist, library, and activity tools. **Premium** is required for playback control (play, pause, skip, seek, volume, queue add, transfer).
-- Hermes Agent installed and running.
+- Hermes Agent installed and running, with the `spotify` plugin installed.
 - For playback tools: an **active Spotify Connect device** — the Spotify app must be open on at least one device (phone, desktop, web player, speaker) so the Web API has something to control. If nothing is active you'll get a `403 Forbidden` with a "no active device" message; open Spotify on any device and retry.
 
 ## Setup
 
-### One-shot: `hermes tools` or first-run setup
+### 1. Enable the toolset
 
-The fastest path. Run:
-
-```bash
-hermes tools
-```
-
-Scroll to `🎵 Spotify`, press space to toggle it on, then `s` to save. The same toggle is also available during the first-run `hermes setup` / `hermes setup tools` flow. Spotify stays opt-in, so enabling it there runs the same provider-aware configuration as `hermes tools`.
-
-Hermes drops you straight into the OAuth flow — if you don't have a Spotify app yet, it walks you through creating one inline. Once you finish, the toolset is enabled AND authenticated in one pass.
-
-If you prefer to do the steps separately (or you're re-authing later), use the two-step flow below.
-
-### Two-step flow
-
-#### 1. Enable the toolset
+The plugin's `spotify` toolset is opt-in, so users who don't want it don't ship extra tool schemas on every API call. Turn it on in `hermes tools` (toggle `🔌 Spotify`, then save) or with:
 
 ```bash
-hermes tools
+hermes tools enable spotify
 ```
 
-Toggle `🎵 Spotify` on, save, and when the inline wizard opens, dismiss it (Ctrl+C). The toolset stays on; only the auth step is deferred.
-
-#### 2. Run the login wizard
+### 2. Log in
 
 ```bash
-hermes auth spotify
+hermes spotify login
 ```
 
-The 7 Spotify tools only appear in the agent's toolset after step 1 — they're off by default so users who don't want them don't ship extra tool schemas on every API call.
+The 7 Spotify tools only reach the agent once you're logged in.
 
 If no `HERMES_SPOTIFY_CLIENT_ID` is set, Hermes walks you through the app registration inline:
 
@@ -85875,10 +85973,10 @@ For jump-box / bastion setups and other gotchas (mosh, tmux, port conflicts), se
 ## Verify
 
 ```bash
-hermes auth status spotify
+hermes spotify status
 ```
 
-Shows whether tokens are present and when the access token expires. Refresh is automatic: when any Spotify API call returns 401, the client exchanges the refresh token and retries once. Refresh tokens persist across Hermes restarts, so you only re-auth if you revoke the app in your Spotify account settings or run `hermes auth logout spotify`.
+Shows whether tokens are present and when the access token expires. Refresh is automatic: when any Spotify API call returns 401, the client exchanges the refresh token and retries once. Refresh tokens persist across Hermes restarts, so you only re-auth if you revoke the app in your Spotify account settings or run `hermes spotify logout`.
 
 ## Using it
 
@@ -86016,7 +86114,7 @@ Full cron reference: [Cron Jobs](./cron).
 ## Sign out
 
 ```bash
-hermes auth logout spotify
+hermes spotify logout
 ```
 
 Removes tokens from `~/.hermes/auth.json`. To also clear the app config, delete `HERMES_SPOTIFY_CLIENT_ID` (and `HERMES_SPOTIFY_REDIRECT_URI` if you set it) from `~/.hermes/.env`, or run the wizard again.
@@ -86035,7 +86133,7 @@ To revoke the app on Spotify's side, visit [Apps connected to your account](http
 
 **`429 Too Many Requests`** — Spotify's rate limit. Hermes returns a friendly error; wait a minute and retry. If this persists, you're probably running a tight loop in a script — Spotify's quota resets roughly every 30 seconds.
 
-**`401 Unauthorized` keeps coming back** — Your refresh token was revoked (usually because you removed the app from your account, or the app was deleted). Run `hermes auth spotify` again.
+**`401 Unauthorized` keeps coming back** — Your refresh token was revoked (usually because you removed the app from your account, or the app was deleted). Run `hermes spotify login` again.
 
 **Wizard doesn't open the browser** — If you're over SSH or in a container without a display, Hermes detects it and skips the auto-open. Copy the dashboard URL it prints and open it manually.
 
@@ -86044,7 +86142,7 @@ To revoke the app on Spotify's side, visit [Apps connected to your account](http
 By default Hermes requests the scopes needed for every shipped tool. Override if you want to restrict access:
 
 ```bash
-hermes auth spotify --scope "user-read-playback-state user-modify-playback-state playlist-read-private"
+hermes spotify login --scope "user-read-playback-state user-modify-playback-state playlist-read-private"
 ```
 
 Scope reference: [Spotify Web API scopes](https://developer.spotify.com/documentation/web-api/concepts/scopes). If you request fewer scopes than a tool needs, that tool's calls will fail with 403.
@@ -86052,7 +86150,7 @@ Scope reference: [Spotify Web API scopes](https://developer.spotify.com/document
 ## Advanced: custom client ID / redirect URI
 
 ```bash
-hermes auth spotify --client-id <id> --redirect-uri http://localhost:3000/callback
+hermes spotify login --client-id <id> --redirect-uri http://localhost:3000/callback
 ```
 
 Or set them permanently in `~/.hermes/.env`:
