@@ -870,8 +870,26 @@ For a managed source installation:
 hermes update
 ```
 
-Source installs track `main`, the only valid source channel. The update
-prepares dependencies through PM and reports configuration changes and process-restart results.
+A source checkout of the official repository tracks the **stable** channel: the
+latest published `vX.Y.Z` GitHub release (never a draft, prerelease or canary tag),
+checked out at its exact commit. `hermes update` and the Desktop update button move
+only from one release to the next, never commit by commit. Forks and mirrors keep
+tracking their `main` branch. The update prepares dependencies through PM and
+reports configuration changes and process-restart results.
+
+```bash
+hermes update --set-channel main     # follow every commit on main instead
+hermes update --set-channel stable   # back to releases only
+hermes update --channel main         # one run against main; nothing is saved
+```
+
+The choice is stored per install under `update.installs` in `config.yaml`. An
+install that never chose a channel only moves forward: a checkout already newer
+than the latest release (for example one that tracked `main` before this default)
+stays where it is until a newer release ships. Running `--set-channel stable`
+pins the checkout to the exact release commit, even when that is older.
+Windows Store, MSIX and bundled desktop installs are unaffected; their channel
+is baked into the package (see below).
 
 ### Bundled desktop updates
 
@@ -1070,8 +1088,8 @@ git -C "$repo" -c gc.writeCommitGraph=false gc --auto
 
 ### Updating against a non-default branch: `--branch`
 
-Source installs track `origin/main`. Use
-`--branch NAME` for a one-run branch override:
+`--branch NAME` is a one-run override that updates against a branch tip
+instead of the selected channel:
 
 ```bash
 hermes update --branch release-candidate
@@ -1127,7 +1145,8 @@ You can pass `--keep-stash` to a terminal `hermes update` too if you want the sa
 
 ### Preview-only: `hermes update --check`
 
-`hermes update --check` compares the checkout with `origin/main`
+`hermes update --check` compares the checkout with the selected channel's
+target (the latest stable release by default, `origin/main` on the main channel)
 without applying code, installing dependencies, or restarting gateways. The
 comparison can fetch Git metadata; it is not a promise of zero filesystem writes.
 Package-owned installs report their external update method.
@@ -11559,7 +11578,7 @@ then **Installed** and a completion notification; errors stay in the dialog so y
 can retry. Installation goes through the normal Skills Hub pipeline (security scan,
 action log, installed-list refresh). If you switch profile or connection while the
 confirmation is open, reopen the link for the new destination; a link cannot bypass
-scanning or pick a different profile. Changes apply to new sessions.
+scanning or pick a different profile. Open conversations are told about the new skill on their next message.
 
 The `skill/install` route needs an updated Desktop build. If the app is missing or
 does not recognize the link, expand the card and copy its CLI install command.
@@ -11704,6 +11723,16 @@ Level 2: skill_view(name, path)  → Specific reference file       (varies)
 ```
 
 The agent only loads the full skill content when it actually needs it.
+
+### Skills added during a conversation
+
+The list of skills the agent picks from is part of the conversation's system prompt, which stays
+fixed so the provider's prompt cache keeps working. When a skill is installed, created or removed
+while a conversation is open (from the Skills Hub, `hermes skills install` in another
+terminal, a plugin, the curator, or the agent itself), your next message to the agent carries a short
+note naming the new skills with their descriptions and the removed ones. The note is sent once per change;
+the system prompt itself picks up the change at the next compaction. `/reload-skills` is not needed
+for this, it still refreshes the `/skill-name` slash commands.
 
 ## SKILL.md Format
 
@@ -16352,6 +16381,10 @@ agent_name = "Hermes Agent"
 model_name = "unknown"
 output_directory = "/home/you/.hermes/telemetry/nemo-relay/atif"
 filename_template = "trajectory-{session_id}.json"
+
+[components.config.opentelemetry]
+enabled = false
+endpoints = []
 
 [components.config.policy]
 unknown_component = "warn"
@@ -44710,7 +44743,13 @@ The runtime boundary follows all project, operator, memory and plugin text, so e
 blocks do not masquerade as the runtime cwd. Model/provider are read before the runtime boundary,
 excluding embedder descriptions. `Platform:` is deliberately not an identity field: a surface switch
 (desktop ↔ TUI) keeps the stored bytes and delivers the current surface's guidance as a one-shot note on
-the per-turn user-message channel (`agent/surface_switch.py`), so the cached prefix survives (#104414). Legacy prompts retain their original
+the per-turn user-message channel (`agent/surface_switch.py`), so the cached prefix survives (#104414). The
+`<available_skills>` index is kept the same way: every turn compares it with the index the session would
+build now (`agent/skills_index_delta.py`, called from `build_turn_context` so long-lived CLI/TUI/Desktop
+agents are covered, not only prompt restores), and a difference (new index rows, removed names) rides
+the same one-shot note channel, sent only when the difference changes. The in-process index cache is
+keyed on the skill files' signatures, so a change written by another process is seen too. The index
+itself converges at the next rebuild boundary (compaction). Legacy prompts retain their original
 host-before-context anchor, so prompts persisted before the reorder still validate.
 
 When `skip_context_files` is set (e.g., subagent delegation), SOUL.md is not loaded and the hardcoded `DEFAULT_AGENT_IDENTITY` is used instead.
@@ -48769,7 +48808,7 @@ skills:
 
 Snippets run with the skill directory as their working directory, and output is capped at 4000 characters. Failures (timeouts, non-zero exits) show up as a short `[inline-shell error: ...]` marker instead of breaking the whole skill.
 
-Trust scoping: community hub installs never auto-execute snippets, even with the flag on — the hub's install scan blocks a community skill carrying this DSL on a caution/dangerous verdict, and a `--force` install (or one from before the scanner caught the pattern) must not re-arm what the gate refused. Bundled, trusted, and your own skills expand as before.
+Trust scoping: community hub installs never auto-execute snippets, even with the flag on — the hub's install scan blocks a community skill carrying this DSL on a caution/dangerous verdict, and a `--force` install (or one from before the scanner caught the pattern) must not re-arm what the gate refused. That covers every `SKILL.md` nested inside a community install and another profile's install reached through `skills.external_dirs`; if a skills tree's hub lock (`.hub/lock.json`) is unreadable, nothing in that tree expands until it is repaired. Bundled, trusted, and your own skills expand as before.
 
 ### Test It
 
@@ -49190,7 +49229,7 @@ The install also ships `hermes-agent`, a minimal runner that sends one query and
 | `hermes profile` | Manage profiles — multiple isolated Hermes instances. |
 | `hermes completion` | Print shell completion scripts (bash/zsh/fish). |
 | `hermes --version` | Show version information. |
-| `hermes update` | Pull latest code and reinstall dependencies. `--check` previews without installing; `--backup` takes a pre-pull `HERMES_HOME` snapshot. |
+| `hermes update` | Update to the latest stable release (or the selected channel) and reinstall dependencies. `--check` previews without installing; `--backup` takes a pre-pull `HERMES_HOME` snapshot. |
 | `hermes uninstall` | Remove Hermes from the system. |
 
 ## `hermes chat`
@@ -51079,13 +51118,13 @@ Use `--check` to compare with its configured source target without applying
 the update. Desktop bundles, Docker, Nix, and Termux packages retain their
 external update owner. See [Updating & Uninstalling](../getting-started/updating.md).
 
-`hermes update` pulls the configured update branch (default: `main`). If your checkout is on another branch, Hermes may check out the update branch before pulling. Commit branch work before updating when you want to keep it outside the update autostash flow.
+`hermes update` follows this installation's update channel. A source checkout of the official repository defaults to `stable`, the latest published `vX.Y.Z` GitHub release at its exact commit; forks and mirrors default to `main`. To follow every commit on `main` instead, run `hermes update --set-channel main`; `hermes update --set-channel stable` switches back. On the `main` channel, a checkout on another branch may be switched to the update branch before pulling. Commit branch work before updating when you want to keep it outside the update autostash flow.
 
 | Option | Description |
 |--------|-------------|
 | `--install-id` | Print this installation's identity and path, then exit. |
-| `--set-channel CHANNEL` | Persist the update channel for this source installation without applying an update. `main` is the only valid source channel. Bundled applications have a fixed build channel and refuse channel changes. |
-| `--channel CHANNEL` | Select a source channel for this invocation only (`main` is the only valid one). |
+| `--set-channel CHANNEL` | Persist the update channel for this source installation without applying an update: `stable` (published releases) or `main` (every commit). Bundled applications have a fixed build channel and refuse channel changes. |
+| `--channel CHANNEL` | Select a source channel for this invocation only (`stable` or `main`); nothing is saved. |
 | `--branch NAME` | Select a source branch for this invocation; takes precedence over source channel selection. |
 | `--gateway` | Internal mode used by the messaging `/update` command. Uses file-based IPC for prompts and progress streaming instead of reading from terminal stdin. Not a gateway restart flag. |
 | `--check` | Check whether an update is available without pulling, installing dependencies, or restarting anything. |
@@ -68183,16 +68222,33 @@ as a no-op compatibility alias for existing installation commands.
 > `HERMES_NEMO_RELAY_ATIF_*` settings. Those legacy variables no longer
 > configure Relay exporters themselves.
 
-On supported platforms, Hermes requires NeMo Relay 0.9 for managed provider
+On supported platforms, Hermes requires NeMo Relay 0.10 for managed provider
 and tool calls.
 
 ## Runtime Dependency and Data Boundary
 
 Hermes installs the platform-specific `nemo-relay` native wheel from the
-bounded `>=0.9,<0.10` dependency range. The published package is built from
+bounded `>=0.10,<0.11` dependency range. The published package is built from
 the [NVIDIA NeMo Relay repository](https://github.com/NVIDIA/NeMo-Relay).
 Unsupported platforms use the explicit no-op runtime described above rather
 than downloading a different implementation.
+
+Relay 0.10 requires observability configuration `version = 4`. Custom Python
+LLM execution intercepts receive `(name, request, context, next_call)`; the
+context exposes the selected request codec and, for non-streaming execution,
+the response codec. Native plugins must be rebuilt for Relay 0.10's ABI v7 and
+set their `compat.relay` lower bound to `0.10.0`. Workers that register LLM
+execution intercepts must update their callbacks and regenerate their protocol
+bindings. See Relay's [0.10 migration guide](https://docs.nvidia.com/nemo/relay/reference/migration-guides)
+for the complete upgrade checklist.
+
+Relay 0.10 also starts OpenTelemetry export on its own when an active Relay
+configuration meets a nonblank `OTEL_EXPORTER_OTLP_ENDPOINT` (or a per-signal
+`OTEL_EXPORTER_OTLP_*_ENDPOINT`) in the Hermes process environment. Those
+`gen_ai` spans carry prompt and response messages. Files generated by
+`hermes migrate relay` set `[components.config.opentelemetry] enabled = false`
+to keep the 0.9 behavior; add the same section to a hand-written file, or set
+`OTEL_SDK_DISABLED=true`, unless you want that export.
 
 When Relay managed execution is active, the provider request and response pass
 through that native module in the Hermes process so configured interceptors can
