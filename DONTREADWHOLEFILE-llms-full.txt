@@ -11266,7 +11266,7 @@ Hermes Agent includes a rich set of capabilities that extend far beyond basic ch
 - **[Fallback Providers](fallback-providers.md)** — Automatic failover to backup LLM providers when your primary model encounters errors, including independent fallback for auxiliary tasks like vision and compression.
 - **[Credential Pools](credential-pools.md)** — Distribute API calls across multiple keys for the same provider. Automatic rotation on rate limits or failures.
 - **[Prompt caching](../configuration#prompt-caching)** — Built-in cross-session 1-hour prefix cache for Claude on native Anthropic, OpenRouter, and Nous Portal. Always-on; no configuration required.
-- **[Memory Providers](memory-providers.md)** — Plug in external memory backends (Holographic, RetainDB, ByteRover, plus Honcho, Hindsight, Supermemory, Mem0 and OpenViking from the plugin catalog) for cross-session user modeling and personalization beyond the built-in memory system.
+- **[Memory Providers](memory-providers.md)** — Plug in external memory backends (RetainDB, ByteRover, plus Honcho, Hindsight, Supermemory, Mem0, OpenViking and Holographic from the plugin catalog) for cross-session user modeling and personalization beyond the built-in memory system.
 - **[API Server](api-server.md)** — Expose Hermes as an OpenAI-compatible HTTP endpoint. Connect any frontend that speaks the OpenAI format — Open WebUI, LobeChat, LibreChat, and more.
 - **[IDE Integration (ACP)](acp.md)** — Use Hermes inside ACP-compatible editors such as VS Code, Zed, and JetBrains. Chat, tool activity, file diffs, and terminal commands render inside your editor.
 - **[Batch Processing](batch-processing.md)** — Run the agent over many prompts or tasks in parallel from the CLI, with structured outputs and trajectory capture suitable for evals or downstream training pipelines.
@@ -13606,7 +13606,7 @@ Full details in [Gating agent skill writes](./skills.md#gating-agent-skill-write
 
 ## External Memory Providers
 
-For deeper, persistent memory that goes beyond MEMORY.md and USER.md, Hermes ships with 3 external memory provider plugins — Holographic, RetainDB and ByteRover — and more, such as Honcho, Hindsight, Supermemory, Mem0 and OpenViking, are available from the [plugin catalog](plugins.md) via `hermes plugins install <name>`.
+For deeper, persistent memory that goes beyond MEMORY.md and USER.md, Hermes ships with 2 external memory provider plugins — RetainDB and ByteRover — and more, such as Honcho, Hindsight, Supermemory, Mem0, OpenViking and Holographic, are available from the [plugin catalog](plugins.md) via `hermes plugins install <name>`.
 
 External providers run **alongside** built-in memory (never replacing it) and add capabilities like knowledge graphs, semantic search, automatic fact extraction, and cross-session user modeling.
 
@@ -13624,7 +13624,7 @@ See the [Memory Providers](./memory-providers.md) guide for full details on each
 
 # Memory Providers
 
-Hermes Agent ships with 5 external memory provider plugins that give the agent persistent, cross-session knowledge beyond the built-in MEMORY.md and USER.md, and more (such as Honcho, Hindsight and Supermemory) are available from the [plugin catalog](./plugins.md). Only **one** external provider can be active at a time — the built-in memory is always active alongside it.
+Hermes Agent ships with 2 external memory provider plugins (RetainDB and ByteRover) that give the agent persistent, cross-session knowledge beyond the built-in MEMORY.md and USER.md, and more (such as Honcho, Hindsight, Supermemory and Holographic) are available from the [plugin catalog](./plugins.md). Only **one** external provider can be active at a time — the built-in memory is always active alongside it.
 
 ## Quick Start
 
@@ -13640,9 +13640,9 @@ Or set manually in `~/.hermes/config.yaml`:
 
 ```yaml
 memory:
-  provider: holographic  # or retaindb, byterover,
-                         # or honcho / hindsight / supermemory / mem0 / openviking (plugin
-                         # catalog — run `hermes plugins install <name>` first)
+  provider: retaindb  # or byterover,
+                      # or honcho / hindsight / supermemory / mem0 / openviking / holographic
+                      # (plugin catalog — run `hermes plugins install <name>` first)
 ```
 
 ## How It Works
@@ -14169,6 +14169,10 @@ Hindsight reads `$HERMES_HOME/hindsight/config.json` (per profile home), `~/.hin
 
 ### Holographic
 
+:::info Plugin catalog
+Holographic is maintained by [itpartypattaya](https://github.com/itpartypattaya/hermes-plugin-holographic) and installed from the [plugin catalog](./plugins.md) rather than bundled with Hermes. It is the provider that used to ship in-tree, with the same provider name, settings and database. Existing setups are migrated automatically — see [Migrating from bundled Holographic](#migrating-from-bundled-holographic).
+:::
+
 Local SQLite fact store with FTS5 full-text search, trust scoring, and HRR (Holographic Reduced Representations) for compositional algebraic queries.
 
 | | |
@@ -14182,7 +14186,8 @@ Local SQLite fact store with FTS5 full-text search, trust scoring, and HRR (Holo
 
 **Setup:**
 ```bash
-hermes memory setup    # select "holographic"
+hermes plugins install holographic   # from the plugin catalog
+hermes memory setup                  # select "holographic"
 # Or manually:
 hermes config set memory.provider holographic
 ```
@@ -14200,6 +14205,20 @@ hermes config set memory.provider holographic
 - `reason` — compositional AND queries across multiple entities
 - `contradict` — automated detection of conflicting facts
 - Trust scoring with asymmetric feedback (+0.05 helpful / -0.10 unhelpful)
+
+The catalog plugin has its own release notes and options beyond this list; see its [README](https://github.com/itpartypattaya/hermes-plugin-holographic) for the current tool actions and settings.
+
+#### Migrating from bundled Holographic
+
+Holographic used to ship inside the Hermes tree. If your `config.yaml` already has `memory.provider: holographic`, there is nothing to do:
+
+- `hermes update` installs the catalog plugin into every profile home that names the provider.
+- If the plugin is still missing on the first agent start (`hermes chat`, the gateway, Desktop), Hermes installs it and tells you it did.
+- With `security.allow_lazy_installs: false` the agent-start path does not install anything; it prints the exact `hermes plugins install holographic` command instead.
+
+Your facts (`$HERMES_HOME/memory_store.db`, or the `db_path` you set) and your `plugins.hermes-memory-store` settings are read exactly as before, so no memory is lost. Verify with `hermes memory status` and `hermes plugins list`.
+
+If you installed Nous Research's interim copy by URL (`NousResearch/hermes-plugin-holographic`, now archived), `hermes plugins update holographic` moves it onto the catalog entry; your data stays where it is.
 
 ---
 
@@ -14399,7 +14418,7 @@ package command. Restart Hermes after successful dependency preparation.
 | **OpenViking** (plugin catalog) | Self-hosted | Free | 6 | `hermes plugins install openviking` + server | Filesystem hierarchy + tiered loading |
 | **Mem0** (plugin catalog) | Cloud/Self-hosted | Free/Paid | 4 | `hermes plugins install mem0` | Server-side LLM extraction + self-hosted/OSS modes |
 | **Hindsight** (plugin catalog) | Cloud/Local | Free/Paid | 3 | `hermes plugins install hindsight` | Knowledge graph + reflect synthesis |
-| **Holographic** | Local | Free | 2 | None | HRR algebra + trust scoring |
+| **Holographic** (plugin catalog) | Local | Free | 2 | `hermes plugins install holographic` | HRR algebra + trust scoring |
 | **RetainDB** | Cloud | $20/mo | 10 | `requests` | Delta compression |
 | **ByteRover** | Local/Cloud | Free/Paid | 3 | `brv` CLI | Pre-compression extraction |
 | **Supermemory** (plugin catalog) | Cloud/Self-hosted | Free/Paid | 4 | `hermes plugins install supermemory` | Context fencing + session graph ingest + multi-container |
@@ -14422,9 +14441,11 @@ published through the [plugin catalog](./plugins.md). Hindsight moved first (see
 [Upgrading from the bundled Honcho](#upgrading-from-the-bundled-honcho)), Supermemory (see
 [Migrating from bundled Supermemory](#migrating-from-bundled-supermemory)), Mem0 (see
 [Migrating from bundled Mem0](#migrating-from-bundled-mem0)) and OpenViking (see
-[Migrating from bundled OpenViking](#migrating-from-bundled-openviking)). Holographic, RetainDB
-and ByteRover leave core on October 15, 2026; their standalone repositories are unmaintained
-and open for a new maintainer. Nothing changes for you: the
+[Migrating from bundled OpenViking](#migrating-from-bundled-openviking)) and Holographic (now
+maintained by itpartypattaya, see
+[Migrating from bundled Holographic](#migrating-from-bundled-holographic)). RetainDB and
+ByteRover leave core on October 15, 2026; their standalone repositories are unmaintained and
+open for a new maintainer. Nothing changes for you: the
 provider name, the settings it reads, its data directory and its tools stay the same.
 When a provider you have configured stops shipping with Hermes, `hermes update` installs its
 catalog plugin for every profile that names it; if you update through the Desktop app, the
@@ -34290,7 +34311,7 @@ Speech-to-text supports eight providers: local faster-whisper (free, runs on-dev
 ## Memory & Personalization
 
 - **[Built-in Memory](../user-guide/features/memory.md)** — Persistent, curated memory via `MEMORY.md` and `USER.md` files. The agent maintains bounded stores of personal notes and user profile data that survive across sessions.
-- **[Memory Providers](../user-guide/features/memory-providers.md)** — Plug in external memory backends for deeper personalization. Three providers ship with Hermes: Holographic (local SQLite), RetainDB (hybrid search) and ByteRover (CLI-based); Honcho (dialectic reasoning), Hindsight (knowledge graphs), Supermemory (semantic recall), Mem0 (cloud extraction) and OpenViking (tiered retrieval) are available from the plugin catalog via `hermes plugins install <name>`.
+- **[Memory Providers](../user-guide/features/memory-providers.md)** — Plug in external memory backends for deeper personalization. Two providers ship with Hermes: RetainDB (hybrid search) and ByteRover (CLI-based); Honcho (dialectic reasoning), Hindsight (knowledge graphs), Supermemory (semantic recall), Mem0 (cloud extraction), OpenViking (tiered retrieval) and Holographic (local SQLite) are available from the plugin catalog via `hermes plugins install <name>`.
 
 ## Messaging Platforms
 
@@ -44091,6 +44112,7 @@ refactor/description   # Code restructuring
 2. **Test manually**: Run `hermes` and exercise the code path you changed
 3. **Check cross-platform impact**: Consider macOS, Linux, WSL2, and native Windows. If you touch file I/O, process management, terminal handling, subprocesses, or signals, run `scripts/check-windows-footguns.py`.
 4. **Keep PRs focused**: One logical change per PR
+5. **Prompt or tool-schema changes**: if `tests/ci/test_prompt_surface.py` fails, your change alters the system prompt or a tool schema that every session sends. Regenerate with `scripts/run-in-hermes-env python scripts/ci/prompt_surface.py render` and commit the snapshot. Changes there need two maintainer approvals (see [Prompt Assembly](./prompt-assembly.md#reviewing-changes-to-the-prompt-surface)).
 
 ### PR Description
 
@@ -45016,6 +45038,23 @@ In other words:
 - if you want different repo rules, edit project context files
 - if you want reusable operating procedures, add or modify skills
 - if you want to change how Hermes assembles prompts for everyone, change Python and treat it as a code contribution
+
+## Reviewing changes to the prompt surface
+
+The **prompt surface** is what a stock install sends before the first user message: the system prompt and the `tools[]` array. A one-line code change can rewrite either without the diff showing it. A guidance constant can move tiers, a toolset can gain a tool, or a schema rewriter can edit a description. So the rendered surface is committed and reviewed like code:
+
+- `scripts/ci/prompt_surface.py render` builds the surface through the production assembly code (`build_system_prompt_parts` and the agent's own `tools[]`) and writes it to `tests/fixtures/prompt_surface/`. It renders nine surfaces: `cli` with four model families (the model name gates guidance and the patch dialect), `cli` inside a code workspace, `desktop`, `telegram`, `discord` and `cron`. The render uses a fresh home. The clock, host OS, network, tool availability and machine paths are pinned, so a laptop and CI produce the same bytes. Every registered tool counts as available, so credential-gated schemas get reviewed too.
+- `tests/ci/test_prompt_surface.py` fails when the committed snapshot is stale. A PR that changes the surface carries the regenerated snapshot, and reviewers read the real prompt text and schemas in the Files tab.
+- The **Prompt surface diff** CI job posts a per-surface summary to the PR review comment: token deltas, prompt hunks, and added or removed tools and parameters.
+- Changes under `tests/fixtures/prompt_surface/` need **two approvals from hermes-agent-core** before they can merge.
+
+Regenerate after any change that moves the surface:
+
+```bash
+scripts/run-in-hermes-env python scripts/ci/prompt_surface.py render
+```
+
+User-side customization (`SOUL.md`, context files, skills you install, `platform_hints`, `agent.*` guidance toggles) never touches the snapshot. The render uses stock defaults and only bundled skills.
 
 ## Why prompt assembly is split this way
 
@@ -46461,7 +46500,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id, id);
 Notes:
 - `tool_calls` is stored as a JSON string (serialized list of tool call objects)
 - `reasoning_details`, `codex_reasoning_items`, and `codex_message_items` are stored as JSON strings
-- `reasoning_details` is always kept in history; on the chat-completions wire it is replayed only to OpenRouter and the Nous Portal (every other chat-completions route gets a copy without it, since strict schemas reject the field)
+- `reasoning`, `reasoning_content` and `reasoning_details` are always kept in history. On the chat-completions wire every assistant turn replays its stored reasoning on the carriers the route reads (`agent/message_sanitization.py::route_reasoning_carriers`): `reasoning_content` everywhere by default; plus `reasoning` and `reasoning_details` on OpenRouter-format gateways (OpenRouter, Kilo, Vercel AI Gateway, Nous Portal); `reasoning_details` on Novita, MiniMax `/v1` and TokenHub; `reasoning` on local servers, Ollama and Upstage. Strict schemas (Mistral, Groq, Cerebras, SambaNova) get no reasoning key, and Fireworks gets `reasoning_content` only. Only DeepSeek, Kimi and MiMo pad a reasoning-less tool-call turn with `" "`. When a route rejects a field by name ("Extra inputs are not permitted, field: messages[N].reasoning_details"), Hermes records it for that provider/host/model, strips it and retries once. The record lasts for the session and never touches history.
 - Desktop history hydration retains assistant sidecars in both REST and JSON-RPC (`session.resume`, `session.activate`, `session.history`) projections, including rows with reasoning and tool calls. REST may return the SQLite JSON string while RPC returns decoded items; Desktop accepts both. A final Responses reply may live only in `codex_message_items` while `content` is empty. Canonical content still takes precedence, and analysis/commentary items are not promoted to reply text.
 - `reasoning` stores the raw reasoning text for providers that expose it
 - A reasoning-only clean stop (empty `content`, `finish_reason=stop`, reasoning present) is answered with the reasoning text, but the assistant row is never written with that text as `content`: `content` stays empty, the text lives in `reasoning`/`reasoning_content`, and `api_content` carries it so the next request replays the answer byte-identically. History surfaces therefore show it as reasoning, not as a reply.
@@ -50738,7 +50777,7 @@ See [Hooks](../user-guide/features/hooks.md) for event signatures and payload sh
 hermes memory <subcommand>
 ```
 
-Set up and manage external memory provider plugins. Bundled providers: holographic, retaindb, byterover; honcho, hindsight, supermemory, mem0 and openviking (plugin catalog) after `hermes plugins install <name>` (`hermes update` does this automatically for a provider already named in `memory.provider`). Only one external provider can be active at a time. Built-in memory (MEMORY.md/USER.md) is always active.
+Set up and manage external memory provider plugins. Bundled providers: retaindb, byterover; honcho, hindsight, supermemory, mem0, openviking and holographic (plugin catalog) after `hermes plugins install <name>` (`hermes update` does this automatically for a provider already named in `memory.provider`). Only one external provider can be active at a time. Built-in memory (MEMORY.md/USER.md) is always active.
 
 Subcommands:
 
@@ -58107,6 +58146,11 @@ ctx.registerMany([
 
 Keybinds are user-rebindable in settings; `defaults` is just the initial binding.
 
+To trigger one of the app's **own** actions (toggle the browser panel, open
+Settings, focus the composer), never dispatch a synthetic `KeyboardEvent` for its
+shortcut — the user may have rebound it. Call
+[`ctx.runAction(id)`](#run-app-actions) instead.
+
 ### Themes
 
 A theme contribution ships a full `DesktopTheme` as its `data` (name, label,
@@ -58154,8 +58198,8 @@ host.onEvent('gateway.ready', () => {
 
 Both doors persist per profile, so a plugin-driven switch sticks exactly like a
 manual pick. To tint the *active* theme rather than replace it, use
-`setAccentOverride(hex)` and clear it in `ctx.onDispose` — the standalone
-[Accent Picker](https://github.com/NousResearch/hermes-desktop-accent-picker)
+`setAccentOverride(hex)` and clear it in `ctx.onDispose` — the official
+[Accent Picker](https://github.com/NousResearch/hermes-official-plugins/tree/main/accent-picker)
 plugin is the worked example (it is also a complete, installable disk plugin).
 
 #### Styling the chat switch — `data-session-switching`
@@ -58287,6 +58331,7 @@ and its siblings; the pet-wallet row uses the [pet bubble](#pet-bubble) door):
 | memory-review (#115966) | `host.request('slash.exec', { session_id, command })` for `/memory …` — already SDK-only | optional: `host.composer.insertText(sid, '/memory pending', { mode: 'prefix' })` to seat the command for the user instead of executing it |
 | intelligent-tool-break (#115964) | "Message" button only toasts "type /break" (no composer write) | `host.composer.setDraft(host.state.focusedSessionId.get(), '/break ')` then `host.composer.focus(null)` restores the intended behaviour |
 | pet-wallet (#135178) | `document.querySelector('canvas[aria-label$=" pet"]')` to find the core pet, a `position:fixed; z-index:9999` overlay on `document.body` that follows it every frame, document-wide capture-phase pointer listeners | `ctx.pet.say(text, { id: 'balance', tone?, ttlMs? })` — the core bubble shows it over the pet, in-window and popped out, labelled with the plugin name; `ctx.pet.visible` tells you when there is no pet so you can fall back to your status-bar chip |
+| browser-toggle | `document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'L', ctrlKey: true, shiftKey: true, … }))` to fake the built-in browser-panel shortcut; silently stops working when the user rebinds or unbinds it | `ctx.runAction('view.showBrowser')` — runs the same handler as the shortcut and the palette entry, whatever the binding ([run app actions](#run-app-actions)) |
 
 `sessionId` in the table is the id the plugin's UI is bound to; for a composer
 slot render it is `host.state.focusedSessionId.get()`.
@@ -58823,6 +58868,8 @@ ctx.os.writeClipboard(text)                // system clipboard → Promise<boole
 ctx.pet.say(text, { id?, tone?, ttlMs? })   // line in the core pet's speech bubble → disposer
 ctx.pet.clear(id?)                         // drop one line (or all of yours)
 ctx.pet.visible                            // ReadableAtom<boolean> — is a pet on screen?
+ctx.runAction('view.showBrowser')          // run a built-in app action → { ok: true } | { ok: false, reason, error }
+ctx.listActions()                          // [{ id, label, category }] — the ids runAction accepts
 host.navigate('/route')                    // hash-route navigation
 host.openSession(id, { profile?, intent? }) // open a stored session core-style;
                                            //   profile: soft-swap to that profile's backend first
@@ -59039,6 +59086,76 @@ code; the main window sends it the live lines with the rest of the pet state.
 Pointer input on the pet (drag, shift-click pop-out, overlay click) belongs to
 the host and has no plugin hook. Use a palette command, a status-bar item, or
 your own pane for actions.
+
+### Run app actions — `ctx.runAction` {#run-app-actions}
+
+The app's own commands — the ones behind keyboard shortcuts and the command
+palette — can be run by id. The plugin gets exactly the handler the shortcut
+runs, so the user rebinding (or unbinding) that shortcut in Settings ▸ Keyboard
+Shortcuts changes nothing for you:
+
+```ts
+import { TITLEBAR_AREAS } from '@hermes/plugin-sdk'
+import { jsx } from 'react/jsx-runtime'
+
+register(ctx) {
+  ctx.register({
+    id: 'browser',
+    area: TITLEBAR_AREAS.right,
+    render: () => jsx('button', { onClick: () => ctx.runAction('view.showBrowser'), children: 'Browser' })
+  })
+
+  // Results are values, never exceptions.
+  const result = ctx.runAction('nav.settings')
+  if (!result.ok) console.log(result.reason, result.error)
+
+  // Discover what is allowed (labels are localized, same as the shortcuts panel).
+  for (const { id, label } of ctx.listActions()) console.log(id, label)
+}
+```
+
+```ts
+interface PluginContext {
+  runAction(id: PluginAppActionId): PluginRunActionResult
+  listActions(): Array<{ id: PluginAppActionId; label: string; category: string }>
+}
+
+type PluginRunActionResult =
+  | { ok: true }
+  | { ok: false; reason: 'unknown' | 'denied' | 'unavailable'; error: string }
+```
+
+Only view and navigation actions are allowed. `PluginAppActionId` is the typed
+union; `PLUGIN_APP_ACTIONS` is the same list at runtime:
+
+| Id | What it does |
+|---|---|
+| `view.showBrowser` | Toggle the browser panel |
+| `view.showFiles` | Show the file browser |
+| `view.toggleSidebar` | Toggle the left sidebar |
+| `view.toggleRightSidebar` | Toggle the right side |
+| `view.toggleReview` | Toggle the review (git) pane |
+| `view.toggleStatusbar` | Toggle the status bar |
+| `view.findInPage` | Open find-in-page |
+| `composer.focus` | Focus the composer |
+| `session.new` | Start a new chat |
+| `session.focusSearch` | Focus session search |
+| `conversation.scrollPageUp` / `conversation.scrollPageDown` | Scroll the transcript a page |
+| `nav.commandPalette` | Toggle the command palette |
+| `nav.settings`, `nav.profiles`, `nav.capabilities`, `nav.messaging`, `nav.artifacts`, `nav.cron`, `nav.agents` | Open that page |
+| `keybinds.openPanel` | Open Settings ▸ Keyboard Shortcuts |
+
+Anything else is refused: `{ ok: false, reason: 'denied' }` for a real app
+action that is not on the list (archive, pin, profile / model / reasoning
+switches, terminals, new window, open folder, HUD, close tab, …),
+`reason: 'unknown'` for an id that does not exist. Either way nothing runs and a
+`[plugin:<id>] runAction: …` warning is logged. `reason: 'unavailable'` means the
+app shell that owns the handlers is not mounted yet (very early startup); retry
+from a user action. Destructive and privileged operations (deleting sessions,
+signing out, approvals, model/provider changes, updates, quitting) are not app
+actions a plugin can run.
+
+Feature-detect on older hosts: `ctx.runAction?.('view.showBrowser')`.
 
 ### Desktop appearance settings — `host.settings`
 
@@ -59622,7 +59739,7 @@ pipeline as a trust boundary.
 | Category | Exports |
 |----------|---------|
 | Host | `host` (`.state.*`, `.settings`, `.notify`, `.notifyError`, `.navigate`, `.onEvent`, `.logs`, `.status`, `.restartGateway`, `.request`, `.composer`, `.sessions`, `.skills`, `.toolsets`, `.profiles`, `.pluginDecisions`) |
-| Plugin contract | `HermesPlugin`, `PluginContext`, `PluginContribution`, `PluginStorage`, `PluginOs`, `PluginPet`, `PetSayOptions`, `PetMessageTone`, `PluginRestOptions`, `PluginNativeNotificationInput`, `PluginNotificationAction`, `HermesOpenTarget`, `Contribution` |
+| Plugin contract | `HermesPlugin`, `PluginContext`, `PluginContribution`, `PluginStorage`, `PluginOs`, `PluginPet`, `PetSayOptions`, `PetMessageTone`, `PluginAppActionId`, `PluginAppActionInfo`, `PluginRunActionResult`, `PLUGIN_APP_ACTIONS`, `PluginRestOptions`, `PluginNativeNotificationInput`, `PluginNotificationAction`, `HermesOpenTarget`, `Contribution` |
 | Area constants | `PANES_AREA`, `ROUTES_AREA`, `SIDEBAR_NAV_AREA`, `STATUSBAR_AREAS`, `TITLEBAR_AREAS`, `WORKSPACE_PAGE_HEADER_AREA`, `PALETTE_AREA`, `KEYBINDS_AREA`, `THEMES_AREA`, `COMPOSER_AREAS`, `MODEL_MENU_ROW_AREA`, `SESSION_ROW_AREAS`, `SIDEBAR_NAV_PREFS_AREA`, `APPEARANCE_AREAS`, `SETTINGS_PLUGINS_AREA` |
 | Area payloads | `PluginSettingsPage`, `PluginSettingsSubpage` (+ `pluginSettingsHref`), `RouteContribution`, `SidebarNavContribution`, `StatusbarItem`, `TitlebarTool`, `PaletteContribution`, `KeybindContribution`, `ComposerMiddleware`, `ComposerAttachmentProvider`, `SessionRowSlotContribution`, `SidebarNavPrefsContribution` |
 | React / state | `useValue`, `atom`, `computed`, `useQuery`, `useMutation`, `useQueryClient`, `queryClient`, `Contribute`, `WorkspacePageHeaderControl` |
@@ -67370,6 +67487,7 @@ A rewind / edit / regenerate is a `prompt.submit` that drops part of the stored 
 | `truncate_before_row_id` | Integer SQLite row ID (`messages.id` / `row_id`) of the target user turn to cut at. Preferred durable address. When both ordinal and row ID are provided, gateway verifies they match (returning `4030` on mismatch). An unknown/stale row ID is refused with `4018` — it does **not** fall back to the ordinal. |
 | `confirm_truncate` | Required whenever an ordinal, message ID, or row ID is sent. Declares that this submit really is a rewind, not an ordinary send that happens to carry leftover parameters. Sending it without a target is refused with code `4004`. |
 | `confirm_empty_truncate` | Additionally required when the cut would leave the transcript empty (ordinal `0`). |
+| `confirm_deep_truncate` | Send it when the cut would archive more than one user turn (anything deeper than regenerating or editing the last turn), after asking the user. This release logs an unconfirmed deep cut and still runs it, so older clients keep working. The next release will refuse it with code `4033` (`error.data` carries `archived_messages` and `archived_user_turns`, and nothing is written). |
 
 A truncation parameter without `confirm_truncate` is refused with code `4004` or `4029` and nothing is written. Hosts that implement rewind must set the flag at the moment the user asks for it, and must never keep truncation parameters in state across ordinary submits. Prefer `truncate_before_row_id` (from resume `row_id` / `_row_id`) over ordinals; keep the ordinal as a back-compat / optimistic-row path only when no durable id is available yet.
 
@@ -80117,8 +80235,8 @@ Hermes: **one row per plugin**, with two switch columns.
   half is **not** installed in the selected profile shows **Install here**,
   which pre-fills the install dialog from the package's origin (catalog entry
   or git remote) for that profile only. Optional extras such as the
-  [Accent Picker](https://github.com/NousResearch/hermes-desktop-accent-picker)
-  install from their own repos via **Install from Git**.
+  [Accent Picker](https://github.com/NousResearch/hermes-official-plugins/tree/main/accent-picker)
+  install from the plugin catalog.
 - **Uninstall** — every plugin installed under the selected profile's
   `plugins/` folder (user or git install) has a trash button beside its name.
   It asks for confirmation, then deletes the plugin's files and install
