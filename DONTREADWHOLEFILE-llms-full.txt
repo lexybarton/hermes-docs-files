@@ -33195,7 +33195,7 @@ For more information on securing your Hermes Agent deployment, see the [Security
 
 # Home Assistant Integration
 
-Hermes Agent integrates with [Home Assistant](https://www.home-assistant.io/) through the official **`homeassistant` plugin** from the [plugin catalog](../features/plugins.md). The plugin is maintained by Nous Research in [NousResearch/hermes-homeassistant](https://github.com/NousResearch/hermes-homeassistant) and is not part of Hermes core. It provides two things:
+Hermes Agent integrates with [Home Assistant](https://www.home-assistant.io/) through the official **`homeassistant` plugin** from the [plugin catalog](../features/plugins.md). The plugin is maintained by Nous Research in [NousResearch/hermes-official-plugins](https://github.com/NousResearch/hermes-official-plugins/tree/main/homeassistant) and is not part of Hermes core. It provides two things:
 
 1. **Gateway platform** — subscribes to real-time state changes via WebSocket and responds to events
 2. **Smart home tools** — four LLM-callable tools (the `homeassistant` toolset) for querying and controlling devices via the REST API
@@ -47929,7 +47929,7 @@ When you call `ctx.register_platform()`, the following integration points are ha
 ### Service adapters: `trusted_inbound`, `display_tier`, `shared_env_prefixes`
 
 Three optional `ctx.register_platform(...)` / `PlatformEntry` fields exist for adapters that bridge a
-service rather than a chat network. The [Home Assistant plugin](https://github.com/NousResearch/hermes-homeassistant)
+service rather than a chat network. The [Home Assistant plugin](https://github.com/NousResearch/hermes-official-plugins/tree/main/homeassistant)
 is the reference consumer.
 
 | Field | Type / default | Effect |
@@ -61463,6 +61463,7 @@ Your plugin implements the `MemoryProvider` abstract base class from `agent/memo
 
 ```python
 from agent.memory_provider import MemoryProvider
+from agent.secret_scope import get_secret
 
 class MyMemoryProvider(MemoryProvider):
     @property
@@ -61471,7 +61472,7 @@ class MyMemoryProvider(MemoryProvider):
 
     def is_available(self) -> bool:
         """Check if this provider can activate. NO network calls."""
-        return bool(os.environ.get("MY_API_KEY"))
+        return bool(get_secret("MY_API_KEY"))
 
     def initialize(self, session_id: str, **kwargs) -> None:
         """Called once at agent startup.
@@ -61479,7 +61480,7 @@ class MyMemoryProvider(MemoryProvider):
         kwargs always includes:
           hermes_home (str): Active HERMES_HOME path. Use for storage.
         """
-        self._api_key = os.environ.get("MY_API_KEY", "")
+        self._api_key = get_secret("MY_API_KEY") or ""
         self._session_id = session_id
 
     # ... implement remaining methods
@@ -65267,7 +65268,8 @@ config_schema:
 **Secrets never touch `config.yaml`.** A `secret` field carries only the `.env`
 name and whether a value is set; the Desktop stores the value through the same
 credential route as provider API keys (`PUT /api/env`), and your plugin reads it
-with `os.environ.get("MY_PLUGIN_API_KEY")` — exactly like a `requires_env` entry.
+with `get_secret("MY_PLUGIN_API_KEY")` from `agent.secret_scope` — exactly like a `requires_env` entry.
+Never read `.env`, `auth.json` or another tool's credential files yourself (catalog rule 11).
 The `plugins.manage settings` action refuses secret keys and any value whose type
 or `choices` disagree with the schema.
 
@@ -66290,12 +66292,12 @@ class MyPlatformAdapter(BasePlatformAdapter):
     async def disconnect(self): ...
 
 def check_requirements():
-    import os
-    return bool(os.environ.get("MYPLATFORM_TOKEN"))
+    from agent.secret_scope import get_secret
+    return bool(get_secret("MYPLATFORM_TOKEN"))
 
 def _env_enablement():
-    import os
-    tok = os.getenv("MYPLATFORM_TOKEN", "").strip()
+    from agent.secret_scope import get_secret
+    tok = (get_secret("MYPLATFORM_TOKEN") or "").strip()
     if not tok:
         return None
     return {"token": tok}
@@ -66350,8 +66352,8 @@ class MyMemoryProvider(MemoryProvider):
         return "my-memory"
 
     def is_available(self) -> bool:
-        import os
-        return bool(os.environ.get("MY_MEMORY_API_KEY"))
+        from agent.secret_scope import get_secret
+        return bool(get_secret("MY_MEMORY_API_KEY"))
 
     def initialize(self, session_id: str, **kwargs) -> None:
         self._session_id = session_id
@@ -67001,13 +67003,19 @@ the gallery. There is no separate listing to maintain.
    their CI) — see the developer guide's *Dependency security policy*. A
    recent floor alone is not grounds to hold an entry.
 
-11. **Credentials stay with their owner.** A plugin reads the credentials it is
-   configured with: the env vars in `requires_env` and its own `config_schema`
-   secrets. Reading another tool's login (a vendor CLI's token file, a browser
-   profile) must be disclosed in the PR and is a trust-tier call for a
-   maintainer. Refreshing, rotating or writing another client's OAuth tokens, or
-   presenting itself as another vendor's client, is not admitted without an
-   explicit maintainer ruling; a read-only build is the usual way through.
+11. **Credentials come through Hermes, never from files.** A plugin gets
+   secrets only through Hermes's routes. Its declared `requires_env` and
+   `config_schema` secrets are read with `agent.secret_scope.get_secret(NAME)`,
+   which honours the active profile (a bare `os.environ` read can pick up another
+   profile's key under multiplexing). A subscription sign-in (Codex / ChatGPT
+   today) is used only through `credentialed_provider_request` with
+   `requires_auth`, so Hermes attaches the token and the plugin never holds it. A
+   plugin never reads `.env` files, Hermes's `auth.json`, another tool's login (a
+   vendor CLI's token file, a browser profile, a keychain) or any other
+   credential store directly, and never refreshes, rotates or writes OAuth tokens
+   or presents itself as another vendor's client. If Hermes has no route for a
+   credential a plugin needs, ask for one in a Hermes issue or PR; the plugin
+   does not work around it.
 12. **Approvals and unattended runs are respected.** A plugin never routes around
    Hermes's approval system: no auto-approving, no disabling guards, and no
    spawning Hermes or shell children that inherit YOLO or non-interactive mode
@@ -86186,7 +86194,7 @@ Hermes Mod respects the `HERMES_HOME` environment variable, so it works with [pr
 
 # Spotify
 
-Hermes can control Spotify — playback, queue, search, playlists, saved tracks/albums, and listening history — through the official **`spotify` plugin** from the [plugin catalog](./plugins.md). It uses Spotify's Web API with PKCE OAuth. The plugin is maintained by Nous Research in [NousResearch/hermes-spotify](https://github.com/NousResearch/hermes-spotify) and is not part of Hermes core. Tokens are stored in `~/.hermes/auth.json` and refreshed automatically on 401; you only log in once per machine (refresh tokens expire after ~6 months; re-run `hermes spotify login` when they do).
+Hermes can control Spotify — playback, queue, search, playlists, saved tracks/albums, and listening history — through the official **`spotify` plugin** from the [plugin catalog](./plugins.md). It uses Spotify's Web API with PKCE OAuth. The plugin is maintained by Nous Research in [NousResearch/hermes-official-plugins](https://github.com/NousResearch/hermes-official-plugins/tree/main/spotify) and is not part of Hermes core. Tokens are stored in `~/.hermes/auth.json` and refreshed automatically on 401; you only log in once per machine (refresh tokens expire after ~6 months; re-run `hermes spotify login` when they do).
 
 Unlike Hermes' built-in OAuth integrations, Spotify requires every user to register their own lightweight developer app. Spotify does not let third parties ship a public OAuth app that anyone can use. It takes about two minutes and `hermes spotify login` walks you through it.
 
