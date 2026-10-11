@@ -3378,6 +3378,7 @@ All slash commands work unchanged. A few are TUI-owned — they produce richer o
 | `/details` | Toggle verbose tool-call details (global or per-section) |
 | `/usage` | Rich token / cost / context panel |
 | `/agents` (alias `/tasks`) | Observability overlay — live subagent tree with kill/pause controls, per-branch cost / token / file rollups, turn-by-turn history |
+| `/connectors` | Connector accounts list: rename, add, reconnect or remove accounts, and show retired ones. See [Slash Commands](../reference/slash-commands.md#tools--skills) for the keys |
 | `/reload` | Re-reads `~/.hermes/.env` into the running TUI process so newly added API keys take effect without a restart |
 | `/mouse [on\|off\|toggle\|wheel\|buttons\|all]` | Pick a mouse tracking preset at runtime (also persists to `display.mouse_tracking` in `config.yaml`). `wheel` (1000+1006) keeps scroll-wheel scrolling without the hover events that make tmux spam "No image in clipboard" over the prompt row; `buttons` adds drag-to-select; `all` is the default with hover-driven UI. |
 
@@ -44112,7 +44113,8 @@ refactor/description   # Code restructuring
 2. **Test manually**: Run `hermes` and exercise the code path you changed
 3. **Check cross-platform impact**: Consider macOS, Linux, WSL2, and native Windows. If you touch file I/O, process management, terminal handling, subprocesses, or signals, run `scripts/check-windows-footguns.py`.
 4. **Keep PRs focused**: One logical change per PR
-5. **Prompt or tool-schema changes**: if `tests/ci/test_prompt_surface.py` fails, your change alters the system prompt or a tool schema that every session sends. Regenerate with `scripts/run-in-hermes-env python scripts/ci/prompt_surface.py render` and commit the snapshot. Changes there need two maintainer approvals (see [Prompt Assembly](./prompt-assembly.md#reviewing-changes-to-the-prompt-surface)).
+5. **Prompt or tool-schema changes**: if `tests/ci/test_prompt_surface.py` fails, your change alters the system prompt or a tool schema that every session sends. Regenerate with `scripts/run-in-hermes-env python scripts/ci/prompt_surface.py render` and commit the snapshot. Changes there need a maintainer approval (see [Prompt Assembly](./prompt-assembly.md#reviewing-changes-to-the-prompt-surface)).
+6. **New config keys or slash commands**: if `tests/ci/test_docs_drift.py` fails, a `DEFAULT_CONFIG` key or slash command you added has no docs. Mention the dotted key (`agent.max_turns`) or show it in a YAML example under `website/docs/` (usually `user-guide/configuration.md`), and add slash commands to `reference/slash-commands.md`. If a key really should stay undocumented, `python scripts/ci/check_docs_drift.py --update` adds it to `scripts/ci/docs_drift_baseline.json` where reviewers see it. Keys that were undocumented when the check landed are already baselined; documenting one never fails.
 
 ### PR Description
 
@@ -45046,7 +45048,7 @@ The **prompt surface** is what a stock install sends before the first user messa
 - `scripts/ci/prompt_surface.py render` builds the surface through the production assembly code (`build_system_prompt_parts` and the agent's own `tools[]`) and writes it to `tests/fixtures/prompt_surface/`. It renders nine surfaces: `cli` with four model families (the model name gates guidance and the patch dialect), `cli` inside a code workspace, `desktop`, `telegram`, `discord` and `cron`. The render uses a fresh home. The clock, host OS, network, tool availability and machine paths are pinned, so a laptop and CI produce the same bytes. Every registered tool counts as available, so credential-gated schemas get reviewed too.
 - `tests/ci/test_prompt_surface.py` fails when the committed snapshot is stale. A PR that changes the surface carries the regenerated snapshot, and reviewers read the real prompt text and schemas in the Files tab.
 - The **Prompt surface diff** CI job posts a per-surface summary to the PR review comment: token deltas, prompt hunks, and added or removed tools and parameters.
-- Changes under `tests/fixtures/prompt_surface/` need **two approvals from hermes-agent-core** before they can merge.
+- Changes under `tests/fixtures/prompt_surface/` need **an approval from hermes-agent-core** before they can merge.
 
 Regenerate after any change that moves the surface:
 
@@ -49302,6 +49304,7 @@ The install also ships `hermes-agent`, a minimal runner that sends one query and
 | `hermes memory` | Configure external memory provider. Plugin-specific subcommands (e.g. `hermes honcho`) register automatically when their provider is active. |
 | `hermes acp` | Run Hermes as an ACP server for editor integration. |
 | `hermes mcp` | Manage MCP server configurations and run Hermes as an MCP server. |
+| `hermes connectors` | List, connect, rename and disconnect hosted connector accounts. |
 | `hermes plugins` | Manage Hermes Agent plugins (install, enable, disable, remove). |
 | `hermes portal` | Nous Portal status, subscription link, and Tool Gateway routing. See [Tool Gateway](../user-guide/features/tool-gateway.md). |
 | `hermes tools` | Configure enabled tools per platform. |
@@ -50837,6 +50840,24 @@ Manage MCP (Model Context Protocol) server configurations and run Hermes as an M
 
 See [MCP Config Reference](./mcp-config-reference.md), [Use MCP with Hermes](../guides/use-mcp-with-hermes.md), and [MCP Server Mode](../user-guide/features/mcp.md#running-hermes-as-an-mcp-server).
 
+## `hermes connectors`
+
+```bash
+hermes connectors <subcommand>
+```
+
+Manage hosted connector accounts (apps such as Gmail reached through the Nous tool gateway). Needs a Nous Portal sign-in. One app can have several named accounts; see [Multiple connector accounts](../user-guide/features/tool-gateway.md#multiple-connector-accounts).
+
+| Subcommand | Description |
+|------------|-------------|
+| `list` | List connectors and whether each is connected. |
+| `accounts [app] [--all]` | List accounts, for one app or all of them. `--all` includes retired accounts. |
+| `connect <app> [--alias NAME] [--reconnect [--force]]` | Print the link to connect an account, then wait until it is connected or the deadline passes. Ctrl-C stops waiting. `--alias` names the account; a new name adds another account. `--reconnect` repairs the named account and deletes nothing; on an account that is already connected it says so and does nothing unless `--force` is given. |
+| `rename <app> <name-or-label> --to <new>` | Rename an account. An unnamed account is matched by its app label. |
+| `disconnect <app> [--alias NAME] [--yes]` | Remove an account. Asks to confirm unless you pass `--yes`. |
+
+Rename needs a Nous Portal version that supports it. Until then it reports "This Nous Portal cannot rename connector accounts yet."
+
 ## `hermes plugins`
 
 ```bash
@@ -51368,6 +51389,7 @@ Type `/` in the CLI to open the autocomplete menu. Built-in commands are case-in
 | `/curator` | Background skill maintenance — `status`, `run`, `pin`, `archive`. See [Curator](../user-guide/features/curator.md). |
 | `/kanban <action>` | Drive the multi-profile, multi-project collaboration board without leaving chat. Full `hermes kanban` surface is available: `/kanban list`, `/kanban show t_abc`, `/kanban create "title" --assignee X`, `/kanban comment t_abc "text"`, `/kanban unblock t_abc`, `/kanban dispatch`, etc. Multi-board support included: `/kanban boards list`, `/kanban boards create <slug>`, `/kanban boards switch <slug>`, `/kanban --board <slug> <action>`. See [Kanban slash command](../user-guide/features/kanban.md#kanban-slash-command). |
 | `/reload-mcp` (alias: `/reload_mcp`) | Reload MCP servers from config.yaml and re-probe tool availability (credentials/daemons that appeared mid-session) |
+| `/connectors` | TUI-only. Open the connector accounts list: one row per account, `app · name · status`. Keys: ↑/↓ select, `r` rename (inline input; Enter saves, Esc cancels), `a` add another account (pick the app, enter a name, then open the link), `c` reconnect the selected account (offered only when it needs repair: failed, expired, revoked or inactive), `x` remove (asks to confirm), Tab show or hide retired accounts, Esc or `q` close. See [Multiple connector accounts](../user-guide/features/tool-gateway.md#multiple-connector-accounts). |
 | `/reload-skills` (alias: `/reload_skills`) | Re-scan `~/.hermes/skills/` for newly installed or removed skills |
 | `/reload` | Reload `.env` variables into the running session (picks up new API keys without restarting) |
 | `/plugins` | List installed plugins and their status |
@@ -51496,6 +51518,7 @@ The messaging gateway supports the following built-in commands inside Telegram, 
 | `/new [name]` (alias: `/reset`) | Start a new session (fresh session ID + history). Optional `[name]` sets the initial session title. Append `now`, `--yes`, or `-y` to skip the confirmation modal — e.g. `/reset now`, `/new --yes my-experiment`. |
 | `/status` | Show session info, followed by a local **Session recap** block (recent turn counts, top tools used, files touched, latest prompt + reply). |
 | `/stop` | Kill all running background processes and interrupt the running agent. |
+| `/pause [reason \| off]` | Global emergency stop, the in-chat form of [`hermes pause`](./cli-commands.md): puts new cron, kanban and gateway work on hold until `/pause off`. In-flight work finishes normally, and slash commands keep working while paused, so a messaging-only operator can always lift it. |
 | `/model [provider:model]` | Show or change the model. Supports provider switches (`/model zai:glm-5`), custom endpoints (`/model custom:model`), named custom providers (`/model custom:local:qwen`), auto-detect (`/model custom`), OpenRouter account presets (`/model @preset/<slug>` — account-scoped, skips the public model-listing check), and user-defined aliases (`/model fav`, `/model grok` — see [Custom model aliases](#custom-model-aliases)). Use `--global` to persist the change to config.yaml; a successful `--global` pick (typed or picker) also drops this chat's session-only override, so config.yaml alone decides the model after a gateway restart (a chat with a `channel_overrides` model keeps the override, since the channel setting would otherwise outrank config.yaml; the CLI/TUI deliberately keep their per-session pin so resume restores the model that chat used). **Note:** `/model` can only switch between already-configured providers. To add a new provider or set up API keys, use `hermes model` from your terminal (outside the chat session). **Cost note:** a mid-session model switch resets the prompt cache (the cache key includes the model), so the next message re-reads the whole conversation at full input price. |
 | `/codex-runtime [auto\|codex_app_server\|on\|off]` | Toggle the optional [Codex app-server runtime](../user-guide/features/codex-app-server-runtime). Persists to `model.openai_runtime` in config.yaml and evicts the cached agent so the next message picks up the new runtime. Effective on next session. |
 | `/personality [name]` | Set a personality overlay for the session. `/personality none` (or `default` / `neutral`) clears it. |
@@ -51565,9 +51588,10 @@ The messaging gateway supports the following built-in commands inside Telegram, 
 - `/skills` is **CLI-only for search/browse/install**; its write-approval review subcommands (`pending`, `approve`, `reject`, `diff`, `approval`) also work on messaging platforms when `skills.write_approval` is on. `/memory` works on **both** surfaces.
 - `/verbose` is **CLI-only by default**, but can be enabled for messaging platforms by setting `display.tool_progress_command: true` in `config.yaml`. When enabled, it cycles the `display.tool_progress` mode and saves to config.
 - `/focus` and `/verbose` share one suppression path (`display.tool_progress`), so they can never contradict each other: `/focus on` pins tool progress to `off` and stashes your mode under `display.focus_saved_tool_progress`; `/focus off` restores it; cycling `/verbose` while focus is on takes the mode back and clears the focus badge. Focus view is display-only — it never changes conversation history, the system prompt, or anything sent to the model, so it has zero prompt-cache impact.
-- `/sethome`, `/restart`, `/approve`, `/deny`, `/topic`, `/platform`, and `/commands` are **messaging-only** commands.
+- `/sethome`, `/restart`, `/approve`, `/deny`, `/topic`, `/platform`, `/pause`, and `/commands` are **messaging-only** commands.
 - `/status`, `/egress`, `/version`, `/whoami`, `/bg`, `/btw`, `/queue`, `/steer`, `/voice`, `/reload-mcp`, `/reload-skills`, `/rollback`, `/diff`, `/debug`, `/fast`, `/approvals`, `/busy`, `/footer`, `/curator`, `/kanban`, `/topup`, `/login`, `/suggestions`, `/blueprint`, `/learn`, `/init`, `/sessions`, `/loop`, and `/yolo` work in **both** the CLI and the messaging gateway.
 - `/voice join`, `/voice channel`, and `/voice leave` are only meaningful on Discord.
+- `/connectors` is **TUI-only**.
 - In the TUI, `/sessions` shows live sessions in the current TUI process. Use `/resume [name]` or `hermes --tui --resume <id-or-title>` for saved or closed transcripts.
 
 ## Confirmation prompts for destructive commands
@@ -53223,7 +53247,7 @@ One tool for both kinds of external app. A target is a managed connector (`"gmai
 
 | Tool | Description | Requires environment |
 |------|-------------|----------------------|
-| `manage_connections` | Managed actions: `status`, `connect`, `reconnect` (repairs only what is not connected; `force: true` restarts a working one). MCP actions, for `mcp: true` targets only: `install` a catalog entry, `enable` a disabled configured server, `authorize` (OAuth). In the desktop app, the terminal UI and the classic CLI every action shows a card and blocks until each target is connected, skipped, or the 300-second deadline passes; the result lists targets as `connected`, `skipped` or `not_connected` and carries no link. An MCP `install` collects the entry's setup values in the card, runs the entry's OAuth from the card when it has one (the user opens the link; nothing opens by itself), and saves configuration, tokens and values together when the server accepts the token. A connected MCP target carries `tools` (the registered names) and `tools_listing`, and those tools are callable through `tool_describe`/`tool_call` in the same turn. A target with `discovery_error` is authorized but its tools could not be listed; call `install` or `authorize` for it again to retry discovery without new consent. On surfaces with no card (messaging, scripted dispatch) managed targets return a `connect_url` per app for the user to open, and an MCP target runs at once: `authorize` and an OAuth `install` return the authorization URL, other installs and `enable` report the outcome, and a missing credential comes back as `failed` naming the variable to set. Cannot disconnect or revoke an account. | — |
+| `manage_connections` | Managed actions: `status` (each connector lists its `accounts`: alias, label, status, active), `connect`, `reconnect` (repairs only what is not connected; `force: true` restarts a working one), `rename`. A connect or reconnect target may carry an account name (`{"name": "gmail", "alias": "work"}`): connect with a new name adds another account, and reconnect with a name repairs only that account and deletes nothing. `rename` takes one target, `{"name": "gmail", "alias": "work", "to": "office"}`; `alias` may be the app label of an unnamed account. MCP actions, for `mcp: true` targets only: `install` a catalog entry, `enable` a disabled configured server, `authorize` (OAuth). In the desktop app, the terminal UI and the classic CLI every action shows a card and blocks until each target is connected, skipped, or the 300-second deadline passes; the result lists targets as `connected`, `skipped` or `not_connected` and carries no link. An MCP `install` collects the entry's setup values in the card, runs the entry's OAuth from the card when it has one (the user opens the link; nothing opens by itself), and saves configuration, tokens and values together when the server accepts the token. A connected MCP target carries `tools` (the registered names) and `tools_listing`, and those tools are callable through `tool_describe`/`tool_call` in the same turn. A target with `discovery_error` is authorized but its tools could not be listed; call `install` or `authorize` for it again to retry discovery without new consent. On surfaces with no card (messaging, scripted dispatch) managed targets return a `connect_url` per app for the user to open, and an MCP target runs at once: `authorize` and an OAuth `install` return the authorization URL, other installs and `enable` report the outcome, and a missing credential comes back as `failed` naming the variable to set. Cannot disconnect, remove or revoke an account; the user does that. | — |
 
 The deadline for one call is five minutes, fixed by the backend when the call starts;
 reopening the chat or restarting the desktop never extends it. The tool is present only when the
@@ -53617,7 +53641,7 @@ Or in-session:
 | `browser` | `browser_back`, `browser_cdp`, `browser_click`, `browser_console`, `browser_dialog`, `browser_exec`, `browser_get_images`, `browser_navigate`, `browser_press`, `browser_scroll`, `browser_snapshot`, `browser_type`, `browser_vault_enter_code`, `browser_vault_fill`, `browser_vault_list`, `browser_vault_save_login`, `browser_vault_unlock`, `browser_vision` | Core browser automation. `browser_cdp` and `browser_dialog` are gated at runtime — registered only when a CDP endpoint is reachable at session start (via `/browser connect`, `browser.cdp_url` config, Browserbase, or Camofox). `browser_dialog` works together with the `pending_dialogs` and `frame_tree` fields that `browser_snapshot` adds when a CDP supervisor is attached. `browser_exec` replaces the other browser tools when `browser.backend` is `browser-use`; the `browser_vault_*` tools ride with the browser for credential forms. Quick lookups belong to the `web`/`search` toolsets — `web_search` is deliberately NOT a member, so `disabled_toolsets: [browser]` cannot strip it (#64503). |
 | `clarify` | `clarify` | Ask the user a question when the agent needs clarification. |
 | `code_execution` | `execute_code` | Run Python scripts that call Hermes tools programmatically. |
-| `connections` | `manage_connections` | Connect the user to apps: managed connector accounts through the Nous gateway, and local MCP servers from the catalog. On the desktop every action is a card that blocks until the user settles it; off the desktop managed actions return a connect link per app. |
+| `connections` | `manage_connections` | Connect the user to apps: managed connector accounts through the Nous gateway, and local MCP servers from the catalog. It can add a second named account of an app and rename accounts. On the desktop every action is a card that blocks until the user settles it; off the desktop managed actions return a connect link per app. |
 | `coding` | composite (`file` + `terminal` + `search` + `web` + `skills` + `browser` + `todo` + `memory` + `session_search` + `clarify` + `code_execution` + `delegation` + `vision`) | Coding-focused bundle for software work: file editing, terminal, search, web docs, skills, browser, delegate, and code execution. |
 | `cronjob` | `cronjob_manage` | Schedule and manage recurring tasks. |
 | `debugging` | composite (`file` + `terminal` + `web`) | Debug bundle — file, process/terminal, web extract/search. |
@@ -54492,6 +54516,7 @@ hermes skills uninstall <skill-name>
 | Skill | Description |
 |-------|-------------|
 | [**ai-presenter-video**](../user-guide/skills/optional/creative/creative-ai-presenter-video.md) | Make a verified AI presenter video from script + image. |
+| [**anatomy**](../user-guide/skills/optional/creative/creative-anatomy.md) | Explain an idea as an interactive isometric machine figure. |
 | [**archify**](../user-guide/skills/optional/creative/creative-archify.md) | Validated interactive HTML diagrams, upstream-maintained. |
 | [**ascii-art**](../user-guide/skills/optional/creative/creative-ascii-art.md) | ASCII art: pyfiglet, cowsay, boxes, image-to-ascii. |
 | [**audiocraft-audio-generation**](../user-guide/skills/optional/creative/creative-audiocraft-audio-generation.md) | AudioCraft: MusicGen text-to-music, AudioGen text-to-sound. |
@@ -67160,6 +67185,25 @@ the gallery. There is no separate listing to maintain.
    go upstream as a PR to its author. A fork that renames, rebrands or adds small
    changes is declined in favour of the original. A listed fork names its origin
    in its disclosure line (`Derived from <entry>`).
+17. **No unscannable executable payloads.** Everything a reviewer and the
+   install scanner read at the pinned commit must be source they can read. A
+   plugin must not ship a compiled binary (a native executable or library of
+   any OS — detected by file header, not extension: ELF, Mach-O, PE/`MZ`,
+   WebAssembly), committed Python bytecode (`.pyc`/`.pyo`, including sourceless
+   or hash-forged caches that run instead of the `.py` beside them), or an
+   archive whose members are not themselves reviewable source. A plain-text
+   source bundle (a `.tar.gz` of `.py`/`.ts`/`.md` the plugin unpacks) is read
+   like any other source; a bundle hiding a binary is not. The scanner cannot
+   read machine code, and a checksum committed in the same commit only proves
+   the file was not changed after that commit, not where it came from. If a
+   plugin genuinely needs a native component, the binary must be built by the
+   plugin repository's own public GitHub Actions from source in that repository
+   and carry a GitHub build attestation (`actions/attest-build-provenance`) tying
+   it to that workflow and commit; the gate verifies the attestation against the
+   pinned commit (`gh attestation verify --repo <owner/repo> --source-digest
+   <pinned sha>`). A binary a user's own machine fetches at setup time is allowed
+   only from the upstream tool's official source, pinned by checksum, and
+   disclosed (rule 13) — never bundled and never from an unofficial mirror.
 <!-- admission-rules:end -->
 
 ## Updating your entry
@@ -86915,6 +86959,28 @@ The **Nous Subscription** row has one model picker that lists every model once. 
 
 Model ids, speeds, and prices live on the [Image Generation](./image-generation.md#supported-models) page. The set evolves — `hermes tools` → Image Generation shows the current live list.
 
+## Multiple connector accounts
+
+Connectors are hosted apps such as Gmail that the agent reaches through the Nous tool gateway (see [Tool Search → Connectors](./tool-search.md#connectors-remote-tools)). You can connect two or more accounts of one app, for example a Gmail `home` and a Gmail `work`.
+
+- **Names.** Each account has a name of 1 to 32 characters: lowercase letters, digits or `-`, starting with a letter or digit. An unnamed account shows the app's own account label.
+- **No default.** No account is the default. When you ask the agent to use an app with several named accounts, it must say which one.
+- **The agent names new accounts.** It picks the name from what you said and asks if it is unsure. It then tells you the name it chose, for example "Hermes named this Gmail account work. Rename it anytime." The desktop app, the TUI and the classic CLI show that line.
+- **Rename.** Rename an account anytime, or ask the agent to. Renaming needs a Nous Portal version that supports it; until then you see "This Nous Portal cannot rename connector accounts yet."
+- **Reconnect deletes nothing.** Reconnecting a broken account replaces it with a new one under the same name. The old one is kept as retired (disabled). Retired accounts stay listed but folded away.
+- **Remove is yours.** You remove an account yourself, one at a time. The agent never removes one.
+
+Once a connector has two or more active accounts, every tool of that connector takes a `connector_alias` field whose allowed values are your account names. The field is required when every active account is named and optional when some are unnamed.
+
+If the agent leaves it out when several accounts are named, or names one that does not exist, the call fails and the error lists the valid names. A result reports the `account` it ran under when that account is named; for an unnamed account the field is absent.
+
+Manage accounts in any of these places:
+
+- The desktop app's **Connectors** page.
+- The TUI: `/connectors` (see [Slash Commands](../../reference/slash-commands.md#tools--skills)).
+- The CLI: `hermes connectors` (see [CLI Commands](../../reference/cli-commands.md#hermes-connectors)).
+- [Nous Portal](https://portal.nousresearch.com).
+
 ---
 
 ## Configuration reference
@@ -87219,6 +87285,15 @@ Disconnecting an account is done by the user in the Portal. The same tool also i
 local MCP servers from the catalog (targets with `mcp: true`), so it is
 present whether or not you are signed in; only the managed-connector actions
 need the sign-in.
+
+You can link more than one account of the same app, each with its own name
+(see [Multiple connector accounts](./tool-gateway.md#multiple-connector-accounts)).
+Once a connector has two or more active accounts, each of its tools takes a
+`connector_alias` argument whose allowed values are your account names, and the
+tool description lists them (`Accounts: home, work.`), so `tool_search` and
+`tool_describe` show them. A connector result entry carries `account`, the
+name the call ran under, when that account is named; the field is absent for
+an unnamed account.
 
 The desktop backend's account-list and disconnect APIs use the Portal's
 account-management service, including its organization membership checks and
