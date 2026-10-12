@@ -2857,7 +2857,7 @@ On macOS, `F6`/`F7` mean the physical function keys, not the media/system contro
 | `Ctrl+G` | Open the current input buffer in `$EDITOR` (vim/nvim/nano/VS Code/etc.). Save and quit to send the edited text as the next prompt — ideal for long, multi-paragraph prompts. |
 | `Ctrl+X Ctrl+E` | Emacs-style alternate binding for the external editor (same behavior as `Ctrl+G`). |
 | `Ctrl+S` | **Stash the prompt.** Parks the current draft and clears the composer so you can send something else first. Press `Ctrl+S` again on an empty composer to bring the draft back (cursor at the end, attached images restored). Repeated presses build a stack rather than overwriting, so an earlier draft is never silently lost — with two or more stashed, `Ctrl+S` opens a browse panel (`↑`/`↓` to navigate, `Enter` to restore, `D` to discard, `Esc` or `Ctrl+S` to close). A `📌 N` badge in the status bar shows how many drafts are parked. Multi-line drafts round-trip exactly, including blank lines. The stash lives in memory for the session only — nothing is written to disk, since drafts often contain secrets. |
-| `Ctrl+C` | Interrupt agent (double-press within 2s to force exit) |
+| `Ctrl+C` | Clear a typed draft first (even while the agent works); with an empty prompt, interrupt the agent (double-press within 2s to force exit) |
 | `Ctrl+T` / `F6` | Open the full-screen live work monitor (subagents and background processes) without losing the composer draft. The live dock appears automatically above the status bar; arrows select a worker or process, `Enter` shows its recent log, `s` steers a worker, and `x` requests stop with confirmation. See [Monitoring subagents](./features/delegation.md#monitoring-running-subagents-agents). |
 | `Ctrl+R` / `F7` | Toggle the live work dock between its multi-row preview and a single summary line without moving composer focus. `Ctrl+R` is the reliable fallback when macOS reserves the function-key row. Besides subagents and background processes, the dock shows a standing `/goal` (active, parked or paused, with turns used) on its top row and the prompts waiting in `/queue` on its bottom rows. |
 | `Ctrl+D` | Exit |
@@ -3047,7 +3047,7 @@ Where the terminal cannot distinguish them, `Alt+Enter` and `Ctrl+J` continue to
 While the agent is working, you can send a correction without starting a new turn:
 
 - **Type a new message + Enter** — redirects the active turn using your correction
-- **`Ctrl+C`** — interrupt the current operation (press twice within 2s to force exit)
+- **`Ctrl+C`** — interrupt the current operation (press twice within 2s to force exit); if the prompt holds a draft, the first press clears it and the turn keeps running
 - Completed tool work and reasoning already shown stay in context
 - A running tool reaches its safe boundary before the correction is applied
 
@@ -53630,7 +53630,7 @@ Or in-session:
 
 | Toolset | Tools | Purpose |
 |---------|-------|---------|
-| `browser` | `browser_back`, `browser_cdp`, `browser_click`, `browser_console`, `browser_dialog`, `browser_exec`, `browser_get_images`, `browser_navigate`, `browser_press`, `browser_scroll`, `browser_snapshot`, `browser_type`, `browser_vault_enter_code`, `browser_vault_fill`, `browser_vault_list`, `browser_vault_save_login`, `browser_vault_unlock`, `browser_vision` | Core browser automation. `browser_cdp` and `browser_dialog` are gated at runtime — registered only when a CDP endpoint is reachable at session start (via `/browser connect`, `browser.cdp_url` config, Browserbase, or Camofox). `browser_dialog` works together with the `pending_dialogs` and `frame_tree` fields that `browser_snapshot` adds when a CDP supervisor is attached. `browser_exec` replaces the other browser tools when `browser.backend` is `browser-use`; the `browser_vault_*` tools ride with the browser for credential forms. Quick lookups belong to the `web`/`search` toolsets — `web_search` is deliberately NOT a member, so `disabled_toolsets: [browser]` cannot strip it (#64503). |
+| `browser` | `browser_back`, `browser_cdp`, `browser_click`, `browser_console`, `browser_dialog`, `browser_exec`, `browser_get_images`, `browser_navigate`, `browser_press`, `browser_scroll`, `browser_snapshot`, `browser_type`, `browser_vault`, `browser_vision` | Core browser automation. `browser_cdp` and `browser_dialog` are gated at runtime — registered only when a CDP endpoint is reachable at session start (via `/browser connect`, `browser.cdp_url` config, Browserbase, or Camofox). `browser_dialog` works together with the `pending_dialogs` and `frame_tree` fields that `browser_snapshot` adds when a CDP supervisor is attached. `browser_exec` replaces the other browser tools when `browser.backend` is `browser-use`; `browser_vault` rides with the browser for credential forms and is deferred behind tool search by default. Quick lookups belong to the `web`/`search` toolsets — `web_search` is deliberately NOT a member, so `disabled_toolsets: [browser]` cannot strip it (#64503). |
 | `clarify` | `clarify` | Ask the user a question when the agent needs clarification. |
 | `code_execution` | `execute_code` | Run Python scripts that call Hermes tools programmatically. |
 | `connections` | `manage_connections` | Connect the user to apps: managed connector accounts through the Nous gateway, and local MCP servers from the catalog. It can add a second named account of an app and rename accounts. On the desktop every action is a card that blocks until the user settles it; off the desktop managed actions return a connect link per app. |
@@ -65094,14 +65094,15 @@ venv and the checkout, never the home directory.
 
 ### Dependency security policy
 
-Hermes quarantines **its own** dependencies: the checkout's `[tool.uv] exclude-newer = "14 days"`
-keeps a freshly published release of any package Hermes itself depends on out of `hermes update`
-and the built-in lazy installs for two weeks, so a hijacked upload is caught upstream before it
-reaches users. **That quarantine does not apply to your plugin's dependencies.** When Hermes
-resolves your plugin into its environment, the cutoff stays on the packages Hermes itself locks
-and nowhere else, so a plugin can floor on a release published yesterday and install today — and the
-plugin's author, not Hermes, is responsible for what that pulls in. (A plugin that needs a newer
-version of a package Hermes itself depends on still waits out that package's window.)
+Hermes checks the age of **its own** dependencies when it locks them: the checkout's
+`[tool.uv] exclude-newer = "3 days"` keeps any release younger than three days out of `uv.lock`,
+so a hijacked upload has time to be caught upstream before it reaches users. Users install from
+that vetted lock; their machines never re-check dates. **The check does not apply to your
+plugin's dependencies.** When Hermes resolves your plugin into its environment, the packages
+Hermes itself locks stay at their locked versions and everything else follows your
+requirements, so a plugin can floor on a release published yesterday and install today. The
+plugin's author, not Hermes, is responsible for what that pulls in. A plugin that requires a
+different version of a package Hermes itself locks fails to install until Hermes's lock moves.
 
 Set your own policy and hold yourself to it. Strongly recommended:
 
@@ -65110,8 +65111,8 @@ Set your own policy and hold yourself to it. Strongly recommended:
 - **Floor on the oldest API-compatible version**, not the release of the week. A floor on a
   fresh wheel forces every installer onto it the day it appears; `>=old,!=broken,<next` keeps the
   wide range and skips the one bad release.
-- **Adopt a new-release quarantine of your own** — wait ~14 days before floors move to a new
-  release, and resolve with `uv --exclude-newer "14 days"` (or `UV_EXCLUDE_NEWER`) in your own CI so
+- **Adopt a release-age check of your own**: wait a few days before floors move to a new
+  release, and resolve with `uv --exclude-newer "3 days"` (or `UV_EXCLUDE_NEWER`) in your own CI so
   the lock you test is the one users get.
 - **Pin your lock, review your bumps.** Treat a dependency bump as a code change: read the
   upstream diff, then re-pin.
@@ -67126,10 +67127,12 @@ the gallery. There is no separate listing to maintain.
    can break both. `hermes plugins validate` refuses these at admission (`no
    core override` check). If the hook you need does not exist, open an issue
    describing it: we would rather add the seam than list a patch.
-10. **Dependency security policy is the plugin's.** Hermes's 14-day
-   `exclude-newer` quarantine covers Hermes's own dependencies only; a plugin's
-   `python_dependencies` / `pyproject.toml` install under the plugin's policy
-   (no quarantine, still inside Hermes's core constraints). Reviewers read the
+10. **Dependency security policy is the plugin's.** Hermes's 3-day
+   `exclude-newer` release-age check covers Hermes's own dependencies only, at
+   the time Hermes locks them; a plugin's `python_dependencies` /
+   `pyproject.toml` install under the plugin's policy (no age check). Packages
+   Hermes itself locks stay at Hermes's locked versions, so a plugin cannot
+   require a different version of one. Reviewers read the
    dependency list at the pinned SHA: bare floors (`>=X` with no upper bound)
    and floors on the newest release get a request for the oldest
    API-compatible floor plus an upper bound, and authors are strongly
@@ -79188,7 +79191,7 @@ before starting another Python process.
    ```
 
    This re-resolves `uv.lock` from `pyproject.toml` with the same settings CI
-   checks, including the 14-day `exclude-newer` quarantine. It changes no
+   checks, including the 3-day `exclude-newer` release-age check. It changes no
    environment. When the lock is already current, it says so and writes
    nothing. (`hermes pm lock --bump NAME VERSION` is a different operation: it
    pins a managed tool in `pm/lock.json` and does not touch `uv.lock`.)
@@ -79327,6 +79330,20 @@ other permanent failures. A successful probe followed by a range GET 403 or 404
 retains the CDN fallback: one serial attempt at the missing ranges. Extraction,
 verification and publication are not repeated. Python and npm package requests
 remain under uv and npm's own retry policies.
+
+## Release age and package mirrors
+
+Every Python package Hermes itself depends on must be at least three days old
+when Hermes locks it (uv's `exclude-newer`, enforced by CI's lock check), so a
+freshly published, possibly compromised release cannot reach `uv.lock`. Users
+install from that lock. Installing or enabling a plugin keeps every package
+Hermes locks at its locked version and never re-checks dates, so package mirrors
+that publish no upload times work. Set a mirror with `index-url` in `pip.conf`,
+which Hermes passes to uv, or with `UV_INDEX_URL`.
+
+`hermes pm lock` is the one step that applies the check. Run against a mirror
+without upload times, it stops with `has no publish time`; use
+`https://pypi.org/simple` for that step.
 
 ## Diagnostics
 
