@@ -51807,12 +51807,12 @@ Alias:   ~/.local/bin/work
 hermes profile alias <name> [options]
 ```
 
-Regenerates the shell alias script at `~/.local/bin/<name>`. Useful if the alias was accidentally deleted or if you need to update it after moving your Hermes installation.
+Regenerates the shell alias script at `~/.local/bin/<name>` (`<name>.bat` on Windows). Useful if the alias was accidentally deleted or if you need to update it after moving your Hermes installation.
 
 | Argument / Option | Description |
 |-------------------|-------------|
 | `<name>` | Profile to create/update the alias for. |
-| `--remove` | Remove the wrapper script instead of creating it. |
+| `--remove` | Remove the wrapper script instead of creating it. Also removes an orphan alias whose profile was deleted: pass the alias name (`hermes doctor` lists them). |
 | `--name <alias>` | Custom alias name (default: profile name). |
 
 **Example:**
@@ -67125,8 +67125,10 @@ the gallery. There is no separate listing to maintain.
    `sys.modules[...]`, writes into a core module's tables). Two plugins
    patching the same seam silently break each other, and every core release
    can break both. `hermes plugins validate` refuses these at admission (`no
-   core override` check). If the hook you need does not exist, open an issue
-   describing it: we would rather add the seam than list a patch.
+   core override` check), and warns (without failing) on each import of an
+   undocumented core module, by file and line. If the hook you need does not
+   exist, open an issue describing it: we would rather add the seam than list
+   a patch.
 10. **Dependency security policy is the plugin's.** Hermes's 3-day
    `exclude-newer` release-age check covers Hermes's own dependencies only, at
    the time Hermes locks them; a plugin's `python_dependencies` /
@@ -68869,11 +68871,22 @@ tool or plugin names. The same terminal event also feeds
 `hermes.tool.usage.count` with `tool_name`, `outcome` and `error_class`.
 `tool_name` is exported only for tools declared in the repository's static
 `toolsets.TOOLSETS` (`toolsets.BUILTIN_TOOL_NAMES`, captured before any runtime
-custom toolset is created); MCP tools report `mcp` and every plugin or custom
-tool reports `plugin`. `error_class` maps Hermes's own `error_type` values
+custom toolset is created) and for the Tool Search bridge tools (`tool_search`,
+`tool_describe`, `tool_call`); MCP tools report `mcp`, hosted connector tools
+(`connectors__*`) report `connector` with tool category `connector`, and every
+plugin or custom tool reports `plugin`. The connector slug and tool name are
+never exported. Each entry of a `tool_call` batch of connector calls is its own
+call: one row per entry, and the `tool_call` wrapper is not counted on top
+(a batch refused before any entry ran still counts once as `tool_call`).
+`error_class` maps Hermes's own `error_type` values
 (`tool_error`, `timeout`, `interrupted`, `invalid_arguments`, `blocked`,
 `contract_violation`); any other value, such as an exception class name,
-collapses to `exception`. Hermes does not infer retries from repeated tool names or
+collapses to `exception`. A failed connector entry is classed by the tool
+gateway's error code in its result: `connection_required` (connection required
+or expired), `not_allowed`, `alias` (alias required or unknown),
+`invalid_arguments`, and `connector_backend` for every backend-family code
+(vendor error, rate limit, timeout, policy or gateway failure); other codes keep
+`tool_error`. Hermes does not infer retries from repeated tool names or
 adjacent calls; when the
 hook does not provide an explicit retry relationship, the retry bucket is
 `unknown`. Approval decisions are emitted as `hermes.tool_approval` marks and
@@ -69023,6 +69036,16 @@ row they would rewrite.
 | `hermes.model_tool_quality.count` | provider, model, call role, issue (`none`, `invalid_json`, `unknown_tool`, `schema_mismatch`, `empty_arguments`, `repaired`) | Which models emit broken tool calls, and how often Hermes had to repair them. Every emitted call counts once (clean ones as `none`), so the value is a rate denominator. `empty_arguments` only counts for tools with required parameters; `repaired` means Hermes fixed the tool name or the argument JSON and ran the call. |
 | `hermes.model_friction.count` | provider, model, signal (`retry`, `undo`, `interrupt`, `quick_abandon`, `switch_away`) | Which models users fight with. Attributed to the model that produced the turn: `/retry` and `/undo` where they execute, a user interrupt of an interactive turn, a session that ends within 60 seconds of a failed turn, and `/model` switching away from the model. |
 | `hermes.context_peak.count` | provider, model, peak fill bucket, window bucket (`lt_32k` … `gte_1m`), limit hit (`yes`/`no`) | How close sessions get to each model's context window, and how often they overflow it. One row per closed conversation: the session ids a compression rotation hands it to report once, with the fullest segment; `limit_hit` means a primary call was rejected as too large (context overflow or HTTP 413), the rejections Hermes answers with a forced compression. |
+
+#### Tool Search and connectors
+
+Added inside package schema v4. No connector slug, tool name or query text appears in any dimension.
+
+| Metric | Dimensions | Question it answers |
+|---|---|---|
+| `hermes.tool_search.count` | scope (`local`, `connector`, `both`: which catalogs the search read), hits bucket (`0` … `gte_11`, distinct tools returned), outcome (`hits`, `no_hits`, `connector_unavailable`, `error`) | Does `tool_search` find tools, and how often does the hosted connector leg fail. One row per `tool_search` call. |
+| `hermes.tool_batch.count` | provider, model, size bucket (logical calls; each `tool_call` entry counts once), connector share (`none`, `some`, `all`) | How many calls a model packs into one reply, and how much of it is connector work. One row per model reply that calls tools. |
+| `hermes.connector_chain.count` | searches-before bucket (`tool_search` calls since the previous connector execute), described first (`yes`/`no`: the tool was named in an earlier `tool_describe` of the conversation), outcome (the tool outcome) | Do models search and describe before they execute a connector tool, and does skipping it fail more. One row per executed connector entry. |
 
 <!-- ---- v5 harness ---- -->
 #### Agent-harness accuracy
@@ -71069,6 +71092,11 @@ Plugins can launch and supervise fresh Hermes child sessions without importing
 The service resolves its parent from the current agent turn, so it works in
 CLI, gateway, non-interactive, and kanban-worker sessions. Launching outside an
 active agent turn fails closed with `No active Hermes parent session`.
+The facade also works when a plugin runs under `plugins.isolation: host`.
+
+Requests accept `goal`, `context`, `role`, `model`, `provider`, `allowed_toolsets`,
+`blocked_tools`, `working_directory`, `parent_session_id`, `correlation_id`,
+`metadata`, and `timeout_seconds`, subject to the restrictions below.
 
 ```python
 from agent.subagent_lifecycle import SubagentLaunchRequest
@@ -71090,8 +71118,14 @@ def launch_review(ctx):
 ```
 
 `SubagentHandle` is serializable and carries a versioned, opaque capability.
-Pass it back to `status`, `wait`, `cancel`, `result`, or `reconnect`; malformed
+Requests and handles may also arrive as mappings, including plugin-host wire records.
+Pass a handle back to `status`, `wait`, `cancel`, `steer`, `result`, or `reconnect`; malformed
 or forged handles return `UNKNOWN`/`UNKNOWN_HANDLE` and cannot access a child.
+
+`steer(handle, text)` queues text for the child's next iteration boundary and
+returns `True` while the child accepts steering. It returns `False` for empty
+text, unknown or forged handles, handles owned by another parent session, or a
+child that has finished or stopped accepting steering.
 
 The stable states are `PENDING`, `STARTING`, `RUNNING`, `SUCCEEDED`, `FAILED`,
 `INTERRUPTED`, `CANCEL_REQUESTED`, `CANCELLED`, and `UNKNOWN`.
@@ -71114,10 +71148,22 @@ starts a replacement child. Running Python threads also cannot survive process
 exit; callers must treat those handles as interrupted by process exit.
 
 Requests are fail-closed: goal/context/metadata sizes are capped, unknown or
-parent-broadening toolsets are rejected, and per-tool blocks, working-directory
-overrides, and per-launch timeouts are explicitly rejected until Hermes can
+parent-broadening toolsets are rejected (plugin-registered toolsets count as
+known), and per-tool blocks, working-directory overrides, and per-launch
+timeouts are explicitly rejected until Hermes can
 support them without weakening isolation. Use `allowed_toolsets` to narrow a
 child; Hermes's existing unsafe-tool block remains enforced.
+
+## Routing
+
+Children follow the `delegation` config (`provider`, `model`, `base_url`,
+`api_key`, `api_mode`, `request_overrides`) exactly as `delegate_task` children do.
+The request's `model` overrides the configured model. Its optional `provider`
+names a configured provider for this launch, with precedence request >
+delegation config > parent; the selected provider supplies its own credential
+bundle. An unresolvable provider raises `SubagentLifecycleError` before launch.
+Core does not expose `provider` to the model: the plugin chooses it, for example
+from operator config.
 
 ---
 
@@ -87309,8 +87355,8 @@ tools:
 
 ## Connectors (remote tools)
 
-When you are signed in to the Nous Portal, the bridge additionally reaches
-**connectors** — remote tools served by the managed tool gateway. They are
+The bridge also reaches **connectors**: remote tools served by the managed tool
+gateway. They are
 never registered locally: `tool_search` sends each query to the gateway, adds
 the gateway's hits to the local catalog as documents (tagged
 `source: "connectors"`, named `connectors__<connector>__<tool>`), and ranks
@@ -87334,9 +87380,22 @@ tools:
                     # behaves exactly as if the feature didn't exist
 ```
 
-Signed out (or when the gateway does not serve connectors for your
-account), everything above is invisible: local search behaves exactly as
-described in the rest of this page, with no errors shown to the model.
+Connectors need a Nous identity. You do not have to sign in for one: if you
+have no Nous account, the first `manage_connections` action (or opening the
+desktop Connectors page) creates a free Nous identity for you, on every
+surface. It does not change your model provider: outside builds that ship
+the Nous free tier it is used for connectors and managed tools only. Until it exists, `tool_search` sends nothing to the
+gateway and its result says that hosted connectors are not set up yet and
+that `manage_connections` sets them up. To opt out, set:
+
+```yaml
+nous:
+  guest: false
+```
+
+With that setting, or when the gateway does not serve connectors for a
+signed-in account, everything above is invisible: local search behaves exactly
+as described in the rest of this page, with no errors shown to the model.
 
 A connector call that needs an account you haven't linked returns a
 `CONNECTION_REQUIRED` error. The `manage_connections` tool lists connectors and
@@ -87344,9 +87403,8 @@ their connection state and starts an authorization: in the desktop app the call
 shows a card, blocks until each app is connected or skipped, and reports the
 outcomes; elsewhere it returns a connect link per app for the user to open.
 Disconnecting an account is done by the user in the Portal. The same tool also installs, enables and authorizes
-local MCP servers from the catalog (targets with `mcp: true`), so it is
-present whether or not you are signed in; only the managed-connector actions
-need the sign-in.
+local MCP servers from the catalog (targets with `mcp: true`); those actions
+never create a Nous identity.
 
 You can link more than one account of the same app, each with its own name
 (see [Multiple connector accounts](./tool-gateway.md#multiple-connector-accounts)).
