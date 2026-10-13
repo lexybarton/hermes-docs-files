@@ -13090,7 +13090,7 @@ Two files make up the agent's memory:
 | **MEMORY.md** | Agent's personal notes — environment facts, conventions, things learned | 2,200 chars (~800 tokens) |
 | **USER.md** | User profile — your preferences, communication style, expectations | 1,375 chars (~500 tokens) |
 
-Both are stored in `~/.hermes/memories/` and are injected into the system prompt as a frozen snapshot at session start. The agent manages its own memory via the `memory` tool — it can add, replace, or remove entries.
+Both are stored in `~/.hermes/memories/` and are injected into the system prompt as a frozen snapshot at session start. The agent manages its own memory via the `memory` tool — it can add, patch, or remove entries.
 
 :::caution One agent per Hermes home
 Don't point two agent processes at the same Hermes home directory. Memory writes are automatic and load back into the system prompt at session start, so two writers sharing one home will compound each other's entries into state neither of them (nor you) authored. Memory is scoped per [profile](../profiles.md) by design — give a second agent its own profile, and if they need shared memory, use an [external memory provider](./memory-providers.md) instead.
@@ -13101,9 +13101,9 @@ Character limits keep memory focused. Memory does **not** auto-compact: when a
 write would exceed the limit, the `memory` tool returns an error instead of
 silently dropping entries. The agent then makes room itself — consolidating or
 removing entries in the same turn before retrying (see [What Happens When Memory
-is Full](#what-happens-when-memory-is-full)). Note that `replace` is also bound
-by the limit: swapping an entry for a longer one can still overflow, so the new
-content must be shortened (or another entry removed) to fit.
+is Full](#what-happens-when-memory-is-full)). Note that `patch` is also bound
+by the limit: a patch that lengthens an entry can still overflow, so the new
+text must be shortened (or another entry removed) to fit.
 :::
 
 ## How Memory Appears in the System Prompt
@@ -13165,25 +13165,43 @@ Two things that do **not** make the agent remember: variables in `.env` (those a
 The agent uses the `memory` tool with these actions:
 
 - **add** — Add a new memory entry
-- **replace** — Replace an existing entry with updated content (uses substring matching via `old_text`)
+- **patch** — Replace one span inside an existing entry and keep the rest (`old_text` is the span, `content` its replacement)
 - **remove** — Remove an entry that's no longer relevant (uses substring matching via `old_text`)
 
 There is no `read` action — memory content is automatically injected into the system prompt at session start. The agent sees its memories as part of its conversation context.
 
+Every tool call requires a top-level `target`: `"memory"` for agent notes or `"user"`
+for the user profile. A batch uses that one target for every operation:
+
+```json
+{"target": "user", "operations": [{"action": "add", "content": "User prefers metric units"}]}
+```
+
+Missing or null targets, and a target inside an operation that differs from the top-level
+one, return an error before writing or staging approval. Correct the payload and retry; use separate calls to update both stores.
+
 ### Substring Matching
 
-The `replace` and `remove` actions use short unique substring matching — you don't need the full entry text. The `old_text` parameter just needs to be a unique substring that identifies exactly one entry:
+The `patch` and `remove` actions use short unique substring matching — you don't need the full entry text. The `old_text` parameter just needs to be a unique substring that identifies exactly one entry:
 
 ```python
 # If memory contains "User prefers dark mode in all editors"
-memory(action="replace", target="memory",
-       old_text="dark mode",
-       content="User prefers light mode in VS Code, dark mode in terminal")
+memory(action="patch", target="memory",
+       old_text="dark mode in all editors",
+       content="light mode in VS Code, dark mode in terminal")
+# -> "User prefers light mode in VS Code, dark mode in terminal"
 ```
 
 If the substring matches multiple entries, an error is returned asking for a more specific match.
 
-`replace` overwrites the **whole matched entry** with `content` — `old_text` only locates the entry, it is not cut out and replaced. The new `content` must be the complete new entry, including every part of the old one you want to keep. (A whole-entry `old_text` equal to the entry itself is matched exactly and wins over substring matches.)
+`patch` replaces only the `old_text` span inside the matched entry and keeps everything else. The span must
+occur once in that entry; if it appears more than once, the call is rejected and the agent retries with more
+surrounding text. To drop text from an entry, patch a longer span that contains it. To rewrite a whole entry,
+pass the whole entry as `old_text` (an exact whole-entry match wins over substring matches).
+
+There is no `replace` action. It overwrote the whole matched entry, and models used it as a find-and-swap,
+which wiped the other facts in multi-fact entries. A `replace` call now returns an error pointing at `patch`;
+writes staged for approval before this change still apply as staged.
 
 ## Two Targets Explained
 
@@ -13244,15 +13262,15 @@ When you try to add an entry that would exceed the limit, the tool returns an er
 ```json
 {
   "success": false,
-  "error": "Memory at 2,100/2,200 chars; adding this entry (250 chars) would exceed the limit by 153 chars. Retry as ONE 'operations' batch that removes or shortens (replace) stale entries from current_entries below to free at least 153 chars AND adds this entry — the limit is checked only on the batch result.",
+  "error": "Memory at 2,100/2,200 chars; adding this entry (250 chars) would exceed the limit by 153 chars. Retry as ONE 'operations' batch that removes or shortens (patch) stale entries from current_entries below to free at least 153 chars AND adds this entry — the limit is checked only on the batch result.",
   "current_entries": ["..."],
   "usage": "2,100/2,200"
 }
 ```
 
 The agent then reissues one `operations` batch that frees at least the stated number of
-characters (removes, or `replace`s with shorter versions) and adds the new entry; the limit
-is checked only on the batch's final result. A `replace`/`remove` whose `old_text` matches no
+characters (removes, or shortening `patch`es) and adds the new entry; the limit
+is checked only on the batch's final result. A `patch`/`remove` whose `old_text` matches no
 entry fails the same way, with the entries it most resembles under `closest_entries`.
 
 **Best practice:** When memory is above 80% capacity (visible in the system prompt header), consolidate entries before adding new ones. For example, merge three separate "project uses X" entries into one comprehensive project description entry.
@@ -13408,10 +13426,10 @@ This is the answer to "the agent saved a wrong assumption about me": set
 `write_approval: true`, and every save — especially the unprompted background
 ones — waits for your yes/no before it ever enters your profile.
 
-A staged `replace` or `remove` (the background review stages these even with the
+A staged `patch` or `remove` (the background review stages these even with the
 gate off) records the full entry it targets, and `/memory pending` shows it.
 Approval applies to exactly that entry: if it changed after the write was staged,
-the write is refused and stays pending for you to reject. A `replace`/`remove`
+the write is refused and stays pending for you to reject. A `replace`/`patch`/`remove`
 staged before this pinning existed has no verifiable target and is refused too:
 reject it and recreate the change. `/memory approve` lists the full text of
 every entry it overwrote or removed.
@@ -16205,7 +16223,6 @@ The repo ships these bundled plugins under `plugins/`. All are opt-in — enable
 |---|---|---|
 | `disk-cleanup` | hooks + slash command | Auto-track ephemeral files and clean them on session end |
 | `security-guidance` | hooks | Pattern-match dangerous code on `write_file`/`patch` and append a security warning (or block) — 25 rules (Apache-2.0 fork of Anthropic's `claude-plugins-official` patterns) |
-| `observability/langfuse` | hooks | Trace turns / LLM calls / tools to [Langfuse](https://langfuse.com) |
 | `teams_pipeline` | standalone | Microsoft Teams meeting pipeline — Graph-backed, transcript-first meeting summaries |
 | `google_meet` | standalone | Join Meet calls, live-caption transcription, optional realtime duplex audio |
 | `image_gen/openai` | image backend | OpenAI GPT Image 2 and 2.5 Flare/Sunburst generation and editing (API key) |
@@ -16287,76 +16304,20 @@ The file is still written. The model reads the warning in the next turn's tool m
 
 **What it does not do (yet):** the upstream Anthropic plugin has two more layers — an LLM diff review on each agent turn that touched files, and an agentic commit-time review that traces data flow across files. Neither is ported. The agent can already run those reviews on demand via `delegate_task`.
 
-### observability/langfuse
+### Langfuse (moved to the plugin catalog)
 
-Traces Hermes turns, LLM calls, and tool invocations to [Langfuse](https://langfuse.com) — an open-source LLM observability platform. One span per turn, one generation per API call, one tool observation per tool call. Usage totals, per-type token counts, and cost estimates come out of Hermes' canonical `agent.usage_pricing` numbers, so the Langfuse dashboard sees the same breakdown (input / output / `cache_read_input_tokens` / `cache_creation_input_tokens` / `reasoning_tokens`) that appears in `hermes logs`.
-
-The plugin is fail-open: no SDK installed, no credentials, or a transient Langfuse error — all turn into a silent no-op in the hook. The agent loop is never impacted.
-
-**Setup (interactive — recommended):**
+Langfuse tracing is no longer bundled with Hermes. It ships as the official
+[`langfuse`](https://github.com/NousResearch/hermes-official-plugins/tree/main/langfuse) catalog plugin, with the same hooks, `HERMES_LANGFUSE_*`
+environment variables and capture modes:
 
 ```bash
-hermes tools          # → Langfuse Observability → Cloud or Self-Hosted
+hermes plugins install langfuse
 ```
 
-The wizard collects your keys, prepares the declared `langfuse` extra through PM
-when needed, and enables `observability/langfuse`. Restart Hermes and the next
-turn ships a trace. If preparation fails, retry through `hermes tools`; do not
-install the SDK into the selected environment with pip.
-
-**Setup (manual):**
-
-For a source checkout, first follow the [PM developer workflow](../../reference/package-management.md#developer-workflow)
-with the intended Hermes home. Use the checkout's prepared Python:
-
-```bash
-python -c "import pm; pm.sync_venv(['langfuse'], explicit=True)"
-source ./activate
-python hermes plugins enable observability/langfuse
-```
-
-Use `. .\activate.ps1` for PowerShell activation. Then put the credentials in
-the active home's `.env` (`$HERMES_HOME/.env`, normally `~/.hermes/.env`):
-
-```bash
-HERMES_LANGFUSE_PUBLIC_KEY=pk-lf-...
-HERMES_LANGFUSE_SECRET_KEY=sk-lf-...
-HERMES_LANGFUSE_BASE_URL=https://cloud.langfuse.com   # or your self-hosted URL
-```
-
-**How it works:**
-
-| Hook | Behaviour |
-|---|---|
-| `pre_api_request` / `pre_llm_call` | Open (or reuse) a per-turn root span "Hermes turn". Start a `generation` child observation for this API call with serialized recent messages as input. |
-| `post_api_request` / `post_llm_call` | Close the generation, attach `usage_details`, `cost_details`, `finish_reason`, assistant output + tool calls. If no tool calls and non-empty content, close the turn. |
-| `pre_tool_call` | Start a `tool` child observation with sanitized `args`. |
-| `post_tool_call` | Close the tool observation with sanitized `result`. `read_file` payloads get summarized (head + tail + omitted-line count) so a huge file read stays under `HERMES_LANGFUSE_MAX_CHARS`. |
-
-Session grouping keys off the Hermes session ID (or task ID for sub-agents) via `langfuse.propagate_attributes`, so everything in a single `hermes chat` session lives under one Langfuse session.
-
-**Verify:**
-
-```bash
-hermes plugins list                 # observability/langfuse should show "enabled"
-hermes chat -q "hello"              # check the Langfuse UI for a "Hermes turn" trace
-```
-
-**Optional tuning** (in `.env`):
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `HERMES_LANGFUSE_ENV` | — | Environment tag on traces (`production`, `staging`, …) |
-| `HERMES_LANGFUSE_RELEASE` | — | Release/version tag |
-| `HERMES_LANGFUSE_SAMPLE_RATE` | `1.0` | Sampling rate passed to the SDK (0.0–1.0) |
-| `HERMES_LANGFUSE_MAX_CHARS` | `12000` | Per-field truncation for message content / tool args / tool results |
-| `HERMES_LANGFUSE_DEBUG` | `false` | Verbose plugin logging to `agent.log` |
-
-Hermes-prefixed and standard SDK env vars (`LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_BASE_URL`) are both accepted — Hermes-prefixed wins when both are set.
-
-**Performance:** the Langfuse client is cached after the first hook call. If credentials or SDK are missing, that decision is also cached — subsequent hooks fast-return without re-checking env vars or reloading config.
-
-**Disabling:** `hermes plugins disable observability/langfuse`. The plugin module is still discovered, but no module code runs until you re-enable.
+Profiles that had `observability/langfuse` enabled get the plugin installed and
+enabled automatically by `hermes update` (or on the first start after updating),
+and keep tracing to the same Langfuse project. Setup, tuning and capture modes
+are documented in the [plugin's README](https://github.com/NousResearch/hermes-official-plugins/tree/main/langfuse).
 
 ### NeMo Relay native integration (migration note)
 
@@ -36845,7 +36806,7 @@ This reloads MCP servers from config and refreshes the available tool list. It i
 
 A running messaging gateway (`hermes gateway run`) also watches `config.yaml` on its own: within about a minute of you removing an `mcp_servers` entry or setting `enabled: false`, that server's connection is torn down; a newly added entry is connected. A server whose first connect failed (an unreachable host, or an OAuth server on a headless box that had no token yet) is retried automatically on its connect cooldown schedule (30 s, doubling up to 10 min) once you fix the cause. No restart or `/reload-mcp` needed for the edit to take effect.
 
-**Expired OAuth tokens in the background.** The gateway, `/reload-mcp`, and the periodic self-probe of a parked server never open a browser — nobody is there to complete the flow. When a refresh token dies, the server parks with a warning in `gateway.log` and you re-authorize once with `hermes mcp login <server>` (or the Desktop/dashboard *Authorize* button); the parked server picks the new token up on its next probe.
+**Expired OAuth tokens in the background.** The gateway, `/reload-mcp`, and the periodic self-probe of a parked server never open a browser — nobody is there to complete the flow. When a refresh token dies, the server parks with a warning in `gateway.log` and you re-authorize once with `hermes mcp login <server>` (or the Desktop/dashboard *Authorize* button); the parked server picks the new token up on its next probe. Until the token files change, starting new sessions does not retry the rejected token: only the timed self-probe does, so a dead grant cannot hammer the provider's token endpoint.
 
 ### Toolsets
 
@@ -52413,7 +52374,7 @@ Secrets consumed by specific bundled / optional skills. Each is only needed if y
 
 ### Langfuse Observability
 
-Environment variables for the bundled [`observability/langfuse`](../user-guide/features/built-in-plugins.md#observabilitylangfuse) plugin. Set these in `~/.hermes/.env`. The plugin must also be enabled (`hermes plugins enable observability/langfuse`, or check the box in `hermes plugins`) before any of these take effect.
+Environment variables for the official [`langfuse`](https://github.com/NousResearch/hermes-official-plugins/tree/main/langfuse) catalog plugin (formerly bundled as `observability/langfuse`). Set these in `~/.hermes/.env`. The plugin must be installed (`hermes plugins install langfuse`) before any of these take effect.
 
 | Variable | Description |
 |----------|-------------|
@@ -52425,6 +52386,7 @@ Environment variables for the bundled [`observability/langfuse`](../user-guide/f
 | `HERMES_LANGFUSE_SAMPLE_RATE` | SDK sampling rate 0.0–1.0 (default: `1.0`) |
 | `HERMES_LANGFUSE_MAX_CHARS` | Per-field truncation for serialized payloads (default: `12000`) |
 | `HERMES_LANGFUSE_MAX_DEPTH` | Nesting depth kept in captured tool inputs/outputs before values become `<max-depth>` (default: `4`; invalid values warn and keep the default) |
+| `HERMES_LANGFUSE_CAPTURE` | Content capture mode: `metadata` (no content), `sanitized` (default: secret redaction + truncation) or `full` (truncation only) |
 | `HERMES_LANGFUSE_DEBUG` | `true` enables verbose plugin logging to `agent.log` |
 | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` / `LANGFUSE_BASE_URL` | Standard Langfuse SDK names. Accepted as fallbacks when the `HERMES_LANGFUSE_*` equivalents are unset. |
 
@@ -53239,7 +53201,7 @@ One tool for both kinds of external app. A target is a managed connector (`"gmai
 
 | Tool | Description | Requires environment |
 |------|-------------|----------------------|
-| `manage_connections` | Managed actions: `status` (each connector lists its `accounts`: alias, label, status, active), `connect`, `reconnect` (repairs only what is not connected; `force: true` restarts a working one), `rename`. A connect or reconnect target may carry an account name (`{"name": "gmail", "alias": "work"}`): connect with a new name adds another account, and reconnect with a name repairs only that account and deletes nothing. `rename` takes one target, `{"name": "gmail", "alias": "work", "to": "office"}`; `alias` may be the app label of an unnamed account. MCP actions, for `mcp: true` targets only: `install` a catalog entry, `enable` a disabled configured server, `authorize` (OAuth). In the desktop app, the terminal UI and the classic CLI every action shows a card and blocks until each target is connected, skipped, or the 300-second deadline passes; the result lists targets as `connected`, `skipped` or `not_connected` and carries no link. An MCP `install` collects the entry's setup values in the card, runs the entry's OAuth from the card when it has one (the user opens the link; nothing opens by itself), and saves configuration, tokens and values together when the server accepts the token. A connected MCP target carries `tools` (the registered names) and `tools_listing`, and those tools are callable through `tool_describe`/`tool_call` in the same turn. A target with `discovery_error` is authorized but its tools could not be listed; call `install` or `authorize` for it again to retry discovery without new consent. On surfaces with no card (messaging, scripted dispatch) managed targets return a `connect_url` per app for the user to open, and an MCP target runs at once: `authorize` and an OAuth `install` return the authorization URL, other installs and `enable` report the outcome, and a missing credential comes back as `failed` naming the variable to set. Cannot disconnect, remove or revoke an account; the user does that. | — |
+| `manage_connections` | Managed actions: `display` (desktop app only: a card of every hosted connector, most used apps first, where clicking an app starts its sign-in; any `connectors` slugs are pinned at the top as Suggested; it waits until the user presses Continue or 300 seconds pass and returns `connected`, `newly_connected` and `suggested` slugs, and adds `timed_out: true` when the deadline ended it; on other surfaces it returns the `status` list and tells the user to connect from the desktop app or the portal), `status` (each connector lists its `accounts`: alias, label, status, active), `connect`, `reconnect` (repairs only what is not connected; `force: true` restarts a working one), `rename`. A connect or reconnect target may carry an account name (`{"name": "gmail", "alias": "work"}`): connect with a new name adds another account, and reconnect with a name repairs only that account and deletes nothing. `rename` takes one target, `{"name": "gmail", "alias": "work", "to": "office"}`; `alias` may be the app label of an unnamed account. MCP actions, for `mcp: true` targets only: `install` a catalog entry, `enable` a disabled configured server, `authorize` (OAuth). In the desktop app, the terminal UI and the classic CLI every action shows a card and blocks until each target is connected, skipped, or the 300-second deadline passes; the result lists targets as `connected`, `skipped` or `not_connected` and carries no link. An MCP `install` collects the entry's setup values in the card, runs the entry's OAuth from the card when it has one (the user opens the link; nothing opens by itself), and saves configuration, tokens and values together when the server accepts the token. A connected MCP target carries `tools` (the registered names) and `tools_listing`, and those tools are callable through `tool_describe`/`tool_call` in the same turn. A target with `discovery_error` is authorized but its tools could not be listed; call `install` or `authorize` for it again to retry discovery without new consent. On surfaces with no card (messaging, scripted dispatch) managed targets return a `connect_url` per app for the user to open, and an MCP target runs at once: `authorize` and an OAuth `install` return the authorization URL, other installs and `enable` report the outcome, and a missing credential comes back as `failed` naming the variable to set. Cannot disconnect, remove or revoke an account; the user does that. | — |
 
 The deadline for one call is five minutes, fixed by the backend when the call starts;
 reopening the chat or restarting the desktop never extends it. The tool is present only when the
@@ -64009,8 +63971,8 @@ nested agent work or security lifecycle events.
 
 ## Existing Consumers
 
-The bundled Langfuse plugin demonstrates direct hook-based observability for
-turns, provider requests, and tool calls.
+The official [Langfuse catalog plugin](https://github.com/NousResearch/hermes-official-plugins/tree/main/langfuse) demonstrates direct hook-based
+observability for turns, provider requests, and tool calls.
 
 The native NeMo Relay SDK integration maps Hermes session, turn, LLM, and tool
 lifecycles to Relay. Relay's discovered user and system configuration, or an
@@ -65098,11 +65060,12 @@ Hermes checks the age of **its own** dependencies when it locks them: the checko
 `[tool.uv] exclude-newer = "3 days"` keeps any release younger than three days out of `uv.lock`,
 so a hijacked upload has time to be caught upstream before it reaches users. Users install from
 that vetted lock; their machines never re-check dates. **The check does not apply to your
-plugin's dependencies.** When Hermes resolves your plugin into its environment, the packages
-Hermes itself locks stay at their locked versions and everything else follows your
-requirements, so a plugin can floor on a release published yesterday and install today. The
-plugin's author, not Hermes, is responsible for what that pulls in. A plugin that requires a
-different version of a package Hermes itself locks fails to install until Hermes's lock moves.
+plugin's dependencies.** When Hermes resolves your plugin into its environment, Hermes's exact
+pins stay put, other packages Hermes uses may move within the ranges Hermes declares, and
+everything else follows your requirements, so a plugin can floor on a release published
+yesterday and install today. The plugin's author, not Hermes, is responsible for what that pulls
+in. A plugin that requires a different version of a package Hermes pins exactly fails to install
+until Hermes's pin moves.
 
 Set your own policy and hold yourself to it. Strongly recommended:
 
@@ -67132,9 +67095,8 @@ the gallery. There is no separate listing to maintain.
 10. **Dependency security policy is the plugin's.** Hermes's 3-day
    `exclude-newer` release-age check covers Hermes's own dependencies only, at
    the time Hermes locks them; a plugin's `python_dependencies` /
-   `pyproject.toml` install under the plugin's policy (no age check). Packages
-   Hermes itself locks stay at Hermes's locked versions, so a plugin cannot
-   require a different version of one. Reviewers read the
+   `pyproject.toml` install under the plugin's policy (no age check), inside
+   Hermes's core constraints: Hermes's exact pins cannot move. Reviewers read the
    dependency list at the pinned SHA: bare floors (`>=X` with no upper bound)
    and floors on the newest release get a request for the oldest
    API-compatible floor plus an upper bound, and authors are strongly
@@ -79382,9 +79344,8 @@ remain under uv and npm's own retry policies.
 Every Python package Hermes itself depends on must be at least three days old
 when Hermes locks it (uv's `exclude-newer`, enforced by CI's lock check), so a
 freshly published, possibly compromised release cannot reach `uv.lock`. Users
-install from that lock. Installing or enabling a plugin keeps every package
-Hermes locks at its locked version and never re-checks dates, so package mirrors
-that publish no upload times work. Set a mirror with `index-url` in `pip.conf`,
+install from that lock, and installing or enabling a plugin never re-checks
+dates, so package mirrors that publish no upload times work. Set a mirror with `index-url` in `pip.conf`,
 which Hermes passes to uv, or with `UV_INDEX_URL`.
 
 `hermes pm lock` is the one step that applies the check. Run against a mirror
