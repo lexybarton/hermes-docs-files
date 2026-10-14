@@ -6628,10 +6628,12 @@ First-touch onboarding hints and the first-message offer:
 onboarding:
   profile_build: "ask"   # "ask" (default) | "off"
   seen: {}               # internal latch — leave empty
+  run: null              # desktop first-run onboarding: null (fresh install) | true | false
 ```
 
-- `profile_build` — controls the offer on the first message ever, in the TUI, the desktop app and messaging direct messages (never in a group chat). `"ask"` (default) offers to build a user profile; the offer is **opt-in and consent-gated** — the agent asks before any lookup, never reads connected accounts silently, and saves confirmed facts to user memory. In the Microsoft Store desktop app the offer is instead one closing line that points at `/initiate-setup` (`/initiate_setup` on Telegram, `/hermes initiate-setup` on Slack). The offer is skipped when the first message is `/initiate-setup` itself, and always in the desktop app's setup profile. `"off"` stops only the offer; the agent still gives a plain intro. The offer fires at most once per profile. `/initiate-setup` sends a short block of facts about the computer; see [What the setup chat knows about your computer](./desktop.md#what-the-setup-chat-knows-about-your-computer).
+- `profile_build` — controls the offer on the first message ever, in the TUI, the desktop app and messaging direct messages (never in a group chat). `"ask"` (default) offers to build a user profile; the offer is **opt-in and consent-gated** — the agent asks before any lookup, never reads connected accounts silently, and saves confirmed facts to user memory. `"off"` stops only the offer; the agent still gives a plain intro. The offer fires at most once per profile.
 - `seen` — internal state. Hermes latches each shown hint here so it never fires again; the first-message offer is also recorded here once shown. Don't hand-edit it — wipe the whole `onboarding` section if you want to re-see all hints.
+- `run` — whether the desktop app opens its first-run onboarding chat on the next launch. Unset means only on a fresh install (no sessions and no profiles yet). Hermes writes `true` when onboarding starts and `false` when it is finished or skipped. It always lives in the default profile's `config.yaml`, whichever profile the app runs. Set `false` to never show it; managed installs can pin it in the managed config.
 
 ## Dashboard
 
@@ -18220,7 +18222,6 @@ Certain tools are blocked for subagents even when the parent has them:
 - `memory` — no writes to shared persistent memory
 - `send_message` — no cross-platform side effects
 - `cronjob` — no scheduling more work in the parent's name
-- `start_chat` — no opening chats in the user's name
 
 Both roles retain `execute_code` (programmatic tool calling) so children can batch mechanical work.
 
@@ -18458,7 +18459,7 @@ For **durable execution** that must survive session closure or process restart, 
 - Each subagent gets its **own terminal session** (separate from the parent)
 - Subagents inherit the parent's enabled toolsets; the model cannot select or widen them per call
 - **Nested delegation is opt-in** — only `role="orchestrator"` children can delegate further, and only when `max_spawn_depth` is raised from its default of 1 (flat). Disable globally with `orchestrator_enabled: false`.
-- Leaf subagents **cannot** call: `delegate_task`, `clarify`, `memory`, `send_message`, `cronjob`, `start_chat`. Orchestrator subagents retain `delegate_task` but keep the other blocks. Both roles retain `execute_code` (programmatic tool calling) so children can batch mechanical work instead of burning reasoning iterations.
+- Leaf subagents **cannot** call: `delegate_task`, `clarify`, `memory`, `send_message`, `cronjob`. Orchestrator subagents retain `delegate_task` but keep the other blocks. Both roles retain `execute_code` (programmatic tool calling) so children can batch mechanical work instead of burning reasoning iterations.
 - **Cancellation follows ownership** — `/stop` or closing/resetting the owning session ends its background children and the synchronous descendants beneath them; each returns an interrupted completion carrying its partial output
 - Only the final summary enters the parent's context, keeping token usage efficient
 - Subagents inherit the parent's **API key, provider configuration, and credential pool** (enabling key rotation on rate limits)
@@ -51338,7 +51339,6 @@ Type `/` in the CLI to open the autocomplete menu. Built-in commands are case-in
 | `/bundles` | List configured skill bundles — `/<name>` slash aliases that preload several skills at once. Configure under `bundles:` in `~/.hermes/config.yaml`. See [Skill Bundles](../user-guide/features/skills.md#skill-bundles). |
 | `/learn <what to learn from>` | Distill a reusable skill from anything you describe — a directory, a URL, the workflow you just walked the agent through, or pasted notes. Open-ended: the agent gathers the sources with its own tools and authors a `SKILL.md` following the house authoring standards. Works in the CLI, the messaging gateway, the TUI, and the dashboard Skills page. |
 | `/plan [task]` | Write a markdown implementation plan to `.hermes/plans/` in the active workspace — planning only, no execution. Empty argument infers the task from the conversation. (Formerly the bundled `plan` skill; now built-in so it survives the Telegram/Discord command-menu caps.) |
-| `/initiate-setup` (alias: `/initiate_setup`) | Run the first-run setup: the agent learns about you and sets Hermes up around you. Sends the `initiate-setup` skill plus a short block of facts about this session and machine (surface, tools present, OS, CPU, RAM, GPU and language; see [What the setup chat knows about your computer](../user-guide/desktop.md#what-the-setup-chat-knows-about-your-computer)), as one normal turn. In the Microsoft Store desktop app, the first message ever ends with a one-line offer to run it (see [Onboarding](../user-guide/configuration.md#onboarding)). Works in the CLI, the messaging gateway, the TUI, and the desktop app. In the desktop app, Hermes itself asks the opening questions (your name, then an accent colour) before the model's first reply. |
 | `/init [notes]` | Generate or update `AGENTS.md` project instructions from a repo scan (port of Codex `/init`). The agent inspects manifests, layout, and toolchain configs with its read-only tools, then writes a concise `AGENTS.md` — or, if one exists, merge-updates it preserving your content. Optional notes steer the emphasis. Works in the CLI, the messaging gateway, and the TUI. |
 | `/cron` | Manage scheduled tasks (list, add/create, edit, pause, resume, run, remove) |
 | `/suggestions [accept\|dismiss N\|catalog\|clear]` (alias: `/suggest`) | Review suggested automations. Use `/suggestions` to list pending suggestions, `/suggestions accept <id>` to create the proposed automation, `/suggestions dismiss <id>` to reject one, `/suggestions catalog` to add curated starter automations, and `/suggestions clear` to clear resolved suggestion records. Accepted jobs preserve the current surface as the delivery origin. |
@@ -51516,7 +51516,6 @@ The messaging gateway supports the following built-in commands inside Telegram, 
 | `/init [notes]` | Generate or update `AGENTS.md` from a repo scan. |
 | `/learn <what to learn from>` | Distill a reusable skill from anything you describe. |
 | `/plan [task]` | Write a markdown implementation plan to `.hermes/plans/`; no execution. |
-| `/initiate-setup` (alias: `/initiate_setup`) | Run the first-run setup: the agent learns about you and sets Hermes up around you. On Slack: `/hermes initiate-setup`. |
 | `/bundles` | List configured skill bundles (`/<name>` aliases that preload several skills). |
 | `/reload-skills` (alias: `/reload_skills`) | Re-scan `~/.hermes/skills/` for newly installed or removed skills. |
 | `/footer [on\|off\|status]` | Toggle the runtime-metadata footer on final replies (shows model, context %, and cwd). |
@@ -53150,7 +53149,7 @@ Use `hermes config set` to set environment variables — every `UPPER_SNAKE` nam
 
 This page documents Hermes' built-in tools, grouped by toolset. Availability varies by platform, credentials, and enabled toolsets.
 
-**Quick counts (current registry):** ~100 tools — 10 browser tools (core) + 2 CDP-gated browser tools + 5 browser-vault tools + `browser_exec`, 4 file tools, 2 terminal tools (`terminal`, `process_manage`), 11 desktop-GUI tools (`read_terminal`, `close_terminal`, `desktop_preview`, `drive_preview`, `annotate_preview`, `read_window_below`, `focus_pane`, `react_to_message`, `gui_tour`, `show_tip`, `apply_layout` — desktop-app sessions only), 2 web tools, 5 Feishu tools, 5 Yuanbao tools, 14 kanban tools (registered when the kanban dispatcher spawns the agent), 1 project tool (`desktop_project`; desktop/GUI sessions), 2 Discord tools, 3 video tools (`video_generate`, `xai_video_edit`, `xai_video_extend`), and a handful of standalone tools (`memory`, `clarify`, `delegate_task`, `execute_code`, `cronjob_manage`, `session_search`, `skill_view`/`skill_manage`/`skills_list`, `text_to_speech`, `image_generate`, `vision_analyze`, `video_analyze`, `todo_list`, `computer_use`, `x_search`).
+**Quick counts (current registry):** ~100 tools — 10 browser tools (core) + 2 CDP-gated browser tools + 5 browser-vault tools + `browser_exec`, 4 file tools, 2 terminal tools (`terminal`, `process_manage`), 11 desktop-GUI tools (`read_terminal`, `close_terminal`, `desktop_preview`, `drive_preview`, `annotate_preview`, `read_window_below`, `focus_pane`, `react_to_message`, `gui_tour`, `show_tip`, `set_theme` — desktop-app sessions only), 2 web tools, 5 Feishu tools, 5 Yuanbao tools, 14 kanban tools (registered when the kanban dispatcher spawns the agent), 1 project tool (`desktop_project`; desktop/GUI sessions), 2 Discord tools, 3 video tools (`video_generate`, `xai_video_edit`, `xai_video_extend`), and a handful of standalone tools (`memory`, `clarify`, `delegate_task`, `execute_code`, `cronjob_manage`, `session_search`, `skill_view`/`skill_manage`/`skills_list`, `text_to_speech`, `image_generate`, `vision_analyze`, `video_analyze`, `todo_list`, `computer_use`, `x_search`).
 
 :::tip MCP Tools
 In addition to built-in tools, Hermes can load tools dynamically from MCP servers. MCP tools appear with the prefix `mcp__<server>__` (e.g., `mcp__github__create_issue` for the `github` MCP server). See [MCP Integration](../user-guide/features/mcp.md) for configuration.
@@ -53325,22 +53324,6 @@ Enabled for sessions whose source is the desktop app, whichever backend it's con
 |------|-------------|----------------------|
 | `manage_catalog` | Desktop sessions only, deferred behind `tool_search` by default. `search` lists catalog plugins and hub skills matching `query` (optionally one `kind`) with `id`, `kind`, `display`, `tier`, `platforms` and `installed` (present in this chat's profile); it changes nothing. `install` takes `items: [{kind, id}]` and shows one approval card with a row per item (Install, Advanced, Skip); an id the catalog does not know, or a plugin this OS cannot run, is drawn failed with the reason. An approved row installs into this chat's profile (or the profile chosen under Advanced) at the catalog's reviewed commit, with the same kill list, security scan and live activation as the Plugins tab, so the plugin's MCP tools and skills are usable in that profile's open chats at once. The result lists each row as `connected` (with `tools` and `skill`), `skipped`, `failed` (with `detail`) or `not_connected`; a failed row ends the wait like an installed or skipped one, and an install turns on a catalog plugin that is on disk but not enabled. The model cannot pass a source, commit, profile or setting. Anywhere else the call returns the `hermes plugins install` / `hermes skills install` command to run instead. | — |
 
-## `setup` toolset
-
-Enabled by the desktop setup profile's own config (`platform_toolsets.cli`). Only desktop sessions get its tools; CLI, `hermes -z`, cron, kanban and messaging sessions never do. `all` does not include it. Not listed by `hermes tools`.
-
-| Tool | Description | Requires environment |
-|------|-------------|----------------------|
-| `setup_choose` | Only through the `setup` toolset, desktop sessions only; never deferred unless a `tools.tool_search.defer` list names it. Shows one card in the setup chat: `kind` is `question`, `accent`, `theme`, `layout`, `connectors`, `plugins`, `tour` or `fork`, and `question` is the card's heading. `options` is required: up to 12 `{id, label, detail?}` rows (unique ids) replace the app's own list, and `[]` shows the app's list for a picker or asks for free text for kind `question`. `tour` (Quick tour, Show me everything, Skip) and `fork` (two first tasks built, when the card shows, from the apps and plugins picked earlier and this computer, then "I have something in mind", "Help me set up this &lt;machine>" and "Let's figure it out together") always show the backend's rows. The name card (`question` "What should I call you?") gets the account's full name as a row from the backend, so the name reaches the model only in the result when the user picks it. The plugins card starts with Blender already picked when it is present. A card with options still takes a typed answer. `multi_select` lets the user pick several rows. An accent, theme or layout pick applies in the app as soon as the user picks it. The result has `outcome` (`submitted`, `typed`, `cancelled` or `no_answer` with a `notice`), `picked` (an option id, the free-text answer, or a list of ids with `multi_select`), `said` (with `typed`: words typed in the chat box that name none of the card's rows by id or label; nothing is picked or recorded), and `label` (the name the card showed for each pick, such as `Ultraviolet` for `#8a2be2`) when the pick is one of the card's rows. When the connectors list is unavailable (no Nous identity, after one guest sign-up attempt) or the plugins list is empty, the call returns `no_answer` with a `notice` at once and shows no card. It records the picks for the handoff: `start_chat` hands the picked apps and plugins to the task chat, which connects and installs them first. Anywhere else the call returns an error. | — |
-
-## `start_chat` toolset
-
-Enabled only when a profile's own config names it (`platform_toolsets.cli`). Only desktop sessions get its tool; CLI, `hermes -z`, cron, kanban and messaging sessions never do. `all` does not include it. Not listed by `hermes tools`. Subagents never get it.
-
-| Tool | Description | Requires environment |
-|------|-------------|----------------------|
-| `start_chat` | Opens a new chat in the desktop app and sends `message` as its first user message. The calling chat shows a card with the new chat's title, its profile and an Open button; the app moves the user into the new chat only when they are watching the calling chat, otherwise the chat appears in the sidebar. The new chat starts with no history. `profile` must name an existing profile (it is never created); omitted, the chat runs in the caller's own profile. The new chat takes its settings from its own profile, never from the caller's. `title` (at most 40 characters) names the chat in the sidebar; omitted, the chat titles itself. Every call opens another chat: nothing de-duplicates a repeated call. A `started` call from the desktop setup profile's chat into another profile marks onboarding complete. The result is `started` with the new chat's `session_id` and `profile`, or `rejected` with a `reason` (unknown profile, empty message, title too long, not called from a desktop chat). | — |
-
 ## `session_search` toolset
 
 | Tool | Description | Requires environment |
@@ -53380,7 +53363,7 @@ messaging, and cron sessions.
 | `react_to_message` | React to a message with a single emoji, iMessage-tapback style. Opt-in via Settings → Appearance (`display.message_reactions`). | — |
 | `gui_tour` | Give a live guided tour: dim the screen, highlight an element, and attach a narrated popover (driver.js). Works on the Hermes app's own UI and on any page open in the preview pane. `start` with no steps runs the app's built-in tour (`preset` `quick` or `full`, default `full`). For a custom tour, `targets` discovers what's on screen, `show` narrates step-by-step, and `start` with `steps` hands the user Next/Prev controls. | — |
 | `show_tip` | Point at one element with a small accent bubble and an arrow — the quiet sibling of `gui_tour`, with no dimming, no spotlight, and no Next/Prev. Same `data-tour` handles and the same `tour(action='targets')` discovery call. | — |
-| `apply_layout` | Apply a saved layout preset to the Hermes desktop app when the user asks to rearrange the workspace. Built-ins: default (chat + sidebars), focus (chat only), terminal-deck, quad; plugin/user presets by id. To reveal ONE pane, use `focus_pane` instead. | — |
+| `set_theme` | Set the Hermes desktop app's accent colour (a swatch id, `theme`, or `#rrggbb`), light/dark/system mode, and layout preset (Simple: `sidebar-left`, `sidebar-right`; Advanced: `default`, `basic`, `focus`, `terminal-deck`, `quad`; or a saved layout's id). The result reports what was applied; an unknown value comes back with the available ids. `picker` (`accent` or `layout`) shows a picker card in the chat and waits up to 5 minutes for the pick. | — |
 
 ### Tours
 
@@ -53616,14 +53599,12 @@ Or in-session:
 | `video_gen` | `video_generate`, `xai_video_edit`, `xai_video_extend` | Text-to-video and image-to-video via plugin-registered backends (xAI Grok-Imagine, FAL.ai Veo 3.1 / Pixverse v6 / Kling 3.0 / Kling O3). Pass `image_url` to animate an image; omit it for text-to-video. `xai_video_edit` / `xai_video_extend` are provider-specific edit/extend tools, gated on xAI Imagine credentials. |
 | `kanban` | `kanban_attach`, `kanban_attach_url`, `kanban_attachments`, `kanban_block`, `kanban_comment`, `kanban_complete`, `kanban_create`, `kanban_heartbeat`, `kanban_link`, `kanban_list`, `kanban_request_changes`, `kanban_request_review`, `kanban_show`, `kanban_unblock` | Multi-agent coordination tools. Registered for dispatcher-spawned task workers (`HERMES_KANBAN_TASK`) and for platforms whose saved selection lists `kanban` (`hermes tools enable kanban --platform <p>`; the `all`/`*` wildcard does **not** enable it). Workers mark tasks done, request first-class review, block, heartbeat, comment, and create/link follow-up tasks; orchestrator profiles additionally get board-routing tools like list/unblock. `delegate_task` children are not Kanban run owners: their schema strips/disables this toolset and runtime guards reject direct board mutations, even if parent `HERMES_KANBAN_*` env vars are present. |
 | `memory` | `memory` | Persistent cross-session memory management. |
-| `desktop_ui` | `annotate_preview`, `apply_layout`, `close_terminal`, `desktop_preview`, `drive_preview`, `focus_pane`, `gui_tour`, `react_to_message`, `read_terminal`, `read_window_below`, `show_tip` | Affordances that act on the Hermes desktop app itself — read/close the embedded terminal pane, open, read, close, interact with, and annotate the in-app browser, identify the OS window behind the app, reveal a pane, react to a message, run a guided tour (highlight + narrate UI elements in the app or the preview pane), and apply a layout preset. Enabled for sessions whose source is the desktop app, whichever backend it's connected to (local, SSH, URL, or Hermes Cloud). Never present on CLI, TUI, messaging, or cron sessions. |
+| `desktop_ui` | `annotate_preview`, `close_terminal`, `desktop_preview`, `drive_preview`, `focus_pane`, `gui_tour`, `react_to_message`, `read_terminal`, `read_window_below`, `set_theme`, `show_tip` | Affordances that act on the Hermes desktop app itself — read/close the embedded terminal pane, open, read, close, interact with, and annotate the in-app browser, identify the OS window behind the app, reveal a pane, react to a message, run a guided tour (highlight + narrate UI elements in the app or the preview pane), and set the accent colour, light/dark mode and layout (or show a picker card for the user to choose). Enabled for sessions whose source is the desktop app, whichever backend it's connected to (local, SSH, URL, or Hermes Cloud). Never present on CLI, TUI, messaging, or cron sessions. |
 | `project` | `desktop_project` | Create and switch desktop [Projects](../user-guide/cli.md) (named, multi-folder workspaces) via one `create`/`switch`/`list` action enum. GUI / desktop sessions only. |
 | `catalog` | `manage_catalog` | Search the plugin catalog and skills hub, and install items through the approval card into this chat's profile. Enabled for sessions whose source is the desktop app, whichever backend it's connected to (local, SSH, URL, or Hermes Cloud). Never present on CLI, TUI, messaging, or cron sessions, even when a config list names it. `all` does not include it. Deferred behind `tool_search` by default. Remove it with `agent.disabled_toolsets: [catalog]`. |
 | `safe` | `image_generate`, `vision_analyze`, `web_extract`, `web_search` (via `includes`) | Read-only research + media generation. No file writes, no terminal, no code execution. |
 | `search` | `web_search` | Web search only (without extract). |
 | `session_search` | `session_search` | Search past conversation sessions. |
-| `setup` | `setup_choose` | Onboarding-only surface of the desktop setup profile: ask the user one question or picker card at a time. The setup profile's own config enables it (`platform_toolsets.cli`), and only desktop sessions get its tools. `all` does not include it. Not listed by `hermes tools`. |
-| `start_chat` | `start_chat` | Start a new desktop chat in an existing profile (this chat's own profile when none is named) and send it its first message, so the task runs there in view of the user. Every call opens another chat. A profile's own config enables it (`platform_toolsets.cli`), and only desktop sessions get its tool. `all` does not include it. Not listed by `hermes tools`. Subagents never get it. |
 | `skills` | `skill_manage`, `skill_view`, `skills_list` | Skill CRUD and browsing. |
 | `terminal` | `process_manage`, `terminal` | Shell command execution and background process management. |
 | `todo` | `todo_list` | Task list management within a session. |
@@ -54633,9 +54614,7 @@ hermes skills uninstall <skill-name>
 |-------|-------------|
 | [**canvas**](../user-guide/skills/optional/productivity/productivity-canvas.md) | Fetch Canvas LMS courses and assignments via API token. |
 | [**decision-questionnaire**](../user-guide/skills/optional/productivity/productivity-decision-questionnaire.md) | Turn an unanswerable decision into a questionnaire doc. |
-| [**first-task**](../user-guide/skills/optional/productivity/productivity-first-task.md) | Run the first task chat that setup hands off. |
 | [**here-now**](../user-guide/skills/optional/productivity/productivity-here-now.md) | Publish sites to &#123;slug&#125;.here.now and store files in Drives. |
-| [**initiate-setup**](../user-guide/skills/optional/productivity/productivity-initiate-setup.md) | Run the first-run setup chat in the Hermes desktop app. |
 | [**live-dashboard**](../user-guide/skills/optional/productivity/productivity-live-dashboard.md) | Build self-updating dashboards from live sources. |
 | [**memento-flashcards**](../user-guide/skills/optional/productivity/productivity-memento-flashcards.md) | Spaced-repetition flashcards: create, review, quiz, export. |
 | [**property-listings**](../user-guide/skills/optional/productivity/productivity-property-listings.md) | Present property and rental listings as desktop cards. |
@@ -68853,7 +68832,9 @@ gateway's error code in its result: `connection_required` (connection required
 or expired), `not_allowed`, `alias` (alias required or unknown),
 `invalid_arguments`, and `connector_backend` for every backend-family code
 (vendor error, rate limit, timeout, policy or gateway failure); other codes keep
-`tool_error`. Hermes does not infer retries from repeated tool names or
+`tool_error`. Hermes's own file-input refusals count the same way: a refused
+path is `not_allowed`, a missing or oversized file is `invalid_arguments`, and a
+failed upload is `connector_backend`. Hermes does not infer retries from repeated tool names or
 adjacent calls; when the
 hook does not provide an explicit retry relationship, the retry bucket is
 `unknown`. Approval decisions are emitted as `hermes.tool_approval` marks and
@@ -69237,8 +69218,7 @@ Both keys are asked once per profile, with the same three answers everywhere
 "No thanks" is the default in the terminal, so pressing Enter never opts
 anyone in. Esc in the terminal and the dashboard banner's ✕ leave the question
 open, so it is asked again next time. The Desktop strip appears only after
-first-run onboarding is finished or skipped, and never in the internal setup
-profile that hosts the welcome chat. Answering on any surface writes both keys
+first-run onboarding is finished or skipped. Answering on any surface writes both keys
 to the profile's `config.yaml`, plus `offer_version`, and a profile that already
 carries either key is never asked again. A managed install is never offered.
 
@@ -70309,15 +70289,20 @@ files on `main`.
    version line. A cut whose next version already has a final `vX.Y.Z` tag is
    refused until that publication finishes.
 2. Push an annotated `rc.<N>-vX.Y.Z` attempt ref atomically, create one
-   non-prerelease GitHub draft on it, and dispatch `Stable Release` on that exact
-   ref. The attempt number comes from the existing attempt refs of that version.
+   non-prerelease GitHub draft on it, and dispatch `Stable Release` from the
+   default branch with that ref as its `tag` input. The attempt number comes from the existing attempt refs of that version.
    The claim message binds its commit, attempt number, autopublish policy,
    `skipBundles`, `skipTests`, `includeMacosIntel` and `includeTermux` flags, and
    one monotonically allocated epoch. That epoch is the release date and native
    packaging clock for every matrix leg and retry. One outstanding attempt, of
    any version, blocks a new `release`.
-3. Admit the exact remote annotated tag-object SHA, peeled commit, `GITHUB_REF`,
-   `GITHUB_SHA`, checked-out `HEAD`, and ancestry on `origin/main`.
+3. Admit the exact remote annotated tag-object SHA, its peeled commit, and that
+   commit's ancestry on `origin/main`. The run itself must be the default-branch
+   dispatch of `Stable Release`. Its workflows and release scripts come from
+   `main`, so its Actions caches share one scope across attempts. `GITHUB_SHA` is
+   `main`'s tip, never the commit under test. Every lane that tests or builds the
+   payload is passed the admitted commit, and the commit-threading lint in
+   `tests/ci/test_stable_release_commit_threading.py` enforces that.
 4. Run the whole source, Docker, Nix, PM bundle, install/update, Windows,
    signed-package, and native-upgrade acceptance graph (plus macOS Intel and
    Termux when the claim opted into them).
@@ -70503,7 +70488,7 @@ writes an `abandoned-rc.<N>-vX.Y.Z` marker ref, and keeps the attempt ref. The
 marker is the record of abandonment; the attempt ref is never deleted. The
 version is not spent, so the next cut is `rc.<N+1>-vX.Y.Z`.
 
-Do not manually dispatch `Stable Release` from a final tag. Recovery keeps the
+Do not manually dispatch `Stable Release` with a final tag. Recovery keeps the
 original claim ref, object SHA, commit, draft database ID, autopublish policy,
 and skip flags.
 
@@ -80055,10 +80040,6 @@ Manage providers, models, tools, and credentials from a real UI instead of editi
 
 First-run onboarding has been redesigned on a unified overlay design system, and you can pick **Choose provider later** to skip provider setup and get into the app first.
 
-#### What the setup chat knows about your computer
-
-The setup chat's first message carries a short block of facts, so it can name your computer and offer first tasks that fit it: the OS and its version, CPU, RAM, GPU class, whether it is a Spark, and your language. The block goes to the inference provider that the setup chat uses and stays in that chat's history. The name card offers your full name from the account record, but the name stays on this computer unless you pick it. To choose which plugins and first tasks to offer, setup also checks whether the apps those plugins drive are installed, such as Blender, and NVIDIA App and NVIDIA Broadcast on a Windows computer with an NVIDIA GPU. It looks in the usual install folders, on the `PATH`, and in the Windows list of installed programs, reads the version of each copy it finds, and for some apps reads the app's own runtime file to see whether it is running. Nothing else on the computer is read for setup. Setup keeps a small file in the setup profile's `setup-cards` folder with the machine line and your picks, and copies it into your first task chat. Both chats are saved on this computer like any other chat. With a remote backend, the facts describe the remote machine, not the computer in front of you.
-
 #### Per-profile settings: the "Applies to" scope
 
 When you have two or more [profiles](./profiles.md), the config-backed settings pages — **Model, Workspace, Safety, Memory & Context, Voice, Chat, Advanced, and Tools & Keys** — plus **Providers → Custom Endpoints** and the **Messaging** overlay show a shared **Applies to** chip row at the top. It selects which profile your edits target:
@@ -86046,7 +86027,7 @@ hermes plugins enable touchdesigner   # same as: hermes plugins enable td
 
 In the Desktop app a package with both an agent half and a Desktop half
 (`desktop/plugin.js`) is one row with one switch per half. Turning the
-package on (the install dialog's **Enable agent plugin after install**, or
+package on (installing it from the install dialog, which turns it on, or
 the row's **Agent** switch) turns its Desktop half on as well, unless you
 switched that half off yourself. Turning it off stays per half, because the
 Desktop half is shared by every profile.
