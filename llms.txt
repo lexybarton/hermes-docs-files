@@ -225,8 +225,12 @@ Repo: https://github.com/NousResearch/hermes-agent
 - [Cron Internals](https://hermes-agent.nousresearch.com/docs/developer-guide/cron-internals): How Hermes stores, schedules, edits, pauses, skill-loads, and delivers cron jobs
 - [Desktop Plugin SDK (@hermes/plugin-sdk)](https://hermes-agent.nousresearch.com/docs/developer-guide/desktop-plugin-sdk): Extend the native Hermes Desktop app — panes, pages, sidebar nav, status bar, palette commands, keybinds, themes, and a scoped backend namespace, with one import and no build step.
 - [Egress proxy internals](https://hermes-agent.nousresearch.com/docs/developer-guide/egress-internals): How the iron-proxy egress firewall integrates with Hermes — module layout, lifecycle, security invariants, and extension points
+- [Classic gateway client](https://hermes-agent.nousresearch.com/docs/developer-guide/gateway-classic-cli): How hermes chat / --cli attach to the gateway authority
+- [Gateway command parity](https://hermes-agent.nousresearch.com/docs/developer-guide/gateway-command-parity): What each local client does with every slash command on the shared gateway
+- [Gateway local sessions](https://hermes-agent.nousresearch.com/docs/developer-guide/gateway-local-sessions): Local CLI/TUI sessions as canonical gateway admissions
 - [Gateway Monitoring](https://hermes-agent.nousresearch.com/docs/developer-guide/gateway-monitoring): Health export, structured diagnostics, fleet queries and how to extend the monitoring plane
 - [Gateway Session Lifecycle](https://hermes-agent.nousresearch.com/docs/developer-guide/gateway-session-lifecycle): SessionSource, SessionEntry, SessionStore, session-key rules and multi-user isolation in the gateway
+- [Hosted rooms across local profile owners](https://hermes-agent.nousresearch.com/docs/developer-guide/hosted-profile-owners)
 - [Image Generation Provider Plugins](https://hermes-agent.nousresearch.com/docs/developer-guide/image-gen-provider-plugin): How to build an image-generation backend plugin for Hermes Agent
 - [macOS bundle updates](https://hermes-agent.nousresearch.com/docs/developer-guide/macos-bundle-updates)
 - [Memory Provider Plugins](https://hermes-agent.nousresearch.com/docs/developer-guide/memory-provider-plugin): How to build a memory provider plugin for Hermes Agent

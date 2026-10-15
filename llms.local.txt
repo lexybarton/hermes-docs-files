@@ -225,8 +225,12 @@ Repo: https://github.com/NousResearch/hermes-agent
 - [Cron Internals](./developer-guide/cron-internals.md): How Hermes stores, schedules, edits, pauses, skill-loads, and delivers cron jobs
 - [Desktop Plugin SDK (@hermes/plugin-sdk)](./developer-guide/desktop-plugin-sdk.md): Extend the native Hermes Desktop app — panes, pages, sidebar nav, status bar, palette commands, keybinds, themes, and a scoped backend namespace, with one import and no build step.
 - [Egress proxy internals](./developer-guide/egress-internals.md): How the iron-proxy egress firewall integrates with Hermes — module layout, lifecycle, security invariants, and extension points
+- [Classic gateway client](./developer-guide/gateway-classic-cli.md): How hermes chat / --cli attach to the gateway authority
+- [Gateway command parity](./developer-guide/gateway-command-parity.md): What each local client does with every slash command on the shared gateway
+- [Gateway local sessions](./developer-guide/gateway-local-sessions.md): Local CLI/TUI sessions as canonical gateway admissions
 - [Gateway Monitoring](./developer-guide/gateway-monitoring.md): Health export, structured diagnostics, fleet queries and how to extend the monitoring plane
 - [Gateway Session Lifecycle](./developer-guide/gateway-session-lifecycle.md): SessionSource, SessionEntry, SessionStore, session-key rules and multi-user isolation in the gateway
+- [Hosted rooms across local profile owners](./developer-guide/hosted-profile-owners.md)
 - [Image Generation Provider Plugins](./developer-guide/image-gen-provider-plugin.md): How to build an image-generation backend plugin for Hermes Agent
 - [macOS bundle updates](./developer-guide/macos-bundle-updates.md)
 - [Memory Provider Plugins](./developer-guide/memory-provider-plugin.md): How to build a memory provider plugin for Hermes Agent
