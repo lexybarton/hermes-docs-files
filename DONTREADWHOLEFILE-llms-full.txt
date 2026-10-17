@@ -11699,6 +11699,39 @@ process(action="write", session_id="proc_abc123", data="y")  # Send input
 
 PTY mode (`pty=true`) enables interactive CLI tools like Codex and Claude Code.
 
+A foreground command whose only backgrounding is a trailing `&` (for example
+`python3 -m http.server 8765 &` or `cd app && npm start > app.log 2>&1 &`) runs
+as `background=true` with the `&` removed, and the result carries an
+`auto_backgrounded` note with the `session_id`. It goes through the same
+approval checks as any background command. Shapes that mix in other commands
+(`server & curl ...`, `a; b &`, multi-line scripts), `nohup`/`disown`/`setsid`
+wrappers, command substitutions (`$(...)`, backticks, `<(...)`) and commands
+whose approval category would change without the `&` are still refused with
+guidance, because Hermes cannot safely tell which part should keep running.
+
+### Repeated waits on a quiet process
+
+When the agent calls `process(action="wait")` or `process(action="poll")` twice in a row on a
+process that is still running and has printed nothing new, Hermes turns on `notify_on_complete`
+for that process and the result tells the agent to stop checking: the exit (code and final output)
+arrives later as its own message, so the agent can do other work or end its turn instead of
+spending a model call on every unchanged check. New output, the process exiting, or any other
+action on that process resets the count.
+
+This applies where a completion can reach the agent: the interactive CLI (including interactive
+`hermes chat -q`), the TUI and desktop app, and messaging chats. Non-interactive `hermes chat -q`,
+one-shot `hermes -z`, cron jobs, Kanban workers, stateless API requests and delegated subagents keep the
+previous behaviour because they cannot receive a later completion, as does any profile with
+`display.background_process_notifications: off` (completions never start an agent turn there). Checking
+a process whose completion goes to someone else (another session's process, or a subagent's process
+that was not handed off) also stays plain polling. Admin-managed settings and `${VAR}` values count.
+To keep plain polling everywhere, set:
+
+```yaml
+terminal:
+  process_wait_auto_notify: false
+```
+
 Completed background commands retain their exit status and captured output in the
 active profile. Resume the conversation that launched the command (or its
 compressed continuation), then use the original `session_id` with
@@ -86542,10 +86575,27 @@ falls back silently to the syntax-only result.
 
 Concretely, on every successful `write_file` or `patch`:
 
-1. Hermes captures a baseline of current diagnostics for the file.
-2. Performs the write.
-3. Re-queries the language server, filters out diagnostics that were
-   already in the baseline, and surfaces only the new ones.
+1. Hermes performs the write, then sends the new content to the language
+   server. The write waits for the verdict only while the whole tool call
+   stays under about 80 ms.
+2. Hermes asks for the verdict directly where the server supports it:
+   TypeScript (`typescript-language-server`) answers a synchronous
+   diagnostics request, and pyright answers a document pull. Warm servers
+   usually reply in 10–90 ms. When the verdict has diagnostics, Hermes
+   compares them against the verdict on the pre-edit content and keeps
+   only the new ones.
+3. A verdict that arrives inside that window appears in the tool result's
+   `lsp_diagnostics`. A slower one (cold server, very large file) is
+   attached to the session's **next** tool result, labelled `LSP
+   diagnostics introduced by your earlier edit of <path>`. If the model
+   tries to finish the turn while a check is still running, Hermes waits
+   up to 5 s for it. Any problems it finds go to the model as a new
+   message before the answer is accepted, so a one-shot `hermes chat -q`
+   run still sees them. Earlier messages are never rewritten.
+
+If the same file is edited again before its check finishes, the newer
+check runs against the older edit's baseline. Errors the first edit
+introduced are still reported unless the second edit fixed them.
 
 The agent sees output like:
 
