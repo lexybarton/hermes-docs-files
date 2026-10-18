@@ -2793,16 +2793,19 @@ With `hermes --tui -w`, closing the terminal detaches from the gateway-owned
 session. Its worktree is retained even when clean: the turn may still be running
 there, and resuming the session uses the same working directory. Review and prune
 it after the session's work is finished.
-A conservative pruner runs automatically at startup (it only removes clean,
-fully-merged scratch trees past an age threshold), but preserved trees and
-merged local branches still accumulate on busy machines. Reclaim them
-explicitly:
+A sweep runs automatically at `hermes -w` startup and every 6 hours from the
+cron ticker: idle clean+merged trees are removed, and idle trees with
+uncommitted changes or unpushed commits are **archived, then removed**
+(restorable with `hermes worktree restore <name>`; see
+[Stale worktree sweep](./git-worktrees.md#stale-worktree-sweep-and-restore)).
+Reclaim or inspect explicitly:
 
 ```bash
-hermes worktree list              # audit: age, size, verdict, reason per tree
-hermes worktree list --json       # machine-readable audit (trees, external trees, branches)
-hermes worktree prune             # remove safe trees + delete merged branches
-hermes worktree prune --dry-run   # show the plan without changing anything
+hermes worktree list              # audit: age, size, verdict, reason per tree + archives
+hermes worktree list --json       # machine-readable audit (trees, external trees, branches, archives)
+hermes worktree prune             # run the sweep now + delete merged branches
+hermes worktree prune --dry-run   # print every archive/remove/skip decision and why; changes nothing
+hermes worktree restore <name>    # recreate an archived tree (add --path DIR to put it elsewhere)
 hermes worktree prune --older-than 7   # only reap trees idle for 7+ days
 hermes worktree prune --trees-only     # leave local branches alone
 hermes worktree prune --branches-only  # leave worktrees alone
@@ -2812,16 +2815,18 @@ Worktrees registered **outside** `.worktrees/` (created by hand or by another
 tool) are reported read-only in `list` output and are never removed. The one
 exception is metadata: registrations whose directory no longer exists are
 dropped via `git worktree prune` (no files are touched). `--older-than DAYS`
-only ever narrows what gets reaped — a tree carrying real work is kept at any
-age regardless of the flag.
+only ever narrows what gets reaped, including what the stale-worktree sweep
+archives and removes during that run: a tree idle for less than DAYS is
+never touched.
 
 Inside a session, `/worktree prune [--dry-run]` does the same (and never
 touches the tree the session is running in).
 
 Safety guarantees (all modes, any age):
 
-- Uncommitted **tracked** changes are never deleted.
-- **Unique unpushed commits** are never deleted — commits that were
+- Uncommitted changes and **unique unpushed commits** are never deleted
+  without a restorable archive (`refs/hermes/archive/<tree>`); with
+  `worktrees.archive_dirty: false` they are never deleted at all — commits that were
   rebase/squash-merged upstream are detected via `git cherry`
   patch-equivalence and count as merged, which is what lets the dominant
   "merged PR, tree preserved forever" leak finally reclaim.
@@ -2836,18 +2841,28 @@ Safety guarantees (all modes, any age):
   removed but its **branch ref is kept**, so the lane is one
   `git worktree add .worktrees/<name> <branch>` away from restored. If the
   remote can't be reached, the tree is preserved.
-- Trees **in use by a running hermes session** are never touched.
+- Trees **in use** are never touched: a running hermes session's lock, or any
+  live process whose working directory (or, on Linux, an open file) is inside
+  the tree. Each tree is checked again right before it is archived or removed,
+  and again after its archive is built; a tree that changed meanwhile is kept.
 - **Untracked-only scratch** (PR body drafts, notes) is archived to
   `~/.hermes/archive/worktree-prune/` before its tree is removed — never
   destroyed.
+- **Nothing irreproducible is deleted unarchived**: a tree is kept when it holds
+  an embedded repository (even a gitignored one), a commit only a per-worktree
+  ref (`refs/worktree/*`, `refs/bisect/*`) reaches, an untracked file over the
+  archive size cap. Ignored files (`.env` copies, caches, build output) are not
+  archived and are deleted with the tree; a nested git repository inside an
+  ignored folder keeps it. See
+  [ignored files](./git-worktrees.md#stale-worktree-sweep-and-restore).
 - Branch deletion is content-gated, not name-gated: any local branch whose
   commits are all on upstream is safe to delete; branches with unique work,
   checked-out branches, and `main`/`master`/`develop` are always kept.
 
-The same conservative pruner also runs from the cron scheduler (at most once
-every 6 hours, in the background), so gateway-only machines — where nobody
-launches `hermes -w` for days — no longer accumulate merged scratch trees
-between CLI sessions.
+The same sweep also runs from the cron scheduler (at most once every 6 hours
+per profile, in the background) over every repository the profile created a
+worktree in, so gateway-only machines — where nobody launches `hermes -w` for
+days — no longer accumulate scratch trees between CLI sessions.
 
 When `.worktrees/` grows past 10 trees or 5 GB, startup prints a one-line
 notice pointing at these commands.
@@ -8989,7 +9004,8 @@ Hermes creates `.worktrees/my-experiment/` inside the repo (branch
 `worktree_sync: false`), and retargets the session's terminal and file tools
 into it — no restart needed. Omit the name to get a random `hermes-<id>`
 tree. `/worktree` alone shows the active tree; `/worktree list` lists all of
-them. On exit the tree is kept only if it has unpushed commits, exactly like
+them. On exit a clean, pushed tree is removed; a tree with uncommitted changes
+or unpushed commits triggers the same keep / archive / remove question as
 `hermes -w`.
 
 ### Manually with git
@@ -9118,6 +9134,92 @@ hermes -w -z "Fix issue #123"
 ```
 
 For parallel agents, open multiple terminals and run `hermes -w` in each — every invocation gets its own worktree and branch automatically.
+
+### Leaving a session with unfinished work
+
+When an interactive `hermes -w` session (classic CLI or `--tui`) exits and its
+worktree has uncommitted changes or unpushed commits, Hermes asks:
+
+- **Keep the worktree** (default, also what Enter/Esc picks) — nothing changes.
+- **Archive and remove it** — the full working state is archived (see below)
+  and the tree is removed before the session finishes exiting, so a large tree
+  is never cut short; Hermes prints the `hermes worktree restore` command. If
+  the archive fails, the tree is kept.
+- **Remove it and discard the changes** — only when you pick it explicitly.
+
+One-shot runs (`-q`, `-z`), cron jobs, gateway sessions and any exit without a
+terminal never ask: the tree is kept and the stale-worktree sweep handles it
+later. A clean tree whose commits are pushed is removed without asking.
+
+## Stale worktree sweep and restore
+
+Every repository Hermes creates a worktree in (`hermes -w`, `/worktree new`,
+subagent worktree isolation, the desktop app's git pane) is recorded in
+`<HERMES_HOME>/worktree_repos.json` for the active profile. At `hermes -w`
+startup and every 6 hours from the cron ticker, Hermes sweeps each of those
+repositories' `.worktrees/`:
+
+| Tree | Decision |
+|---|---|
+| Idle past its tier (`hermes-*`/`subagent-*` 24 h, named trees 72 h), clean and merged or pushed | removed |
+| Idle past its tier with uncommitted changes or unpushed commits | **archived, then removed** |
+| A live hermes lock owner, or any live process whose cwd (Linux: or an open file) is inside | never touched |
+| File, `HEAD` or reflog activity younger than its tier (a deleted file counts through its folder) | never touched |
+| Kanban task trees (`t_<hex>`) | never touched (the Kanban GC owns them) |
+| Any submodule: a gitlink in the index, or a submodule repository kept under the tree's `modules/` (even after `git submodule deinit`) | kept (`keep-submodule-work`: an archive records only the submodule pointer). A clean merged tree is removed only if its submodules were never initialized |
+| An embedded repository anywhere inside, gitignored or not (e.g. `build/tool/.git`) | kept (`keep-unarchivable`) |
+| A commit held only by a per-worktree ref (`refs/worktree/*`, `refs/bisect/*`, `refs/rewritten/*`) | kept (`keep-worktree-refs`: those refs are deleted with the tree) |
+| An untracked file larger than `worktrees.archive_max_file_mb` | kept (`keep-large-untracked`) |
+
+**Ignored files.** Ignored files (`.env` copies, caches, build and test output)
+are not archived and are deleted with the tree. A nested git repository inside
+an ignored folder is the one exception: it keeps the tree.
+
+The same checks run on clean merged trees, and every dirty check counts files
+that `status.showUntrackedFiles=no` would hide and skip-worktree /
+assume-unchanged files whose bytes differ from the index.
+
+An archive is a commit stored at `refs/hermes/archive/<tree>` holding the
+tree's `HEAD`, staged changes, unstaged changes and untracked files (files your
+`.gitignore` excludes, such as `node_modules/` or `.venv/`, are not captured).
+It is built with a temporary index, so the tree itself is never modified; if
+the archive cannot be built, the tree is kept. If the tree is entered or its
+staged changes move (`git add`, `git apply --cached`) while the archive is
+being built, the archive is saved and the tree is kept too. File bytes are stored and
+restored exactly: no `.gitattributes`, `info/attributes`, `core.attributesFile`
+line-ending or filter rule is applied. Untracked files larger than
+`worktrees.archive_max_file_mb` are left out and listed in the archive, and the
+tree is then kept: exit **Archive** and the subagent result say so. A
+branch that exists on a remote (an open PR) is kept; otherwise the archive
+holds its commits and the local branch is deleted.
+
+```bash
+hermes worktree list                 # trees plus archives (name, age, branch, reason)
+hermes worktree prune --dry-run      # every archive/remove/skip decision and why; changes nothing
+hermes worktree restore lane-x       # recreate .worktrees/lane-x with its branch, staged and untracked files
+hermes worktree restore lane-x --path ../lane-x-review
+```
+
+Restore puts the branch back when it is missing or still points at the
+archived `HEAD`; otherwise the tree comes back detached at that commit.
+Archives older than `worktrees.archive_retention_days` are deleted by the
+sweep.
+
+```yaml
+worktrees:
+  archive_dirty: true          # false = never remove dirty/unpushed trees (the old behaviour)
+  archive_max_file_mb: 50      # untracked files above this are not archived; their tree is kept
+  archive_retention_days: 30   # 0 keeps archives forever
+  max_total_gb: 0              # optional budget for idle trees; oldest are archived + removed first
+```
+
+There is no limit on how many trees may exist: hundreds of parallel subagents
+each keep their tree for as long as they work in it. `max_total_gb` only ever
+evicts idle trees past their tier.
+
+Subagent worktrees (`delegation.worktree_isolation: true`) follow the same
+rule when the child finishes: a clean tree is removed, and a tree with commits
+or edits is archived and removed with its branch kept for the parent to merge.
 
 ## Putting It All Together
 
@@ -52390,7 +52492,7 @@ Type `/` in the CLI to open the autocomplete menu. Built-in commands are case-in
 | `/bg <prompt>` | Run a prompt in a separate background session. The agent processes your prompt independently — your current session stays free for other work. Results appear as a panel when the task finishes. See [CLI Background Sessions](../user-guide/cli.md#background-sessions). |
 | `/btw <question>` | Ask a quick side question **about the current conversation** without interrupting it. A one-shot auxiliary LLM call answers from a read-only snapshot of the transcript — the live session's history and prompt cache are untouched, and the current turn keeps running. For independent work with a fresh context, use `/bg`. |
 | `/branch [--here] [name]` (alias: `/fork`) | Branch the current session into an independent copy (explore a different path). On Discord, Telegram, Slack and Matrix the branch opens in a **new sibling thread** and the current chat stays on the original session; `--here` switches the current chat onto the branch instead (the pre-#66023 behaviour). The CLI and platforms without threads always branch in place. Classic CLI: refused mid-turn like `/handoff` — wait for the current response to finish, then retry. |
-| `/worktree [new [name]\|list]` | **CLI only.** Inspect or create isolated git worktrees mid-session (inspired by Copilot CLI's `/worktree new`). Bare `/worktree` shows the active worktree; `/worktree list` lists the repo's worktrees; `/worktree new [name]` creates a worktree under `.worktrees/` (branched from the freshly-fetched remote tip, honoring `worktree_sync`) and retargets the session's terminal and file tools into it. Named trees use your name (`hermes/<name>` branch); unnamed ones get a random `hermes-<id>`. On exit the tree is kept only if it has unpushed commits — same lifecycle as `hermes -w`. See [Git Worktrees](../user-guide/git-worktrees.md). |
+| `/worktree [new [name]\|list]` | **CLI only.** Inspect or create isolated git worktrees mid-session (inspired by Copilot CLI's `/worktree new`). Bare `/worktree` shows the active worktree; `/worktree list` lists the repo's worktrees; `/worktree new [name]` creates a worktree under `.worktrees/` (branched from the freshly-fetched remote tip, honoring `worktree_sync`) and retargets the session's terminal and file tools into it. Named trees use your name (`hermes/<name>` branch); unnamed ones get a random `hermes-<id>`. On exit a dirty or unpushed tree triggers the keep / archive / remove question — same lifecycle as `hermes -w`. See [Git Worktrees](../user-guide/git-worktrees.md). |
 | `/handoff <platform>` | **CLI only.** Hand the current session off to a messaging platform (Telegram, Discord, Slack, WhatsApp, Signal, Matrix). The gateway picks it up immediately, creates a fresh thread on platforms that support threads (Telegram topics, Discord text-channel threads, Slack and Matrix message-anchored threads), re-binds the destination to your CLI session_id so the full role-aware transcript replays, and forges a synthetic user turn so the agent confirms it's working in the new place. Your CLI exits cleanly on success with a `/resume` hint; resume locally any time with `/resume <title>`. Refused mid-turn. Requires the gateway to be running and a home channel configured for the target platform (`/sethome` from the destination chat). See [Cross-Platform Handoff](../user-guide/sessions.md#cross-platform-handoff). |
 | `/journey [list\|delete <id>\|edit <id>]` (aliases: `/learning`, `/memory-graph`) | Open the learning journey timeline of learned skills + memories. Works in the classic CLI, as a TUI overlay, and in the desktop app (Star Map panel). Not available on messaging platforms. See [Learning Journey](../user-guide/features/memory.md#learning-journey-journey). |
 
