@@ -25850,7 +25850,7 @@ Prices are FAL's pricing at time of writing; check [fal.ai](https://fal.ai/) for
 :::tip Nous Subscribers
 If you have a paid [Nous Portal](https://portal.nousresearch.com) subscription, you can use image generation through the **[Tool Gateway](tool-gateway.md)** without a FAL API key. Your model selection persists across both paths. New installs can run `hermes setup --portal` to log in and turn on every gateway tool at once; existing installs can pick **Nous Subscription** as the image-gen backend via `hermes tools`.
 
-The **Nous Subscription** row is the only managed row. Its model picker spans every gateway the subscription runs — the FAL catalog above, native **Krea 2** (`krea-2-medium`, `krea-2-large`, `krea-2-medium-turbo`) and any Nous Portal image models — each model listed once, and the model you pick decides which gateway serves the request. Free tool-pool accounts see the FAL models only; Krea and Portal models are paid-subscription. With a Krea 2 model selected, `image_generate` also offers Krea's `creativity` setting and its `intensity`, `complexity` and `movement` sliders (-100 to 100).
+The **Nous Subscription** row is the only managed row. Its model picker spans every gateway the subscription runs — the FAL catalog above, native **Krea 3** (`krea-3`) and **Krea 2** (`krea-2-medium`, `krea-2-large`, `krea-2-medium-turbo`) and any Nous Portal image models — each model listed once, and the model you pick decides which gateway serves the request. Free tool-pool accounts see the FAL models only; Krea and Portal models are paid-subscription. With Krea 3 selected, `image_url` is a picture to edit (up to 4 reference images in total; an edit keeps the picture's own framing) and `image_generate` offers `thinking` (`fast` or `high`) and `resolution` (`1K` or `2K`). With a Krea 2 model selected, it offers Krea's `creativity` setting and its `intensity`, `complexity` and `movement` sliders (-100 to 100) instead.
 
 If the managed gateway returns `HTTP 4xx` for a specific model, that model isn't yet proxied on the portal side — the agent will tell you so, with remediation steps (switch to FAL.ai in `hermes tools` with your own `FAL_KEY` for direct access, or pick a different model).
 :::
@@ -26108,6 +26108,7 @@ Two inputs drive the edit:
 | **FAL.ai** (edit-capable models below) | ✓ | up to 16 (per model) | routes to the model's `/edit` endpoint |
 | **OpenAI** (GPT Image 2 / 2.5 Flare / Sunburst) | ✓ | up to 16 | `images.edit()` |
 | **xAI** (Grok Imagine) | ✓ | 1 | `/v1/images/edits` (`grok-imagine-image-quality`) |
+| **Krea** (`Krea 3`) | ✓ | up to 4 | instruction-following edit of the pictures given (`image_urls`); local files are embedded in the request, up to 3 MB in total |
 | **Krea** (`Krea 2`) | ✓ | up to 10 | reference-guided generation (`image_style_references`); local files are embedded in the request, up to 3 MB in total |
 | **OpenAI (Codex auth)** | ✓ | up to 16 | `POST /backend-api/codex/images/edits` with inline `images[]` data URLs (remote URLs are fetched client-side) |
 | **OpenRouter** (Image API models) | ✓ | up to 14–16 (per model) | `input_references` on `POST /images/generations`; chat-served models use `image_url` content parts (up to 3) |
@@ -53782,7 +53783,7 @@ For native Anthropic auth, Hermes prefers Claude Code's own credential files whe
 | `AGENT_BROWSER_ARGS` | Extra Chromium launch flags (comma- or newline-separated). Hermes auto-injects `--no-sandbox,--disable-dev-shm-usage` when running as root or on AppArmor-restricted unprivileged user namespaces (Ubuntu 23.10+, DGX Spark, many container images); set this manually only to override or add other flags. |
 | `AGENT_BROWSER_ENGINE` | Local browser engine: `auto` (default — Chromium-family via CDP), `lightpanda` (Browser Use mode spawns `lightpanda serve`; the built-in tools pass `--engine lightpanda` to agent-browser), or `chrome`. Same as `browser.engine` in config.yaml. |
 | `FAL_KEY` | Image generation ([fal.ai](https://fal.ai/)) |
-| `KREA_API_KEY` | Krea API key for Krea 2 image generation ([krea.ai](https://krea.ai/)) |
+| `KREA_API_KEY` | Krea API key for Krea 3 and Krea 2 image generation ([krea.ai](https://krea.ai/)) |
 | `GROQ_API_KEY` | Groq Whisper STT API key ([groq.com](https://groq.com/)) |
 | `ELEVENLABS_API_KEY` | ElevenLabs premium TTS voices ([elevenlabs.io](https://elevenlabs.io/)) |
 | `PORCUPINE_ACCESS_KEY` | Picovoice Porcupine wake-word engine ([console.picovoice.ai](https://console.picovoice.ai/)) — required when Porcupine is selected; openWakeWord and sherpa need no key |
@@ -63233,7 +63234,7 @@ class MyBackendImageGenProvider(ImageGenProvider):
         # text-only: {"modalities": ["text"], "max_reference_images": 0}.
         # Optional keys: "supports_upscale" (bool) adds an `upscale` param, and
         # "creative_controls" lists the controls you honor from `creativity`,
-        # `intensity`, `complexity`, `movement`. Only declared controls appear
+        # `intensity`, `complexity`, `movement`, `thinking`, `resolution`. Only declared controls appear
         # in the schema and reach generate() as kwargs. "source_image_role": "style"
         # tells the model that image inputs set the look and are not edited.
         return {"modalities": ["text", "image"], "max_reference_images": 4}
@@ -72898,11 +72899,19 @@ at `releases/tag/<attempt ref>/index.html` is not an update feed, and an
 attempt installed from it is not upgrade-safe: every attempt of a version has
 the same package version, so the published build never replaces it. The Docker
 image is pushed early under the attempt ref; the `stable` and `latest` aliases
-move with the feed in the publication pass. The Store submission is held: the
-green run submits with auto-publish off. The submission API cannot release a
-held submission, so the publication pass only checks it and prints a GitHub
-warning; once certification passes, click Publish now for that submission in
-Partner Center. A failed submission leaves the publication run red. Stable channel
+move with the feed in the publication pass. The Store build follows the same
+rule: the green run commits it held (auto-publish off), so certification runs
+before the gate, and the publication pass switches that submission to
+auto-publish. If the submission API refuses the switch, the pass warns: select
+Publish now in Partner Center once the build is certified. A submission that
+does not carry the release's Store bundle is left alone while the pass checks
+older published releases for its owner. Store reconciliation runs even when
+the feeds and aliases are already current, so interrupted publication can be
+retried without rewinding them. A held submission records its claim in the
+certification notes: a successor can replace it only after that claim has a
+matching remote abandon marker. Legacy submissions without an owner record
+need manual cleanup in Partner Center. A failed submission becomes a warning;
+the release still publishes. Stable channel
 records carry an optional `archiveRef` naming the attempt ref; `releaseTag`
 stays `vX.Y.Z` and the protected prefix falls back to it when `archiveRef` is
 absent.
@@ -73494,6 +73503,8 @@ A registered backend automatically participates in every core surface:
 | System-prompt environment hints | `is_remote`, `env_description` |
 | Dangerous-command approval skipping | `skip_container_guards` |
 | Container path/cwd handling | `is_container` |
+| Where commands start when `terminal.cwd` is unset or unusable | `default_cwd` |
+| Bot Desktop, `computer_use` and the browser following the terminal | `supports_streams` + the environment's `exec_prefix()` |
 | Synced cache-file path translation | `cache_path_base` |
 | Secret stripping from spawned subprocesses | `strip_env_keys` |
 | Per-session sandbox isolation (`container_persistent: false`) | `session_isolated_when_nonpersistent` |
@@ -73600,6 +73611,76 @@ interface as `tools.environments.base.BaseEnvironment`:
 
 Subclassing `BaseEnvironment` is recommended (you inherit the shared file-sync
 and background-process plumbing) but not required.
+
+## Starting directory
+
+Without `default_cwd`, a plugin backend starts in `/root`, and a host-looking
+`terminal.cwd` is replaced by `/root` when `is_container` is set. Return an
+absolute in-sandbox path to start somewhere else:
+
+```python
+    @property
+    def default_cwd(self):
+        return "/home/acme"
+```
+
+When the home directory is only known once the sandbox is up, return `"~"`
+instead. Hermes then passes `cwd="~"` to `create_environment()` (it never
+expands it on the host), and your environment sets `self.cwd` to the absolute
+home it resolved:
+
+```python
+class AcmeBoxEnvironment(BaseEnvironment):
+    def __init__(self, *, cwd, timeout, sandbox):
+        if cwd == "~":
+            cwd = sandbox.home()  # e.g. "/home/acme"
+        super().__init__(cwd=cwd, timeout=timeout)
+```
+
+Hermes keeps `~` as the backend default, so every new sandbox resolves its
+own home, and records the path each environment resolved on that environment.
+Commands can also arrive with `cwd="~"`; `BaseEnvironment` already `cd`s
+there correctly. A `cd` anywhere under that home is kept for later commands
+and used as the base for relative paths in the file tools. Without this, a
+sandbox path like `/home/acme/project` would be discarded as if it were a
+host path.
+
+`default_cwd` is read on every command, so keep it cheap (no network calls).
+Relative paths are ignored, because Hermes would anchor them on the host.
+
+## Bot Desktop and `computer_use`
+
+The screen, `computer_use` and the browser follow the terminal into Docker, SSH
+and Singularity sandboxes by spawning long-lived processes there with stdin and
+stdout left open. A plugin backend can opt in the same way:
+
+1. Set `supports_streams = True` on the provider. `bot_desktop.placement: auto`
+   then places the screen inside your backend instead of refusing.
+2. Give the environment an `exec_prefix(*, user=None, interactive=True)` method.
+   It returns a local argv that runs whatever follows it inside the sandbox,
+   with stdin and stdout open (the shape of `docker exec -i <container>`), or
+   `None` when it can't right now. Hermes appends `bash -c <script>` as
+   separate words, so the client must pass them through unchanged and the
+   sandbox needs `bash`. `user` names the account to run as; ignore it if your
+   backend can't switch users. Return a list, not a single command string.
+
+```python
+class AcmeBoxEnvironment:
+    def exec_prefix(self, *, user=None, interactive=True):
+        return ["acmebox", "exec", "--stdin", self.sandbox_id, "--"]
+```
+
+The sandbox image still needs the desktop stack (Xvnc, Xfce, Chromium,
+`cua-driver`); `nousresearch/hermes-sandbox:desktop` has it. Bot Desktop and
+the browser keep their scratch files under the environment's
+`get_temp_dir()`. An environment that doesn't subclass `BaseEnvironment` and
+has no such method gets the same default `BaseEnvironment` uses.
+
+Both `exec_prefix()` and the `~` home resolution read the environment object
+itself, so they work only for plugins loaded in-process. Under
+`plugins.isolation: host` the environment reaches Hermes as an opaque
+placeholder: Bot Desktop refuses a `supports_streams` backend with a message
+naming the setting, and `default_cwd = "~"` stays a literal `~`.
 
 ## Session isolation semantics
 
@@ -84016,7 +84097,8 @@ same place. `bot_desktop.placement` decides where:
 |---|---|---|
 | `local` | gateway host | The terminal, the screen, the browser and `computer_use` all share the machine running the gateway. |
 | `docker`, `ssh`, `singularity` | **inside the sandbox** | Xvnc + Xfce, Chromium and cua-driver run in the container / on the SSH host, spawned through the same `docker exec` / `ssh` channel the terminal uses. The pane streams the sandbox's screen; nothing of the host desktop is reachable. |
-| `modal`, `daytona`, `vercel_sandbox` | **refused** | These backends cannot host a display yet. Rather than quietly running the screen on the host beside the sandbox you chose for the agent, `Start` explains and points at `placement: gateway`. |
+| A plugin backend that declares `supports_streams` | **inside the sandbox** | Same as above, through the plugin's own exec channel. |
+| `modal`, `daytona`, `vercel_sandbox`, other plugin backends | **refused** | These backends cannot host a display yet. Rather than quietly running the screen on the host beside the sandbox you chose for the agent, `Start` explains and points at `placement: gateway`. |
 
 `placement: gateway` forces the pre-existing behaviour (screen on the gateway
 host even with a sandboxed terminal) as an explicit opt-in; `placement:
@@ -84765,7 +84847,8 @@ no-foreground invariant, click-dispatch internals — see
 `computer_use` acts on the same machine the bot's screen lives on, never on
 the machine running Hermes Desktop. On a gateway with `terminal.backend:
 local` that is the gateway host. With a sandboxed terminal (`docker`, `ssh`,
-`singularity`) the driver runs **inside the sandbox** on the sandbox's own
+`singularity`, or a plugin backend that declares `supports_streams`) the
+driver runs **inside the sandbox** on the sandbox's own
 display, so it can only ever touch what the terminal can; the sandbox image
 must carry `cua-driver` (`nousresearch/hermes-sandbox:desktop` does). Modal,
 Daytona and Vercel sandboxes cannot host a display yet, so with those
@@ -89359,7 +89442,7 @@ The Tool Gateway is included with every paid [Nous Portal](https://portal.nousre
 | | Tool | What you get |
 |---|---|---|
 | 🔍 | **Web search & extract** | Agent-grade web search and full-page extraction, managed by Nous. No rate limits to worry about — the gateway handles scaling. |
-| 🎨 | **Image generation** | One **Nous Subscription** row spanning the FAL catalog, the native Krea 2 models, and Nous Portal image models: **FLUX 2**, **GPT Image**, **Nano Banana**, **Seedream**, **Ideogram**, **Recraft**, **Qwen**, **Krea 2**, and more. Pick the model once in `hermes tools`, which shows the live list. |
+| 🎨 | **Image generation** | One **Nous Subscription** row spanning the FAL catalog, the native Krea models, and Nous Portal image models: **Krea 3**, **FLUX 2**, **GPT Image**, **Nano Banana**, **Seedream**, **Ideogram**, **Recraft**, **Qwen**, **Krea 2**, and more. Pick the model once in `hermes tools`, which shows the live list. |
 | 🔊 | **Text-to-speech** | OpenAI TTS voices wired into the `text_to_speech` tool. Drop voice notes into Telegram, generate audio for pipelines, narrate anything. |
 | 🌐 | **Cloud browser automation** | Headless Chromium sessions via Browser Use. `browser_navigate`, `browser_click`, `browser_type`, `browser_vision` — all the agent-driving primitives, no Browserbase account required. |
 
@@ -89450,11 +89533,11 @@ Select the tool, pick **Nous Subscription** as the provider (or any direct provi
 
 ## Using individual image models
 
-The model is chosen once, in `hermes tools` → Image Generation, and stored in `config.yaml` as `image_gen.model`. Every `image_generate` call uses that stored model — the tool has no model parameter, so there is no per-call override. Leave it unset and a paid subscription gets Krea 2 Medium Turbo; the free tool pool gets FLUX 2 Klein 9B.
+The model is chosen once, in `hermes tools` → Image Generation, and stored in `config.yaml` as `image_gen.model`. Every `image_generate` call uses that stored model — the tool has no model parameter, so there is no per-call override. Leave it unset and a paid subscription gets Krea 3; the free tool pool gets FLUX 2 Klein 9B.
 
-The **Nous Subscription** row has one model picker that lists every model once. The stored id decides which gateway serves the request: a native Krea id (`krea-2-medium`, `krea-2-large`, `krea-2-medium-turbo`) goes to the Krea gateway, a FAL catalog id goes to FAL, and any other id goes to Nous Portal. The selection is still just `image_gen.provider: nous` plus the model id.
+The **Nous Subscription** row has one model picker that lists every model once. The stored id decides which gateway serves the request: a native Krea id (`krea-3`, `krea-2-medium`, `krea-2-large`, `krea-2-medium-turbo`) goes to the Krea gateway, a FAL catalog id goes to FAL, and any other id goes to Nous Portal. The selection is still just `image_gen.provider: nous` plus the model id.
 
-**Krea 2** (Medium, Large, Medium Turbo — up to 10 style-reference images, optional Enhance upscale) and the Nous Portal image models sit in that same picker rather than behind rows of their own. They need a paid subscription — the free tool pool funds the FAL models only. The Krea-via-FAL ids (`fal-ai/krea/v2/...`) stay on the direct FAL.ai row. If the Krea gateway refuses a request before starting a job (unreachable, or 429 after the gateway's own retries), Hermes reruns it on the FAL default model and the result says so in `fallback_from`; set `image_gen.krea.fallback_to_fal: false` to turn that off. Requests with source images never fall back.
+**Krea 3** (generates and edits existing images — up to 4 reference images, `thinking` and `resolution` controls), **Krea 2** (Medium, Large, Medium Turbo — up to 10 style-reference images, optional Enhance upscale) and the Nous Portal image models sit in that same picker rather than behind rows of their own. They need a paid subscription — the free tool pool funds the FAL models only. The Krea-via-FAL ids (`fal-ai/krea/v2/...`) stay on the direct FAL.ai row. If the Krea gateway refuses a request before starting a job (unreachable, or 429 after the gateway's own retries), Hermes reruns it on the FAL default model and the result says so in `fallback_from`; set `image_gen.krea.fallback_to_fal: false` to turn that off. Requests with source images never fall back.
 
 Model ids, speeds, and prices live on the [Image Generation](./image-generation.md#supported-models) page. The set evolves — `hermes tools` → Image Generation shows the current live list.
 
