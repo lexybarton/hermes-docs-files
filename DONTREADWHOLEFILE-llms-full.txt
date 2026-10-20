@@ -19257,7 +19257,7 @@ A worker that is blocked on `t_parent` and creates a support card for the missin
 
 **Use Kanban when** work crosses agent boundaries, needs to survive restarts, might need human input, might be picked up by a different role, or needs to be discoverable after the fact.
 
-They coexist, but not inside one run: a kanban task executes in an isolated managed worker under the profile's gateway, and that worker is not offered `delegate_task` (a delegated child would need its own owner-registered execution, which the single-turn worker cannot reserve). Split work that needs fan-out into child cards instead (`kanban_create` with `parents`).
+They also coexist inside one run. A kanban task executes in an isolated managed worker under the profile's gateway, and its `delegate_task` children are reserved by that gateway under the worker's execution: each child gets its own session (listed as a subagent of the card's session), counts against `delegation.max_concurrent_children` and `delegation.max_spawn_depth`, returns its result inside the card's turn, and ends with the worker. If the gateway goes down mid-child, the child is retired, never resumed. Work that must outlive the gateway, or needs its own reviewer, still belongs in child cards (`kanban_create` with `parents`).
 
 ## Core concepts
 
@@ -52721,7 +52721,7 @@ Type `/` in the CLI to open the autocomplete menu. Built-in commands are case-in
 | `/compress [here [N] \| focus topic]` | Manually compress conversation context (flush memories + summarize). `/compress here [N]` summarizes everything except the most recent N exchanges (default 2), kept verbatim — pick your own compression boundary. A focus topic narrows what a full summary preserves. |
 | `/rollback` | List or restore filesystem checkpoints (usage: /rollback [number]) |
 | `/diff [staged\|all\|session] [--stat] [path...]` | Show git changes in the working directory. Default: unstaged changes plus untracked files. `staged` shows what's staged for commit, `all` everything since HEAD, and `session` the cumulative diff of everything Hermes changed here (from the earliest retained checkpoint baseline — requires checkpoints to be enabled; complements `/rollback diff <N>`). `--stat` prints just the changed-file summary; path arguments restrict the diff. |
-| `/snapshot [create\|restore <id>\|prune]` (alias: `/snap`) | Create or restore state snapshots of Hermes config/state. `create [label]` saves a snapshot, `restore <id>` reverts to it, `prune [N]` removes old snapshots, or list all with no args. Database restores write through SQLite's backup API so live processes (gateway, dashboard) see the restored data safely; if that path fails while another process still holds the database open, the restore refuses instead of risking corruption — stop the holder and retry. |
+| `/snapshot [create\|restore <id>\|prune]` (alias: `/snap`) | Create or restore state snapshots of Hermes config/state. `create [label]` saves a snapshot, `restore <id>` reverts to it, `prune [N]` removes old snapshots, or list all with no args. In classic `hermes chat`, restore closes the local readers and drains the local gateway before restoring offline, then reconnects with the restored history (or creates a new session if the snapshot predates it). A multiplexed secondary profile is stopped and re-served without restarting the other profiles; restoring the launch profile drains the whole gateway. Database restoration retains its exclusive-maintenance gate and SQLite backup safety checks: a holder that cannot be stopped still prevents restoration. |
 | `/stop` | Kill all running background processes |
 | `/queue <prompt>` (alias: `/q`) | Queue a prompt for the next turn (doesn't interrupt the current agent response). In the CLI, `/queue` with no arguments lists the pending queue, and `/queue list`, `/queue edit N <new prompt>`, `/queue rm N`, `/queue move A B`, and `/queue clear` inspect and manage queued prompts before they are sent. Prompts that begin with a management word can be force-queued with `/queue add <prompt>`. On the gateway's session, prompts queued mid-run live in the gateway's shared queue for the session: `list`/`rm`/`edit`/`clear` act on every prompt queued there (other windows' too), and `move` is refused for prompts the gateway holds, because it runs them in order. |
 | `/steer <prompt>` | Inject a mid-run note that arrives at the agent **after the next tool call** — no interrupt, no new user turn. The text is appended to the last tool result's content once the current tool completes, giving the agent new context without breaking the current tool-calling loop. Use this to nudge direction mid-task (e.g. "focus on the auth module" while the agent is running tests). |
@@ -60448,6 +60448,35 @@ session lifecycle, tool activity). Listeners are isolated — a throw in your
 listener can't affect app dispatch. Every `host` door is async-safe: a sync throw
 from an internal helper (e.g. no desktop bridge in a plain browser) becomes a
 rejection your `.catch()` sees, never an error-boundary crash.
+
+#### Live tool progress — `tool.progress` {#tool-progress-event}
+
+While a tool call runs, an MCP server that sends `notifications/progress` (the
+MCP spec's progress channel; Hermes opts in by sending `_meta.progressToken` on
+every `tools/call`) reaches the renderer as a `tool.progress` event. The native
+tool row shows it as `42% · <message>` next to its timer; a plugin can render
+its own view:
+
+```javascript
+ctx.onEvent('tool.progress', ({ session_id, payload }) => {
+  // payload: { tool_id, name, progress, total, percent, message }
+  if (payload.name.startsWith('mcp__meshy__')) showRefineProgress(payload.tool_id, payload.percent, payload.message)
+})
+ctx.onEvent('tool.complete', ({ payload }) => clearRefineProgress(payload.tool_id))
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `tool_id` | `string` | The call id; the same `tool_id` as the call's `tool.start` / `tool.complete` |
+| `name` | `string` | Registered tool name (`mcp__<server>__<tool>`) |
+| `progress` | `number` | The server's raw progress value |
+| `total` | `number \| null` | The server's total, when it sent one |
+| `percent` | `number \| null` | `0`–`100` (rounded, clamped) when `total` is set, else `null` |
+| `message` | `string \| null` | The server's progress message |
+
+Events are throttled to at most one per 500 ms per call; the first update and
+the one that reaches `total` always arrive. They are never stored in the
+transcript, so a reopened session shows only the finished row.
 
 `ctx.os` is the curated OS door — every way a plugin reaches outside the app
 window, in one namespace attributed to your plugin. `ctx.os.notify` posts a
@@ -86936,6 +86965,7 @@ So lane authors don't have to reimplement these:
 - **Run-level retry** — when a task is retried (post-block, post-crash, post-reclaim), the worker can use the `expected_run_id` parameter on terminating tools to fail fast if its own run was already superseded.
 - **Per-task max runtime** — `task.max_runtime_seconds` hard-caps wall-clock time per run, regardless of PID liveness. Catches genuinely-deadlocked workers that the live-PID extension would otherwise keep running.
 - **Stranded-task detection** — a ready task whose assignee never produces a claim within `kanban.stranded_threshold_seconds` (default 30 min) shows up in `hermes kanban diagnostics` as a `stranded_in_ready` warning. Severity escalates to error at 2x the threshold and critical at 6x. Catches typo'd assignees, deleted profiles, and down external worker pools in one signal — identity-agnostic, no per-board allowlist to curate.
+- **Dead attempt behind an unresolved owner receipt** — a worker killed by a restart can leave an `owner_admitted` receipt the dispatcher cannot resolve, and reclaims used to be refused on that ground alone, forever: the card stayed `running`, held its profile's `kanban.max_in_progress_per_profile` slot, and the alarms named the cards queued behind it rather than the cause. The refusal now lapses as soon as nothing can be executing the attempt — the owner's process is gone or recycled, no heartbeat inside `DEFAULT_CLAIM_HEARTBEAT_MAX_STALE_SECONDS`, and every pid the run recorded (`worker_pid`, `spawned`, `worker_bound`) is dead — including runs that never wrote a `worker_bound` event. Anything unprovable (a live pid, a missing fingerprint, no recorded pid, another host's lock) still holds the claim. A card that survives even that shows up in `hermes kanban diagnostics` as `stale_running`, escalated by age past `kanban.diagnostics.stale_running_grace_seconds` (default 1h).
 - **Running with open parents** — a `running` card whose direct parent is not `done`/`archived` (the parent reopened mid-run, or the link predates the running-child refusal) shows a `running_with_open_parents` warning: the dependency gate is not serialising the two runs and `kanban_complete` will be refused until the parent finishes. Read-only; suggests `hermes kanban unlink`.
 - **Legacy review dependency deadlock** — a parent sticky-blocked with `review-required:` while one or more direct children remain dependency-gated in `todo` produces an immediate `review_dependency_deadlock` error. The diagnostic is read-only: it suggests completing the finished phase or unlinking the incorrect edge but never removes a user block automatically.
 
@@ -92791,7 +92821,7 @@ Secure by default; every widening step is explicit:
 |---|---|---|
 | `A2A_PEER_TOKENS` | _(unset)_ | Per-peer credentials `name:token,…` (preferred) |
 | `A2A_BEARER_TOKEN` | _(unset)_ | Shared token; identity falls back to caller IP |
-| `A2A_HOST` | `127.0.0.1` | Bind host — only widens when a token is set |
+| `A2A_HOST` | `127.0.0.1` | Bind host — only widens when a token is set. IPv6 literals such as `::1` or `::` work too, bare or bracketed (`[::1]`) |
 | `A2A_PORT` | `9900` | Inbound port |
 | `A2A_AGENT_NAME` | hostname-derived | Name on the Agent Card |
 | `A2A_PUBLIC_URL` | _(unset)_ | Routable URL advertised on the card (reverse proxies / k8s) |
