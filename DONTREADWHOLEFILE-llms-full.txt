@@ -69436,8 +69436,9 @@ the gallery. There is no separate listing to maintain.
    in the Desktop renderer with the app's full authority (the loader isolates
    errors, not capabilities), so a listed one may only use the plugin SDK:
    no prototype patching of renderer or browser objects (`Storage.prototype.y =`,
-   `Object.defineProperty(...prototype`); a bundled library setting fields on
-   classes it declares itself (three.js and the like) is fine,
+   `Object.defineProperty(...prototype`), which reviewers check by hand (the
+   lint does not); a bundled library setting fields on classes it declares
+   itself (three.js and the like) is fine,
    no `eval`/`new Function`, no `import()` of anything but `@hermes/plugin-sdk`
    / `react` (app bundle chunks, blob or http URLs included), no script-tag
    injection, no reaching into the app's internal stores or its own markup
@@ -81872,7 +81873,9 @@ Every Python package Hermes itself depends on must be at least three days old
 when Hermes locks it (uv's `exclude-newer`, enforced by CI's lock check), so a
 freshly published, possibly compromised release cannot reach `uv.lock`. Users
 install from that lock, and installing or enabling a plugin never re-checks
-dates, so package mirrors that publish no upload times work. Set a mirror with `index-url` in `pip.conf`,
+dates, so package mirrors that publish no upload times work. The one exemption
+is CA trust stores (`certifi`): a release that distrusts a compromised CA is
+locked the day it ships, since waiting keeps the bad root trusted. Set a mirror with `index-url` in `pip.conf`,
 which Hermes passes to uv, or with `UV_INDEX_URL`.
 
 `hermes pm lock` is the one step that applies the check. Run against a mirror
@@ -88524,8 +88527,8 @@ The catalog is designed so you know exactly what you're installing:
   bridge, storage of other plugins). What protects you is the trust model
   above — a human read the exact pinned commit, and the install is that
   commit — plus two tripwires: admission's `desktop surface` lint refuses
-  the obvious moves outside the plugin SDK (patching built-in prototypes,
-  `eval`, importing anything other than `@hermes/plugin-sdk`/`react`,
+  the obvious moves outside the plugin SDK (`eval`, importing anything
+  other than `@hermes/plugin-sdk`/`react`,
   including remote scripts), and the app's loader refuses every non-SDK
   import again at load time. The lint reads a `<script` regex — a literal, or
   the pattern string of a `new RegExp(...)` passed straight to
