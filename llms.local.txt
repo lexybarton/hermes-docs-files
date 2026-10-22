@@ -33,7 +33,7 @@ Repo: https://github.com/NousResearch/hermes-agent
 - [Egress proxy](./user-guide/egress.md)
 - [Egress credential-injection proxy (iron-proxy)](./user-guide/egress/iron-proxy.md)
 - [Network Egress Isolation (Docker)](./user-guide/egress/network-isolation.md): Segment Docker networks so the agent sandbox can only reach allowlisted hosts
-- [Import from Other Agents](./user-guide/import-from-other-agents.md): One-command import of a Claude Code (~/.claude) or OpenAI Codex CLI (~/.codex) setup into Hermes — instructions, allowlists, MCP servers, skills, and memories.
+- [Import from Other Agents](./user-guide/import-from-other-agents.md): One-command import of an OpenClaw (~/.openclaw), Claude Code (~/.claude), OpenAI Codex CLI (~/.codex) or Cursor (~/.cursor) setup into Hermes — instructions, rules, allowlists, MCP servers, skills, and memories.
 - [Local Models](./user-guide/local-models.md): Run models entirely on your own machine — no account, no API key, nothing leaves your computer.
 - [Managed Scope](./user-guide/managed-scope.md): Administrator-pinned, user-immutable config and secrets via a system-level managed directory
 - [Connecting Desktop to Many Hermes Instances](./user-guide/multi-connection-desktop.md)
@@ -223,6 +223,7 @@ Repo: https://github.com/NousResearch/hermes-agent
 - [Background completion backlogs](./developer-guide/completion-backlog-delivery.md)
 - [Context Engine Plugins](./developer-guide/context-engine-plugin.md): How to build a context engine plugin that replaces the built-in ContextCompressor
 - [Cron Internals](./developer-guide/cron-internals.md): How Hermes stores, schedules, edits, pauses, skill-loads, and delivers cron jobs
+- [Delegation Provider Plugins](./developer-guide/delegation-provider-plugin.md)
 - [Desktop Plugin SDK (@hermes/plugin-sdk)](./developer-guide/desktop-plugin-sdk.md): Extend the native Hermes Desktop app — panes, pages, sidebar nav, status bar, palette commands, keybinds, themes, and a scoped backend namespace, with one import and no build step.
 - [Egress proxy internals](./developer-guide/egress-internals.md): How the iron-proxy egress firewall integrates with Hermes — module layout, lifecycle, security invariants, and extension points
 - [Classic gateway client](./developer-guide/gateway-classic-cli.md): How hermes chat / --cli attach to the gateway authority

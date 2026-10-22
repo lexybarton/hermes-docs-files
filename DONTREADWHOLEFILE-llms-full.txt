@@ -378,6 +378,8 @@ That logs you in, sets Nous as your provider, and turns on the Tool Gateway in o
 :::
 
 :::info Setup modes
+Coming from OpenClaw, Claude Code, Codex CLI or Cursor? When a fresh `hermes setup` finds one of them on your computer it first offers to import your setup (it installs the `agent-importers` plugin for that; see [Import from Other Agents](../user-guide/import-from-other-agents.md)).
+
 On a fresh install, `hermes setup` offers three modes:
 
 - **Quick Setup (Nous Portal)** — OAuth login, no API keys to manage; sets up a model plus the Tool Gateway tools, billed to your [Nous Portal subscription](../integrations/nous-portal.md). The recommended fast path.
@@ -6721,6 +6723,10 @@ Configure subagent behavior for the delegate tool:
 
 ```yaml
 delegation:
+  backend: default                          # Delegation strategy routing each task: "default" = the keys below, or a plugin backend (model_map, profile_routes, ...)
+  # backends:                               # Each plugin backend's own settings, keyed by its backend name
+  #   model_map:
+  #     options: [...]
   # model: "google/gemini-3-flash-preview"  # Override model (empty = inherit parent)
   # provider: "openrouter"                  # Override provider (empty = inherit parent)
   # base_url: "http://localhost:1234/v1"    # Direct OpenAI-compatible endpoint (takes precedence over provider)
@@ -6737,6 +6743,8 @@ delegation:
   orchestrator_enabled: true                # Global kill switch. When false, role="orchestrator" is ignored and every child is forced to leaf regardless of max_spawn_depth.
   oneshot_max_children: 2                   # Total subagents a one-shot run (hermes chat -q / --oneshot) may spawn; 0 = unlimited. Interactive and gateway sessions are never capped by this.
 ```
+
+**Delegation strategy (`backend`):** `delegation.backend` picks the strategy plugin that decides each subagent's route. `default` follows the keys below (or the parent's route when they are empty). Plugin strategies such as `model_map` (a named model per task) and `profile_routes` (a Hermes profile per task) read their settings from `delegation.backends.<backend name>`. A backend whose plugin is missing or disabled fails closed: `delegate_task` returns a tool error naming it and the fix (`/delegation default`, or `hermes config set delegation.backend default`) instead of running children on another route. A backend route without its own `fallback_providers` uses `delegation.fallback_providers`. See [Subagent Delegation → Delegation strategies](features/delegation.md#delegation-strategies-delegationbackend).
 
 **Subagent provider:model override:** By default, subagents inherit the parent agent's provider and model. Set `delegation.provider` and `delegation.model` to route subagents to a different provider:model pair — e.g., use a cheap/fast model for narrowly-scoped subtasks while your primary agent runs an expensive reasoning model.
 
@@ -8678,11 +8686,11 @@ Copies your current profile's `config.yaml`, `.env`, `SOUL.md`, skills, and the 
 
 #### Keep a clone's imported agent setups synced (`--sync-imports`)
 
-If the source profile has run [`hermes import-agent`](./import-from-other-agents.md), its `import-sync.json` records which external Claude Code / Codex trees it imported. `--clone` leaves that manifest behind, so the clone gets a one-off copy of those skills and memories and stops there. Add `--sync-imports` to carry the manifest over:
+If the source profile has run [`hermes import-agent`](./import-from-other-agents.md) (the `agent-importers` plugin), its `import-sync.json` records which external Claude Code / Codex / Cursor trees it imported. `--clone` leaves that manifest behind, so the clone gets a one-off copy of those skills and memories and stops there. Add `--sync-imports` to carry the manifest over:
 
 ```bash
 hermes profile create work --clone --sync-imports
-hermes -p work import-agent --sync        # pulls changes from the same ~/.claude / ~/.codex
+hermes -p work import-agent --sync        # pulls changes from the same ~/.claude / ~/.codex / ~/.cursor
 ```
 
 This is explicit, opt-in and one-directional, and it links the clone to the **external agent trees only** — never to the source profile. Both profiles stay independent islands: editing the source's `config.yaml`, `SOUL.md` or skills afterwards never reaches the clone. `--clone-all` copies the manifest as part of the full copy.
@@ -13088,7 +13096,7 @@ All the same commands work with `/skills`:
 /skills list
 ```
 
-Official optional skills still use identifiers like `official/security/1password` and `official/migration/openclaw-migration`.
+Official optional skills still use identifiers like `official/security/1password` and `official/mcp/fastmcp`.
 
 ---
 
@@ -15700,6 +15708,7 @@ Every `ctx.*` API below is available inside a plugin's `register(ctx)` function.
 | Distribute via pip | `[project.entry-points."hermes_agent.plugins"]` |
 | Register a gateway platform (Discord, Telegram, IRC, …) | `ctx.register_platform(name, label, adapter_factory, check_fn, ...)` — see [Adding Platform Adapters](../../developer-guide/adding-platform-adapters.md) |
 | Register an image-generation backend | `ctx.register_image_gen_provider(provider)` — see [Image Generation Provider Plugins](../../developer-guide/image-gen-provider-plugin.md) |
+| Register a delegation strategy (how each `delegate_task` subagent is routed) | `ctx.register_delegation_provider(provider)` — see [Delegation Provider Plugins](../../developer-guide/delegation-provider-plugin.md) |
 | Register a video-generation backend | `ctx.register_video_gen_provider(provider)` — see [Video Generation Provider Plugins](../../developer-guide/video-gen-provider-plugin.md) |
 | Register a context-compression engine | `ctx.register_context_engine(engine)` — see [Context Engine Plugins](../../developer-guide/context-engine-plugin.md) |
 | Register a terminal execution backend (cloud sandbox) | `ctx.register_terminal_environment_provider(provider)` — see [Terminal Environment Plugins](../../developer-guide/terminal-environment-plugin.md) |
@@ -15743,6 +15752,7 @@ Within each source, Hermes also recognizes sub-category directories that route p
 | `plugins/` (root) | General plugins — tools, hooks, slash commands, CLI commands, bundled skills | `PluginManager` (kind: `standalone` or `backend`) |
 | `plugins/platforms/<name>/` | Gateway channel adapters (`ctx.register_platform()`) | `PluginManager` (kind: `platform`, one level deeper) |
 | `plugins/image_gen/<name>/` | Image-generation backends (`ctx.register_image_gen_provider()`) | `PluginManager` (kind: `backend`, one level deeper) |
+| `plugins/delegation/<name>/` | Delegation strategies (`ctx.register_delegation_provider()`); `default` is today's routing | `PluginManager` (kind: `backend`, one level deeper) |
 | `plugins/memory/<name>/` | Memory providers (subclass `MemoryProvider`) | **Own loader** in `plugins/memory/__init__.py` (kind: `exclusive` — one active at a time) |
 | `plugins/context_engine/<name>/` | Context-compression engines (`ctx.register_context_engine()`) | **Own loader** in `plugins/context_engine/__init__.py` (one active at a time) |
 | `plugins/model-providers/<name>/` | LLM provider profiles (`register_provider(ProviderProfile(...))`) | **Own loader** in `providers/__init__.py` (lazily scanned on first `get_provider_profile()` call) |
@@ -15967,6 +15977,7 @@ The table above shows the four plugin categories, but within "General plugins" t
 | A **memory backend** (Honcho, Mem0, Supermemory, …) | Memory plugin — subclass `MemoryProvider` in `plugins/memory/<name>/` | [Memory Provider Plugins](../../developer-guide/memory-provider-plugin.md) |
 | A **context-compression strategy** | Context-engine plugin — `ctx.register_context_engine()` | [Context Engine Plugins](../../developer-guide/context-engine-plugin.md) |
 | An **image-generation backend** (DALL·E, SDXL, …) | Backend plugin — `ctx.register_image_gen_provider()` | [Image Generation Provider Plugins](../../developer-guide/image-gen-provider-plugin.md) |
+| A **delegation strategy** (a profile or named model per subagent) | Backend plugin — `ctx.register_delegation_provider()`, selected by `delegation.backend` | [Delegation Provider Plugins](../../developer-guide/delegation-provider-plugin.md) |
 | A **video-generation backend** (Veo, Kling, Pixverse, Grok-Imagine, Runway, …) | Backend plugin — `ctx.register_video_gen_provider()` | [Video Generation Provider Plugins](../../developer-guide/video-gen-provider-plugin.md) |
 | A **computer-use driver** (desktop control behind the `computer_use` tool) | Single-select provider plugin — `ctx.register_computer_use_provider()`, selected by `computer_use.backend` | [Computer-use backend plugins](../../developer-guide/plugins/index.md#computer-use-backend-plugins) |
 | A **TTS backend** (any CLI — Piper, VoxCPM, Kokoro, xtts, voice-cloning scripts, …) | Config-driven (recommended) — declare under `tts.providers.<name>` with `type: command` in `config.yaml`. OR Python backend plugin — `ctx.register_tts_provider()` for Python-SDK / streaming engines that need more than a shell template. | [TTS Setup](./tts.md#custom-command-providers) · [Python plugin guide](./tts.md#python-plugin-providers) |
@@ -18749,7 +18760,51 @@ delegation:
 
 Resolution order: `delegation.base_url` (direct endpoint) takes precedence, then `delegation.provider` (full credential bundle resolved via the runtime provider system), and when neither is set children inherit the parent's provider and credentials; `delegation.model` applies in all cases, and when it is empty children inherit the parent's model. Setting `delegation.provider` alongside `delegation.base_url` keeps the explicit endpoint but carries that provider's request overrides and max output tokens into the child. An explicit `delegation.request_overrides` dict is honored on every branch and merges over those runtime-derived values (see [Configuration](#configuration) below).
 
-Note that the pin is global: `delegate_task` has no per-task model parameter, so every child in a batch runs on the configured delegation model. For quality-sensitive subtasks that need a stronger model, either leave `delegation.model` unset for that session or hand the task to the [kanban board](kanban.md#per-task-model-override), which does support a per-task model override.
+Note that the pin is global: with the default strategy `delegate_task` has no per-task model parameter, so every child in a batch runs on the configured delegation model. For quality-sensitive subtasks that need a stronger model, either leave `delegation.model` unset for that session, use a delegation strategy plugin (below), or hand the task to the [kanban board](kanban.md#per-task-model-override), which does support a per-task model override.
+
+### Delegation strategies (`delegation.backend`)
+
+`delegation.backend` selects how each task becomes a subagent. `default` (the default) is everything above. Strategy plugins can let the model choose per task, from options you define:
+
+- a **profile per subagent** (`profile_routes`): each child runs as one of your Hermes profiles, with that profile's model, credentials, skills and persona;
+- a **named model map** (`model_map`): you list titled options (`fast`, `deep`, ...) with a description and a provider/model each, and the model picks one per task.
+
+Both come from the official `advanced-delegation` plugin, which also adds `hermes delegation config` (create, edit and delete model routes, pick profiles) and the `/delegation` slash command. While `model_map` or `profile_routes` is active, `delegation.model` / `delegation.provider` are inactive: the routes decide.
+
+Each strategy's settings live under `delegation.backends.<backend name>`:
+
+```yaml
+delegation:
+  backend: model_map
+  backends:
+    model_map:
+      options:
+        - name: fast
+          description: Cheap and quick; lookups, summaries, simple edits.
+          provider: openrouter
+          model: google/gemini-3-flash-preview
+        - name: deep
+          description: Slow and careful; hard debugging and design work.
+          provider: anthropic
+          model: claude-opus-5
+          reasoning_effort: high
+          service_tier: fast            # optional; refused at spawn if this route has no fast tier
+      default: fast                     # optional: option for tasks that set none
+    profile_routes:                     # read when backend: profile_routes
+      profiles:
+        - name: coder
+          description: Writes and refactors code; runs tests.
+```
+
+The model only ever sees the names and descriptions you configured, never raw provider, model or key fields. Each result of a backend-routed task carries `route`: the backend, the option or profile name, and the provider, model, reasoning effort and speed tier the child actually ran on (`fallback_activated: true` when a fallback provider took over). Writing your own: [Delegation Provider Plugins](../../developer-guide/delegation-provider-plugin.md).
+
+**Failures are explicit, never a silent switch.** If the selected backend is missing (plugin not installed or disabled) or reports it cannot run, `delegate_task` returns a tool error naming the backend and the fix, and no subagent starts; it never quietly runs the children on the default route. Within a batch, a task its backend cannot route (an unknown option, a parameter the selected backend does not take, a profile that does not exist, a `service_tier` the route does not offer, an unknown `reasoning_effort`, missing credentials) is refused alone: its result entry has `status: "error"`, the reason, and `route.refused: true`, while the other tasks run. A model route without its own `fallback_providers` uses `delegation.fallback_providers`; `fallback_providers: []` on the route disables fallback for it. A profile route uses that profile's own fallback chain.
+
+**Switching back.** `/delegation default` (from the `advanced-delegation` plugin) switches the current session to the default backend, and `/delegation <backend> --global` writes `delegation.backend` to `config.yaml`, following the `/model` convention. A session switch changes routing from the next `delegate_task` call and lasts until the conversation ends (`/new`, `/resume`, an automatic reset); the per-task parameters the model sees (option or profile names) follow `config.yaml` and change at the next session, because the tool list is part of the cached prompt. Until then, a task that sends the previous backend's parameter (an `option` after switching to `profile_routes`) is refused with a message naming the session's backend, the parameter and the fix (`/delegation <backend> --global` then `/new`, because `/new` starts on the saved backend, or `/delegation <saved backend>` back); it never runs on the new backend's default route. Without the plugin, `hermes config set delegation.backend default` restores the default.
+
+:::note Profile routes share credentials
+Listing a profile in `delegation.backends.profile_routes` lets this profile's subagents use that profile's credentials, credential pool, `SOUL.md` and terminal policy. Only list profiles whose keys and terminal access you are happy for this profile's agent to use.
+:::
 
 ## The `/review` Command
 
@@ -36786,7 +36841,7 @@ MCP lets Hermes Agent connect to external tool servers so the agent can use tool
 If you have ever wanted Hermes to use a tool that already exists somewhere else, MCP is usually the cleanest way to do it.
 
 :::tip Coming from Claude Code?
-The `mcpServers` block in your `~/.claude.json` maps to `mcp_servers` in Hermes' `config.yaml` — and `hermes import-agent claude-code` migrates it (along with skills and instructions) automatically. See [Import from Other Agents](../import-from-other-agents.md).
+The `mcpServers` block in your `~/.claude.json` maps to `mcp_servers` in Hermes' `config.yaml` — and `hermes import-agent claude-code` (from the `agent-importers` plugin) migrates it, along with skills and instructions. See [Import from Other Agents](../import-from-other-agents.md).
 :::
 
 ## What MCP gives you
@@ -38402,6 +38457,11 @@ structured through execution; it is not interpreted as a gateway slash command.
   terminal status and `response.cancelled` / `response.failed` events, including when
   diagnostic text is present. Chat Completions reports `finish_reason: "cancelled"`
   for interrupted turns and `"error"` for failures, not a successful `"stop"`.
+- A turn that runs out of its iteration budget (`agent.max_turns`) still answers with the
+  agent's wrap-up of what it found. Chat Completions delivers that text with
+  `finish_reason: "length"` and `hermes.error_code: "iteration_budget_exhausted"`;
+  Responses reports `status: "incomplete"`. Treat the content as a usable answer to a task
+  that stopped short, not as a cancellation.
 - Session-chat replies include `status`; their streams report matching terminal run
   events. An assistant finalization frame is not itself proof of successful execution.
 
@@ -50743,8 +50803,8 @@ The install also ships `hermes-agent`, a minimal runner that sends one query and
 | `hermes pets` | Browse, install, and select [petdex](../user-guide/features/pets.md) animated pets shown across the CLI, TUI, and desktop app. Subcommands: `list`, `install`, `select`, `show`, `off`, `scale`, `remove`, `doctor`. |
 | `hermes sessions` | Browse, export, prune, rename, and delete sessions. |
 | `hermes insights` | Show token/cost/activity analytics. |
-| `hermes claw` | OpenClaw migration helpers. |
-| `hermes import-agent` | Import a Claude Code (`~/.claude`) or Codex CLI (`~/.codex`) setup. |
+| `hermes claw` | OpenClaw migration (`migrate`, `cleanup`), from the [`agent-importers`](../user-guide/import-from-other-agents.md) plugin; `hermes claw migrate` is the same as `hermes import-agent openclaw`. |
+| `hermes import-agent` | Import an OpenClaw, Claude Code, Codex CLI or Cursor setup (from the [`agent-importers`](../user-guide/import-from-other-agents.md) plugin). |
 | `hermes dashboard` | Launch the web dashboard for managing config, API keys, and sessions. |
 | `hermes serve` | Start the Hermes backend server (headless; powers the desktop app and remote backends). |
 | `hermes desktop` (alias `gui`) | Build and launch the native Electron desktop app. |
@@ -51045,6 +51105,8 @@ hermes setup [model|tts|terminal|gateway|tools|agent] [--non-interactive] [--res
 
 **Returning user (already configured):** drops straight into the full reconfigure wizard — every prompt shows your current value as its default, press Enter to keep or type a new value. No menu.
 
+**Coming from another agent:** when the first run finds an OpenClaw, Claude Code, Codex CLI or Cursor setup (`~/.openclaw`, `~/.claude`, `~/.codex`, `~/.cursor`), it first asks **"Import your setup from …?"** (default yes). With more than one found, you then pick which from a checklist. Setup installs the [`agent-importers`](../user-guide/import-from-other-agents.md) plugin from the catalog, unless you already have it, and runs its import for each pick, which shows a preview and asks before changing anything (OpenClaw's allowlisted API keys and bot tokens are included, as the old built-in step did). Nothing found, a no, `--non-interactive` or a setup started by the dashboard: no question and nothing installed. On an already configured install, run `hermes import-agent` instead.
+
 Jump into one section instead of the full wizard:
 
 | Section | Description |
@@ -51253,7 +51315,7 @@ Common flags for migration subcommands:
 | `--apply` | Rewrite `config.yaml` in-place (default: dry-run, no writes). |
 | `--no-backup` | Skip the timestamped backup of `config.yaml` when applying. |
 
-> Not to be confused with `hermes claw migrate` (one-shot import of OpenClaw configuration into Hermes) — `hermes migrate` is the top-level config-rewrite command.
+> Not to be confused with `hermes import-agent openclaw` (one-shot import of OpenClaw configuration into Hermes) — `hermes migrate` is the top-level config-rewrite command.
 
 
 ## `hermes codex-runtime`
@@ -52072,7 +52134,7 @@ hermes skills search react --source skills-sh
 hermes skills search https://mintlify.com/docs --source well-known
 hermes skills inspect official/security/1password
 hermes skills inspect skills-sh/vercel-labs/json-render/json-render-react
-hermes skills install official/migration/openclaw-migration
+hermes skills install official/mcp/fastmcp
 hermes skills install skills-sh/anthropics/skills/pdf --force
 hermes skills install https://sharethis.chat/SKILL.md                     # Direct URL (+ referenced support files)
 hermes skills install https://example.com/SKILL.md --name my-skill        # Override name when frontmatter has none
@@ -52445,10 +52507,22 @@ hermes insights [--days N] [--source platform]
 | `--days <n>` | Analyze the last `n` days (default: 30). |
 | `--source <platform>` | Filter by source such as `cli`, `telegram`, or `discord`. |
 
-## `hermes claw`
+## `hermes import-agent`
 
 ```bash
-hermes claw migrate [options]
+hermes plugins install agent-importers   # once; the command comes from this official plugin
+hermes import-agent [openclaw|claude-code|codex|cursor] [options]
+```
+
+Import an **OpenClaw** (`~/.openclaw`), **Claude Code** (`~/.claude`), **OpenAI Codex CLI** (`~/.codex`) or **Cursor** (`~/.cursor`) setup into Hermes: instructions and rules become memory entries, `Bash(...)` permission rules become `command_allowlist`/`approvals.deny`, MCP servers land in `mcp_servers`, and skills are copied. Always previews first. API keys and credentials are never imported, except OpenClaw's allowlisted keys when you pass `--migrate-secrets`. `--sync` re-imports registered Claude Code, Codex and Cursor sources that changed. On a fresh install, `hermes setup` offers to install the plugin and run the import for you when it finds one of these agents.
+
+The command moved out of core into the official `agent-importers` plugin, together with `hermes claw` (OpenClaw migration), whose spelling the plugin keeps. Without the plugin, `hermes import-agent` and `hermes claw` print the install line. See the **[import guide](../user-guide/import-from-other-agents.md)** for options and mapping tables.
+
+### OpenClaw: `hermes import-agent openclaw`
+
+```bash
+hermes import-agent openclaw [options]    # same as the older spelling: hermes claw migrate [options]
+hermes claw cleanup [--source <path>] [--dry-run] [--yes]
 ```
 
 Migrate your OpenClaw setup to Hermes. Reads from `~/.openclaw` (or a custom path) and writes to `~/.hermes`. Automatically detects legacy directory names (`~/.clawdbot`, `~/.moltbot`) and config filenames (`clawdbot.json`, `moltbot.json`).
@@ -52465,7 +52539,9 @@ Migrate your OpenClaw setup to Hermes. Reads from `~/.openclaw` (or a custom pat
 | `--skill-conflict <mode>` | Handle skill name collisions: `skip` (default), `overwrite`, or `rename`. |
 | `--yes` | Skip the confirmation prompt. |
 
-### What gets migrated
+`hermes claw cleanup` renames leftover OpenClaw directories to `*.pre-migration` once you have migrated (OpenClaw stops working after this; rename them back to undo).
+
+#### What gets migrated
 
 The migration covers 30+ categories across persona, memory, skills, model providers, messaging platforms, agent behavior, session policies, MCP servers, TTS, and more. Items are either **directly imported** into Hermes equivalents or **archived** for manual review.
 
@@ -52477,43 +52553,24 @@ The migration covers 30+ categories across persona, memory, skills, model provid
 
 For the complete config key mapping, SecretRef handling details, and post-migration checklist, see the **[full migration guide](../guides/migrate-from-openclaw.md)**.
 
-### Examples
+#### Examples
 
 ```bash
 # Preview what would be migrated
-hermes claw migrate --dry-run
+hermes import-agent openclaw --dry-run
 
 # Full migration (all compatible settings, no secrets)
-hermes claw migrate --preset full
+hermes import-agent openclaw --preset full
 
 # Full migration including API keys
-hermes claw migrate --preset full --migrate-secrets
+hermes import-agent openclaw --preset full --migrate-secrets
 
 # Migrate user data only (no secrets), overwrite conflicts
-hermes claw migrate --preset user-data --overwrite
+hermes import-agent openclaw --preset user-data --overwrite
 
 # Migrate from a custom OpenClaw path
-hermes claw migrate --source /home/user/old-openclaw
+hermes import-agent openclaw --source /home/user/old-openclaw
 ```
-
-## `hermes import-agent`
-
-```bash
-hermes import-agent [claude-code|codex] [options]
-```
-
-Import a **Claude Code** (`~/.claude`) or **OpenAI Codex CLI** (`~/.codex`) setup into Hermes. Maps `CLAUDE.md`/`AGENTS.md` instructions to memory entries, `Bash(...)` permission allow/deny rules to `command_allowlist`/`approvals.deny`, MCP servers to `mcp_servers` in `config.yaml`, and skill directories into `~/.hermes/skills/`. Always previews before applying; API keys and credentials are never imported.
-
-| Option | Description |
-| --- | --- |
-| `agent` | `claude-code` or `codex` (default: auto-detect). |
-| `--source <path>` | Custom source directory (default: `~/.claude` or `~/.codex`). |
-| `--dry-run` | Preview only — write nothing. |
-| `--overwrite` | Replace conflicting MCP servers / skills (default: skip). |
-| `--yes`, `-y` | Skip confirmation prompts. |
-| `--sync` | Re-import every previously imported source whose files changed since the last import. Prompt-free; combine with `--dry-run` to preview. |
-
-Every successful import registers its source in `~/.hermes/import-sync.json`; `hermes import-agent --sync` then re-imports any registered source whose files changed (a cron-friendly way to keep an imported Claude Code / Codex setup current). See the **[import guide](../user-guide/import-from-other-agents.md)** for the full mapping tables.
 
 ## `hermes serve`
 
@@ -56041,12 +56098,6 @@ hermes skills uninstall <skill-name>
 | [**mcp-oauth-remote-gateway**](../user-guide/skills/optional/mcp/mcp-mcp-oauth-remote-gateway.md) | Manual OAuth for remote MCP servers on headless gateways. |
 | [**mcporter**](../user-guide/skills/optional/mcp/mcp-mcporter.md) | List, auth, and call MCP servers/tools from the terminal. |
 
-## migration
-
-| Skill | Description |
-|-------|-------------|
-| [**openclaw-migration**](../user-guide/skills/optional/migration/migration-openclaw-migration.md) | Import an OpenClaw setup (memories, skills) into Hermes. |
-
 ## mlops
 
 | Skill | Description |
@@ -59265,6 +59316,217 @@ hermes cron remove <job_id>         # Delete a job
 - [Cron Feature Guide](../user-guide/features/cron.md)
 - [Gateway Internals](./gateway-internals.md)
 - [Agent Loop Internals](./agent-loop.md)
+
+---
+
+<!-- source: website/docs/developer-guide/delegation-provider-plugin.md -->
+# Delegation Provider Plugins
+
+# Delegation Provider Plugins
+
+A delegation provider decides **how each `delegate_task` task becomes a child run**: which model,
+provider, endpoint and reasoning effort the subagent uses, or which Hermes profile it runs as. It can
+also add per-task parameters to the `delegate_task` schema, such as an enum of profile names or of
+titled model options, so the model picks a route per task.
+
+Hermes core keeps the whole subagent lifecycle: spawning, isolation, leaf/orchestrator roles, depth
+limits, concurrency, background completion units, stop fan-out, result assembly, `output_schema`
+validation and progress. A provider only answers "which route does this task take".
+
+The active provider is `delegation.backend` in `config.yaml`; a provider's own settings live under
+`delegation.backends.<backend name>`. The `default` strategy is today's behaviour: every child follows
+the `delegation` section (`delegation.provider`, `delegation.model`, `delegation.base_url`, ...), or
+inherits the parent's route when those are empty. It is itself a plugin, the bundled
+`plugins/delegation/default/` (`kind: backend`, always loaded), registered through the same
+`ctx.register_delegation_provider()` seam as yours; it is also the smallest complete example.
+A configured backend that is not installed or reports unavailable **fails closed**: `delegate_task`
+returns a tool error naming the backend and the fix, no child starts, and its schema parameters are
+absent. A session can override the backend (`agent.delegation_backends`, below).
+
+## Skeleton
+
+```python
+# ~/.hermes/plugins/delegation-tiers/__init__.py
+from agent.delegation_provider import DelegationProvider, DelegationRouteError
+
+
+class Tiers(DelegationProvider):
+    @property
+    def name(self) -> str:
+        return "tiers"                      # delegation.backend: tiers
+
+    def task_parameters(self, config):
+        tiers = self.settings(config).get("tiers") or []  # delegation.backends.tiers.tiers
+        return {"tier": {
+            "type": "string",
+            "enum": [t["name"] for t in tiers],
+            "description": "; ".join(f"{t['name']}: {t['description']}" for t in tiers),
+        }}
+
+    def description(self, config):
+        return "Set `tier` per task to pick the model that fits it."
+
+    def route_task(self, task, config):
+        for t in self.settings(config).get("tiers") or []:
+            if t["name"] == task.get("tier"):
+                return {"provider": t["provider"], "model": t["model"], "label": t["name"]}
+        if task.get("tier"):
+            raise DelegationRouteError(f"Unknown tier {task['tier']!r}.")
+        return dict(config)                 # no tier: the default route
+
+
+def register(ctx):
+    ctx.register_delegation_provider(Tiers())
+```
+
+```yaml
+# plugin.yaml
+name: delegation-tiers
+version: 1.0.0
+description: Pick a model tier per subagent.
+```
+
+```yaml
+# config.yaml
+delegation:
+  backend: tiers
+  backends:
+    tiers:                                  # == the backend name
+      tiers:
+        - {name: quick, description: Lookups and summaries., provider: openrouter, model: google/gemini-3-flash-preview}
+```
+
+```bash
+hermes plugins enable delegation-tiers
+```
+
+## The interface
+
+`DelegationProvider` (`agent/delegation_provider.py`) subclasses the shared `ProviderBase`. Every
+method receives `config`, the `delegation` section of the active profile's `config.yaml`: `dict(config)`
+is the default route, and `self.settings(config)` is your backend's own block,
+`delegation.backends.<name>` (empty when unset). Keep your settings there, never beside the core
+`delegation` keys.
+
+| Member | Required | Contract |
+|---|---|---|
+| `name` | yes | The `delegation.backend` value. `default` belongs to the bundled default strategy. |
+| `route_task(task, config)` | yes | Return the route dict for one task. `task` carries `goal`, `context`, `index` and the values the model supplied for your parameters. Raise `DelegationRouteError` to refuse; its message is the tool error the model reads. |
+| `task_parameters(config)` | no | `{name: json_schema}` merged into `tasks.items.properties`. Core enforces `enum` before `route_task` runs and refuses core-owned names (`goal`, `context`, `index`, `output_schema`, `images`, `group`, `role`, `toolsets`, `provider`, `model`, `base_url`, `api_key`, `api_mode`, `acp_command`, `acp_args`). |
+| `description(config)` | no | Guidance appended to the `delegate_task` description. |
+| `is_available()` | no | No network calls. `False` fails delegation closed while your backend is selected: `delegate_task` returns a tool error naming it and the fix (`/delegation default`, or `hermes config set delegation.backend default`); it never switches to `default` on its own. |
+| `settings(config)` | inherited | `delegation.backends.<name>` as a mapping (empty when unset). Do not override. |
+
+### Routes
+
+A route is a dict with any of:
+
+- `model`, `provider`, `base_url`, `api_key`, `api_mode`, `request_overrides`, `reasoning_effort`,
+  `fallback_providers`: shaped exactly like the `delegation` section and resolved by the same
+  credential resolver. An empty route inherits the parent's route; `dict(config)` is the default route.
+  A `reasoning_effort` that is not a known level (`none`, `minimal`, `low`, `medium`, `high`,
+  `xhigh`, ...) refuses the task with a tool error instead of falling back to the parent's level; the
+  `delegation.reasoning_effort` value itself keeps its usual warn-and-inherit rule.
+- `service_tier`: `normal`, `fast` or `ultrafast`. Core checks it against the resolved route with the
+  same gates as `/fast` (and, for `ultrafast`, the signed-in Codex account's catalog). A tier the
+  route does not offer refuses the task; otherwise it applies to that child only and is re-applied
+  after the child is built, so a custom provider's `extra_body` cannot restore another tier.
+- `profile`: the name of a Hermes profile. The child runs **as that profile**: its `config.yaml`,
+  primary model and credentials (a `model.default` alias or named provider resolves exactly as at
+  CLI startup), credential pool, fallback chain, reasoning (`agent.reasoning_effort` and
+  `agent.reasoning_overrides`), skills, `SOUL.md` and terminal policy. Core binds that profile's
+  scope (HERMES_HOME override, secret scope, multiplex semantics, terminal policy) around the child's
+  construction, its credential lease and every conversation turn, the same binding a multiplexed
+  gateway applies to a routed turn, so a secret missing from the target profile is never read from
+  the launching profile's environment. The child's transcript stays in the launching profile's
+  session database (it is the parent's work) and it keeps the parent's toolset. Other route keys are
+  ignored on a profile route.
+- `label`: short text identifying the route (an option title, a profile name).
+
+Unknown keys are dropped. On a profile route, `service_tier` and `reasoning_effort` are ignored too.
+
+A non-profile route without `fallback_providers` of its own gets `delegation.fallback_providers`; return
+`"fallback_providers": []` to disable fallback for a route. A profile route keeps its profile's chain.
+
+### Refusals are per task
+
+A `DelegationRouteError` from `route_task`, a parameter your backend did not declare, a value outside
+your parameter's `enum`, an unknown
+`reasoning_effort`, a tier the route does not offer, or a credential the route cannot resolve refuses
+**that task only**: no child is built for it, its result entry is
+`{"status": "error", "error": "<your message>", "route": {"backend": "<name>", "refused": true}}`, and
+the other tasks run. A background call lists refused entries under `refused` in its dispatch payload.
+The call is a tool error only when every task is refused.
+
+### Result `route`
+
+Every result entry of a task routed by a non-default backend carries `route`: the backend, the label
+(when set), and what the child actually ran on, read off the child when its result is assembled:
+
+```json
+"route": {"backend": "model_map", "label": "deep", "provider": "openai-codex", "model": "gpt-6-astra",
+          "reasoning_effort": "high", "service_tier": "fast"}
+```
+
+`reasoning_effort` is `null` when the provider's default applies; `fallback_activated: true` is added
+when a fallback provider took over. The `default` backend's children leave the result entry unchanged.
+
+## Picker metadata and session switching
+
+`display_name` and `summary` (one user-facing line; never shown to the model) label your backend in
+pickers such as `/delegation`. A plugin uses `ctx.delegation_backends` (same methods; `list_backends()` returns
+plain dicts). It is a host remote facade, so under `plugins.isolation: host` it acts on the Hermes process, not
+the plugin host. Core code calls `agent.delegation_backends` directly:
+
+| Call | Does |
+|---|---|
+| `list_backends() -> list[BackendInfo]` | `default` first, then every registered backend: `name`, `label`, `description`, `available`, `reason` (the fix, when unavailable). |
+| `get_session_backend(session_key) -> str \| None` | The session's override, `None` when it follows `config.yaml`. |
+| `set_session_backend(session_key, name \| None)` | Switch one session (`None` clears). Raises `ValueError` with the reason for a backend that cannot run. |
+| `set_global_backend(name, *, session_key="")` | Write `delegation.backend` to the active profile's `config.yaml` and drop that session's override. Raises `PermissionError` on a package-manager-managed install. |
+
+A plugin command that edits model routes can reuse the interactive model picker under its own heading:
+`hermes_cli.auth_model_picker.prompt_model_selection(model_ids, current_model="", title="Select the model for this route:")`
+returns the chosen model id, or `None` when cancelled.
+
+`session_key` is the `session_key` a plugin command handler receives. A session switch decides routing
+from that session's next `delegate_task` call; the `delegate_task` schema (your parameters) follows
+`config.yaml`, because it is part of the cached prompt and is never rebuilt mid-conversation. After a
+switch the model can still send the previous backend's parameters, so core refuses each task carrying a
+parameter the session's backend does not declare (fail closed per task, like any other refusal) instead
+of dropping it and running the task on the new backend's default route:
+
+```text
+Task 0: this session's delegation backend is 'profile_routes', which does not take 'option' (declared by
+'model_map'), so this task was not started. Run `/delegation profile_routes --global` then `/new` for a
+session whose delegate_task choices match 'profile_routes', or `/delegation model_map` to switch this
+session back to the saved backend.
+```
+
+`/new` starts on the saved backend (`delegation.backend`), so the fix persists the session's pick first or
+names the saved one. When the session follows `config.yaml` (it changed mid-session), the fix is just `/new`.
+A parameter no installed backend declares is refused the same way, with "Resend it without ..." first.
+
+## Prompt caching
+
+The `delegate_task` definition, including your parameters and description, is built once when a
+session's tool list is assembled. `task_parameters` and `description` must be deterministic for a
+given `config`: same config, same bytes. Never derive them from the clock, the network or anything
+that changes during a conversation.
+
+## Process isolation
+
+Every argument and return value is plain JSON, so a provider runs unchanged under
+`plugins.isolation: host`: Hermes holds a proxy that subclasses `DelegationProvider` and every call
+runs in the plugin host process.
+
+## Testing
+
+Load the plugin through the real discovery path against a temporary `HERMES_HOME` whose
+`config.yaml` sets `plugins.enabled`, `delegation.backend` and `delegation.backends.<name>`, then assert on behaviour: the
+`delegate_task` definition from `tools.registry.registry.get_definitions({"delegate_task"})` carries
+your parameter, and `tools.delegate_tool.delegate_task(...)` hands each child the route you chose.
+`tests/tools/test_delegation_backends.py` in the Hermes repo is a complete example.
 
 ---
 
@@ -66667,6 +66929,7 @@ Hermes has several distinct pluggable interfaces — some use Python `register_*
 | A **video-generation backend** | [Video Generation Provider Plugins](../video-gen-provider-plugin.md) |
 | A **web-search / extract backend** | [Web Search Provider Plugins](../web-search-provider-plugin.md) |
 | A **cloud browser backend** (Browserbase-style CDP session provider) | [Browser Provider Plugins](../browser-provider-plugin.md) |
+| A **delegation strategy** (pick a profile or a named model per subagent) | [Delegation Provider Plugins](../delegation-provider-plugin.md) — `ctx.register_delegation_provider()` |
 | A **computer-use driver** (desktop control behind the `computer_use` tool) | [Computer-use backend plugins](#computer-use-backend-plugins) — `ctx.register_computer_use_provider()` |
 | A **secret-manager backend** (vault / password manager / OS keystore) | [Secret Source Plugins](../secret-source-plugin.md) |
 | A **dashboard OIDC/auth provider** | [Web Dashboard — custom providers](../../user-guide/features/web-dashboard.md#custom-providers) — `ctx.register_dashboard_auth_provider()` |
@@ -67326,6 +67589,9 @@ When both exist the `pyproject.toml` wins. What Hermes does with them:
 - **`--yes-deps`** answers the dependency question up front, so a headless install (CI, SSH
   automation, a container entrypoint) prepares the declared dependencies instead of being refused.
   It is mutually exclusive with `--no-deps`.
+- **A `pyproject.toml` that installs nothing** (`dependencies = []`, no `[build-system]`, extras
+  or dependency groups) counts as no declaration: no dependency question, and enabling or updating
+  the plugin leaves the dependency environment as it is.
 - **`python_runtime: external`** keeps a sidecar's dependencies out of the shared union.
   Hermes does not install that Python runtime or modify its declaration.
 - **Nothing to load is an error** — `hermes plugins validate` rejects `plugin.yaml` without
@@ -68435,6 +68701,37 @@ from agent.runtime_cwd import resolve_agent_cwd
 def _handle_todo(raw_args: str) -> str:
     todo = resolve_agent_cwd() / "TODO.md"  # the session's folder, not the gateway's
     return todo.read_text() if todo.exists() else "No TODO.md here."
+```
+
+### Ask the user to pick an option
+
+A sync slash-command handler can ask the user who ran it to pick one option with `ctx.ask_choice(question, choices)`. It blocks until the user answers and returns the picked choice's `value`, or `None`. Each surface shows it the way it shows the agent's `clarify` questions:
+
+| Surface | What the user sees |
+|---|---|
+| Telegram, Discord, Slack | A card with one button per choice (plus "Other") |
+| Other messaging platforms | A numbered list; the user replies with the number or the label |
+| Classic CLI, Ink TUI, Desktop | The clarify picker |
+
+A choice is a string (the label and the value) or a dict `{"value", "label", "description"}`; the description is shown after the label. A typed value or label, in any case, also picks that choice. `ask_choice` returns `None` when the user cancels, types something that is not a choice, or lets the clarify timeout (`agent.clarify_timeout`) pass. It also returns `None` when nothing can ask: a hook, a cron job, an async handler (blocking would stall the event loop that delivers the answer). The handler then falls back to its text usage:
+
+```python
+_MODES = [
+    {"value": "default", "label": "Default", "description": "delegation.model / parent model"},
+    {"value": "model_map", "label": "Model routes", "description": "per-task model map"},
+    {"value": "profile_routes", "label": "Profiles", "description": "delegate to other profiles"},
+]
+
+def register(ctx):
+    def delegation(raw_args: str) -> str:
+        mode = raw_args.strip() or ctx.ask_choice("Delegation mode", _MODES)
+        if mode not in {m["value"] for m in _MODES}:
+            return "Usage: /delegation default|model_map|profile_routes"
+        ctx.set_config("mode", mode)
+        return f"Delegation mode: {mode}"
+
+    ctx.register_command("delegation", delegation, description="Switch the delegation mode",
+                         args_hint="[mode]")
 ```
 
 ### Dispatch tools from slash commands
@@ -73558,6 +73855,10 @@ bundle. An unresolvable provider raises `SubagentLifecycleError` before launch.
 Core does not expose `provider` to the model: the plugin chooses it, for example
 from operator config.
 
+The lifecycle API does not consult `delegation.backend`: the plugin that launches a child already chooses
+its route. To change how `delegate_task` routes the model's subagents, write a
+[delegation provider plugin](delegation-provider-plugin.md).
+
 ---
 
 <!-- source: website/docs/developer-guide/terminal-environment-plugin.md -->
@@ -78275,10 +78576,12 @@ Those pages land alongside the PRs that add the corresponding runtime. This cred
 
 # Migrate from OpenClaw
 
-`hermes claw migrate` imports your OpenClaw (or legacy Clawdbot/Moldbot) setup into Hermes. This guide covers exactly what gets migrated, the config key mappings, and what to verify after migration.
+`hermes import-agent openclaw` imports your OpenClaw (or legacy Clawdbot/Moldbot) setup into Hermes. This guide covers exactly what gets migrated, the config key mappings, and what to verify after migration.
 
-:::note
-Coming from **Claude Code** or **OpenAI Codex CLI** instead? Use [`hermes import-agent`](../user-guide/import-from-other-agents.md).
+The command comes from the official **`agent-importers` plugin** in the [plugin catalog](../user-guide/features/plugins.md), which also imports Claude Code, Codex CLI and Cursor setups ([Import from Other Agents](../user-guide/import-from-other-agents.md)). The older spelling `hermes claw migrate` still works once the plugin is installed and runs the same import.
+
+:::tip The easy way
+On a fresh install, run `hermes setup`. When it finds `~/.openclaw` it asks **"Import your setup from OpenClaw?"**. Say yes and setup installs the plugin and runs `hermes import-agent openclaw --migrate-secrets`, preview and confirmation included, then continues with the sections the import did not already fill in.
 :::
 
 :::tip
@@ -78288,14 +78591,17 @@ If your OpenClaw setup was multi-provider, `hermes setup --portal` collapses it 
 ## Quick start
 
 ```bash
+# Once per profile: the command comes from this plugin
+hermes plugins install agent-importers
+
 # Preview then migrate (always shows a preview first, then asks to confirm)
-hermes claw migrate
+hermes import-agent openclaw
 
 # Preview only, no changes
-hermes claw migrate --dry-run
+hermes import-agent openclaw --dry-run
 
 # Full migration including API keys, skip confirmation
-hermes claw migrate --preset full --migrate-secrets --yes
+hermes import-agent openclaw --preset full --migrate-secrets --yes
 ```
 
 The migration always shows a full preview of what will be imported before making any changes. Review the list, then confirm to proceed.
@@ -78519,6 +78825,10 @@ Imported skills land in `~/.hermes/skills/openclaw-imports/`. Start a new sessio
 ### TTS voice not migrated
 
 OpenClaw stores TTS settings in two places: `messages.tts.providers.*` and the top-level `talk` config. The migration checks both. If your voice ID was set via the OpenClaw UI (stored in a different path), you may need to set it manually: `hermes config set tts.elevenlabs.voice_id YOUR_VOICE_ID`.
+
+## Upgrading from a version with `hermes claw` built in
+
+OpenClaw migration used to ship inside Hermes core as `hermes claw migrate` and the optional `openclaw-migration` skill. Both moved into the `agent-importers` plugin, with the same flags and the same secrets rule (keys come over only with `--migrate-secrets`). Running `hermes claw` without the plugin prints the install command, and a fresh `hermes setup` that finds `~/.openclaw` offers to install it. The guided migration skill comes with the plugin as `agent-importers:openclaw-migration`. The old `official/migration/openclaw-migration` optional skill is gone. Nothing changes for an OpenClaw setup you have already migrated.
 
 ---
 
@@ -81822,7 +82132,10 @@ references. `--offline` and `--cache` control dependency acquisition.
 For application environment builds, PM must already be able to start in the
 invoking Python. These builds are not an interpreter bootstrap. They do not modify a running application's
 imports or replace its selected environment. Nix's declarative uv2nix builds
-remain Nix-owned. Package-manager commands for unrelated projects or agent
+remain Nix-owned: `nix develop` still builds its dependencies with uv2nix, but
+runs them on the interpreter `pm/lock.json` pins (uv2nix cannot build a venv
+against a tarball interpreter, so only the interpreter comes from the lock).
+Package-manager commands for unrelated projects or agent
 sandboxes do not manage Hermes itself.
 
 ## Commands
@@ -81857,8 +82170,8 @@ not substitutes for an installed application's update mechanism.
 | Command | Effect |
 |---|---|
 | `pm lock` | Relock `uv.lock` from `pyproject.toml`. Changes no environment; writes nothing when the lock is current. |
-| `pm lock --bump NAME VERSION` | Resolve and hash supported target artifacts, then write the tool pin to `pm/lock.json`. |
-| `pm update [names...]` | Query upstream versions, change tool pins, and install changed tools. |
+| `pm lock --bump NAME VERSION` | Resolve and hash supported target artifacts, write the tool pin to `pm/lock.json`, and regenerate the bootstrap pins in `scripts/install.sh` and `scripts/install.ps1`. |
+| `pm update [names...]` | Query upstream versions, change tool pins, regenerate the installers' bootstrap pins, and install changed tools. |
 | `pm update --check` | Query without writing. Exit 1 can mean updates exist; inspect output to distinguish an error. |
 | `pm update --target TARGET` | Resolve versions for the specified target. |
 | `pm update --skip-target TARGET` | Leave TARGET's pins unchanged (repeatable), for example `linux-arm64-bionic` while the termux pool lags upstream. Later runs still report the package as current. `pm lock --bump NAME VERSION` re-pins every target at a version, and `pm update --termux` repins a retired `linux-arm64-bionic` row. |
@@ -92443,18 +92756,38 @@ Causes worth checking:
 
 # Import from Other Agents
 
-`hermes import-agent` imports your existing **Claude Code** or **OpenAI Codex CLI** setup into Hermes with one command. It follows the same preview-first pattern as [`hermes claw migrate`](../guides/migrate-from-openclaw.md): you always see a per-item plan before anything is written, and `--dry-run` never touches disk.
+`hermes import-agent` imports your existing **OpenClaw**, **Claude Code**, **OpenAI Codex CLI** or **Cursor** setup into Hermes with one command. You always see a per-item plan before anything is written, and `--dry-run` never touches disk.
+
+The command comes from the official **`agent-importers` plugin** from the [plugin catalog](./features/plugins.md), maintained by Nous Research in [NousResearch/hermes-official-plugins](https://github.com/NousResearch/hermes-official-plugins/tree/main/agent-importers).
+
+## The easy way: `hermes setup`
+
+On a fresh install, `hermes setup` checks for `~/.openclaw` (or legacy `~/.clawdbot` / `~/.moltbot`), `~/.claude`, `~/.codex` and `~/.cursor` before anything else. When it finds one it asks **"Import your setup from Claude Code?"** (naming what it found); with several found you then pick which from a checklist, all checked. Say yes and setup installs the `agent-importers` plugin from the catalog, unless you already have it, and runs the import below for each pick, preview and confirmation included. For OpenClaw it passes `--migrate-secrets`, as Hermes' old built-in OpenClaw step did, so your API keys and bot tokens come over and the provider and messaging sections that follow are already filled in. Say no, or have none of these folders, and nothing is installed. Already set up? Use the commands below.
+
+## By hand
+
+Install the plugin once per profile:
 
 ```bash
-hermes import-agent                    # auto-detect ~/.claude or ~/.codex
+hermes plugins install agent-importers
+```
+
+```bash
+hermes import-agent                    # auto-detect ~/.openclaw, ~/.claude, ~/.codex or ~/.cursor
+hermes import-agent openclaw           # import from ~/.openclaw (see the OpenClaw guide)
 hermes import-agent claude-code        # import from ~/.claude
 hermes import-agent codex              # import from ~/.codex
+hermes import-agent cursor             # import from ~/.cursor
 hermes import-agent claude-code --dry-run          # preview only
 hermes import-agent codex --source /path/to/.codex # custom location
 hermes import-agent claude-code --overwrite --yes  # replace conflicts, skip prompts
 ```
 
 ## What gets imported
+
+### OpenClaw (`~/.openclaw`)
+
+OpenClaw has its own guide, **[Migrate from OpenClaw](../guides/migrate-from-openclaw.md)**, with the full mapping (persona, memory, skills, model providers, messaging platforms, agent behaviour, MCP servers and more), the `--preset`, `--migrate-secrets`, `--workspace-target` and `--skill-conflict` flags, the pre-migration backup and `hermes claw cleanup`. The older spelling `hermes claw migrate` still works and runs the same import.
 
 ### Claude Code (`~/.claude`)
 
@@ -92478,9 +92811,20 @@ Claude's `Bash(npm run test:*)` prefix rules become `npm run test*` globs. Non-`
 | `memories/*.md` | Memory entries in `~/.hermes/memories/MEMORY.md` |
 | `skills/<name>/` (dirs with `SKILL.md`) | `~/.hermes/skills/codex-imports/<name>/` |
 
+### Cursor (`~/.cursor`)
+
+| Cursor | Hermes |
+|---|---|
+| `AGENTS.md` (global instructions) | Memory entries in `~/.hermes/memories/MEMORY.md` |
+| `rules/*.md`, `rules/*.mdc` (User Rules) | Memory entries in `~/.hermes/memories/MEMORY.md` |
+| `mcp.json` → `mcpServers` | `mcp_servers` in `config.yaml` |
+| `skills/**/<name>/` (dirs with `SKILL.md`, category folders allowed) | `~/.hermes/skills/cursor-imports/<name>/` |
+
+`.mdc` frontmatter (`description`, `globs`, `alwaysApply`) is routing metadata for Cursor's rule engine and is stripped; only the rule body is imported. A skill is the folder holding `SKILL.md`, so `skills/shipping/land-it/` imports as `cursor-imports/land-it/`; two skills with the same name in different folders are reported as a conflict.
+
 ## What is never imported
 
-**API keys and credentials.** Credential files (`~/.claude/.credentials.json`, `~/.codex/auth.json`) are never read, and MCP server environment variables or headers with secret-looking names (`*_TOKEN`, `*_API_KEY`, `Authorization`, ...) are stripped and listed in the report so you can re-add them deliberately. Run `hermes setup` to configure providers, or add secrets to `~/.hermes/.env`.
+**API keys and credentials.** (OpenClaw is the one exception: its allowlisted API keys and bot tokens come over only when you pass `--migrate-secrets`.) Credential files (`~/.claude/.credentials.json`, `~/.codex/auth.json`, `~/.cursor/cli-config.json`) are never read, and MCP server environment variables or headers with secret-looking names (`*_TOKEN`, `*_API_KEY`, `Authorization`, ...) are stripped and listed in the report so you can re-add them deliberately. Run `hermes setup` to configure providers, or add secrets to `~/.hermes/.env`.
 
 ## Behavior notes
 
@@ -92488,11 +92832,10 @@ Claude's `Bash(npm run test:*)` prefix rules become `npm run test*` globs. Non-`
 - **Merges, not replaces.** Memory entries are deduplicated against your existing `MEMORY.md`; allowlist/denylist patterns merge with what's already in `config.yaml`.
 - **Conflicts are skipped by default.** An MCP server or skill that already exists in Hermes is reported as a conflict; pass `--overwrite` to replace it.
 - **Malformed files don't abort the run.** A broken `settings.json` or `config.toml` becomes a per-item error in the report while everything else still imports.
-- Coming from OpenClaw instead? Use [`hermes claw migrate`](../guides/migrate-from-openclaw.md).
 
 ## Keeping imports in sync
 
-Every successful import registers its source (and the digest of everything it read) in `~/.hermes/import-sync.json`. When the other agent's setup changes later — new skills, edited `CLAUDE.md`/`AGENTS.md`, added MCP servers — pull the changes in with:
+Every successful Claude Code, Codex CLI or Cursor import registers its source (and the digest of everything it read) in `~/.hermes/import-sync.json`. When the other agent's setup changes later — new skills, edited `CLAUDE.md`/`AGENTS.md`, added MCP servers — pull the changes in with:
 
 ```bash
 hermes import-agent --sync            # re-import every changed source
@@ -92509,6 +92852,13 @@ Sync is prompt-free and cheap: sources whose files are unchanged are skipped by 
 This mirrors ChatGPT Work's *Settings > Import* automatic updates, adapted to an explicit, inspectable command instead of a background service.
 
 The manifest is per profile. A profile created with `hermes profile create <name> --clone --sync-imports` carries it over, so `hermes -p <name> import-agent --sync` keeps pulling from the same external trees (see [Profiles](./profiles.md#keep-a-clones-imported-agent-setups-synced---sync-imports)).
+
+## Upgrading from a version with `import-agent` built in
+
+`hermes import-agent` and `hermes claw` used to ship inside Hermes core. The commands, their flags and the `import-sync.json` manifest are unchanged in the plugin:
+
+- **Profiles with a registered sync source** (an `import-sync.json`, which scheduled `--sync` runs read) get the plugin installed automatically by `hermes update`, or on the first start after updating (this honours `security.allow_lazy_installs`). If you later remove it (`hermes plugins remove agent-importers`), it stays removed.
+- **Everyone else** installs it when they next need it: a fresh `hermes setup` that finds one of these agents offers it, and running `hermes import-agent` or `hermes claw` without the plugin prints the install command.
 
 ---
 

@@ -33,7 +33,7 @@ Repo: https://github.com/NousResearch/hermes-agent
 - [Egress proxy](https://hermes-agent.nousresearch.com/docs/user-guide/egress)
 - [Egress credential-injection proxy (iron-proxy)](https://hermes-agent.nousresearch.com/docs/user-guide/egress/iron-proxy)
 - [Network Egress Isolation (Docker)](https://hermes-agent.nousresearch.com/docs/user-guide/egress/network-isolation): Segment Docker networks so the agent sandbox can only reach allowlisted hosts
-- [Import from Other Agents](https://hermes-agent.nousresearch.com/docs/user-guide/import-from-other-agents): One-command import of a Claude Code (~/.claude) or OpenAI Codex CLI (~/.codex) setup into Hermes — instructions, allowlists, MCP servers, skills, and memories.
+- [Import from Other Agents](https://hermes-agent.nousresearch.com/docs/user-guide/import-from-other-agents): One-command import of an OpenClaw (~/.openclaw), Claude Code (~/.claude), OpenAI Codex CLI (~/.codex) or Cursor (~/.cursor) setup into Hermes — instructions, rules, allowlists, MCP servers, skills, and memories.
 - [Local Models](https://hermes-agent.nousresearch.com/docs/user-guide/local-models): Run models entirely on your own machine — no account, no API key, nothing leaves your computer.
 - [Managed Scope](https://hermes-agent.nousresearch.com/docs/user-guide/managed-scope): Administrator-pinned, user-immutable config and secrets via a system-level managed directory
 - [Connecting Desktop to Many Hermes Instances](https://hermes-agent.nousresearch.com/docs/user-guide/multi-connection-desktop)
@@ -223,6 +223,7 @@ Repo: https://github.com/NousResearch/hermes-agent
 - [Background completion backlogs](https://hermes-agent.nousresearch.com/docs/developer-guide/completion-backlog-delivery)
 - [Context Engine Plugins](https://hermes-agent.nousresearch.com/docs/developer-guide/context-engine-plugin): How to build a context engine plugin that replaces the built-in ContextCompressor
 - [Cron Internals](https://hermes-agent.nousresearch.com/docs/developer-guide/cron-internals): How Hermes stores, schedules, edits, pauses, skill-loads, and delivers cron jobs
+- [Delegation Provider Plugins](https://hermes-agent.nousresearch.com/docs/developer-guide/delegation-provider-plugin)
 - [Desktop Plugin SDK (@hermes/plugin-sdk)](https://hermes-agent.nousresearch.com/docs/developer-guide/desktop-plugin-sdk): Extend the native Hermes Desktop app — panes, pages, sidebar nav, status bar, palette commands, keybinds, themes, and a scoped backend namespace, with one import and no build step.
 - [Egress proxy internals](https://hermes-agent.nousresearch.com/docs/developer-guide/egress-internals): How the iron-proxy egress firewall integrates with Hermes — module layout, lifecycle, security invariants, and extension points
 - [Classic gateway client](https://hermes-agent.nousresearch.com/docs/developer-guide/gateway-classic-cli): How hermes chat / --cli attach to the gateway authority
