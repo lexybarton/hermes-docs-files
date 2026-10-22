@@ -3949,11 +3949,11 @@ Before that stash step, Hermes also restores tracked `package-lock.json` diffs l
 
 ## Terminal Backend Configuration
 
-Hermes supports seven terminal backends. Each determines where the agent's shell commands actually execute — your local machine, a Docker container, a remote server via SSH, a Modal cloud sandbox (direct or via the Nous-managed gateway), a Daytona workspace, a Vercel Sandbox, or a Singularity/Apptainer container.
+Hermes ships six terminal backends. Each determines where the agent's shell commands actually execute — your local machine, a Docker container, a remote server via SSH, a Modal cloud sandbox (direct or via the Nous-managed gateway), a Daytona workspace, or a Vercel Sandbox. Plugins add more, such as the official [Singularity/Apptainer](#singularityapptainer-backend) backend.
 
 ```yaml
 terminal:
-  backend: local    # local | docker | ssh | modal | daytona | vercel_sandbox | singularity
+  backend: local    # local | docker | ssh | modal | daytona | vercel_sandbox | <plugin backend>
   cwd: "."          # Gateway/cron working directory (CLI always uses launch dir)
   temp_dir: ""      # Session temp root; empty = TMPDIR, else ~/.hermes/cache/terminal
   font_family: ""   # Desktop terminal font; e.g. "MesloLGS NF"
@@ -3962,7 +3962,6 @@ terminal:
   env_passthrough: []  # Env var names to forward to sandboxed execution (terminal + execute_code)
   client_env_passthrough: []  # Extra non-secret toolchain names (e.g. GEM_HOME) a local CLI/TUI session's tools take from its launching shell
   sync_back_max_bytes: 2147483648  # Remote backends: refuse to extract a state archive larger than this (bytes)
-  singularity_image: "docker://nousresearch/hermes-sandbox:desktop"  # Container image for Singularity backend
   modal_image: "nousresearch/hermes-sandbox:desktop"                 # Container image for Modal backend
   daytona_image: "nousresearch/hermes-sandbox:desktop"               # Container image for Daytona backend
 ```
@@ -4024,7 +4023,7 @@ For cloud sandboxes such as Modal, Daytona, and Vercel Sandbox, `container_persi
 | **modal** | Modal cloud sandbox | Full (cloud VM) | Ephemeral cloud compute, evals |
 | **daytona** | Daytona workspace | Full (cloud container) | Managed cloud dev environments |
 | **vercel_sandbox** | Vercel Sandbox | Full (cloud microVM) | Cloud execution with snapshot-backed filesystem persistence |
-| **singularity** | Singularity/Apptainer container | Namespaces (--containall) | HPC clusters, shared machines |
+| **singularity** (plugin) | Singularity/Apptainer container | Namespaces (--containall) | HPC clusters, shared machines |
 
 ### Local Backend
 
@@ -4330,7 +4329,11 @@ OIDC tokens are short-lived and should not be used as the documented deployment 
 
 ### Singularity/Apptainer Backend
 
-Runs commands in a [Singularity/Apptainer](https://apptainer.org) container. Designed for HPC clusters and shared machines where Docker isn't available.
+Runs commands in a [Singularity/Apptainer](https://apptainer.org) container. Designed for HPC clusters and shared machines where Docker isn't available. It is the official [`singularity` plugin](https://github.com/NousResearch/hermes-official-plugins/tree/main/singularity) (formerly built into core; `hermes update` installs it for profiles that already use it):
+
+```bash
+hermes plugins install singularity
+```
 
 ```yaml
 terminal:
@@ -4341,11 +4344,11 @@ terminal:
   container_persistent: true       # Writable overlay persists across sessions
 ```
 
-**Requirements:** `apptainer` or `singularity` binary in `$PATH`.
+**Requirements:** the `singularity` plugin and an `apptainer` or `singularity` binary in `$PATH`.
 
 **Image handling:** Docker URLs (`docker://...`) are automatically converted to SIF files and cached. Existing `.sif` files are used directly.
 
-**Scratch directory:** Resolved in order: `TERMINAL_SCRATCH_DIR` → `TERMINAL_SANDBOX_DIR/singularity` → `/scratch/$USER/hermes-agent` (HPC convention) → `~/.hermes/sandboxes/singularity`.
+**Scratch directory:** Resolved in order: `TERMINAL_SCRATCH_DIR` → `/scratch/$USER/hermes-agent` when `/scratch` is writable (HPC convention) → `TERMINAL_SANDBOX_DIR/singularity` (default `~/.hermes/sandboxes/singularity`).
 
 **Isolation:** Uses `--containall --no-home` for full namespace isolation without mounting the host home directory.
 
@@ -4358,7 +4361,7 @@ If terminal commands fail immediately or the terminal tool is reported as disabl
 - **SSH** — Both `TERMINAL_SSH_HOST` and `TERMINAL_SSH_USER` must be set. Hermes logs a clear error if either is missing.
 - **Modal** — Needs `MODAL_TOKEN_ID` env var or `~/.modal.toml`. Run `hermes doctor` to check.
 - **Daytona** — Needs `DAYTONA_API_KEY`. The Daytona SDK handles server URL configuration.
-- **Singularity** — Needs `apptainer` or `singularity` in `$PATH`. Common on HPC clusters.
+- **Singularity** — Needs the `singularity` plugin (`hermes plugins install singularity`) and `apptainer` or `singularity` in `$PATH`. Common on HPC clusters.
 
 When in doubt, set `terminal.backend` back to `local` and verify that commands run there first.
 
@@ -4513,7 +4516,7 @@ export TERMINAL_LOCAL_PERSISTENT=false              # local
 | SSH | `TERMINAL_SSH_PERSISTENT`, else `terminal.persistent_shell` (`TERMINAL_PERSISTENT_SHELL`) | `true` |
 | Local | `TERMINAL_LOCAL_PERSISTENT` | `true` |
 
-Docker, Singularity, Modal, Daytona, Vercel Sandbox and plugin backends ignore these settings.
+Docker, Modal, Daytona, Vercel Sandbox and plugin backends (Singularity included) ignore these settings.
 
 See [Code Execution](features/code-execution.md) and the [Terminal section of the README](features/tools.md) for details on each backend.
 
@@ -10304,7 +10307,7 @@ The security model has eight layers:
 1. **User authorization** — who can talk to the agent (allowlists, DM pairing)
 2. **Dangerous command approval** — human-in-the-loop for destructive operations
 3. **File write safety** — denylist and optional write sandbox for `write_file`/`patch`
-4. **Container isolation** — Docker/Singularity/Modal sandboxing with hardened settings
+4. **Container isolation** — Docker/Modal (and the Singularity plugin) sandboxing with hardened settings
 5. **MCP credential filtering** — environment variable isolation for MCP subprocesses
 6. **Context file scanning** — prompt injection detection in project files
 7. **Cross-session isolation** — sessions cannot access each other's data or state; cron job storage paths are hardened against path traversal attacks
@@ -10525,7 +10528,7 @@ The following patterns trigger approval prompts (defined in `tools/approval.py`)
 | `podman --remote`/`-r`/`--url`/`--connection`/`--identity`, `CONTAINER_HOST=` | Podman remote daemon redirect |
 
 :::info
-**Container bypass**: When running in `docker`, `singularity`, `modal`, `daytona`, or `vercel_sandbox` backends, dangerous command checks are **skipped** because the container itself is the security boundary. Destructive commands inside a container can't harm the host.
+**Container bypass**: When running in `docker`, `modal`, `daytona`, or `vercel_sandbox` backends (or a container plugin backend such as `singularity`), dangerous command checks are **skipped** because the container itself is the security boundary. Destructive commands inside a container can't harm the host.
 :::
 
 ### `execute_code` Scripts {#execute-code-scripts}
@@ -10889,7 +10892,7 @@ If you add names to `terminal.docker_forward_env`, those variables are intention
 | **local** | None — runs on host | ✅ Yes | Development, trusted users |
 | **ssh** | Remote machine | ✅ Yes | Running on a separate server |
 | **docker** | Container | ❌ Skipped (container is boundary) | Production gateway |
-| **singularity** | Container | ❌ Skipped | HPC environments |
+| **singularity** (plugin) | Container | ❌ Skipped | HPC environments |
 | **modal** | Cloud sandbox | ❌ Skipped | Scalable cloud isolation |
 | **daytona** | Cloud sandbox | ❌ Skipped | Persistent cloud workspaces |
 | **vercel_sandbox** | Cloud microVM | ❌ Skipped | Cloud execution with snapshot persistence |
@@ -11557,7 +11560,7 @@ from the nested repository's own working directory.
 
 ### Container Backends
 
-With a container terminal backend (`docker`, `singularity`, `modal`, `daytona`, `vercel_sandbox`, or a container plugin), file paths belong to the sandbox rather than the host. Hermes therefore does not take checkpoints or record the agent-write ledger for those paths, and `/rollback` explains the limitation: it still lists existing host checkpoints but refuses diff and restore, on the CLI and in messaging-gateway chats alike; `/diff session` answers with the same reason. The TUI and Desktop behave the same: `/rollback list` still works while `/rollback diff` and `/rollback <N>` are refused with that reason. Local and SSH backends are unaffected. To point `terminal.cwd` at the container-side view of a mounted directory see [`terminal.docker_mount_cwd_to_workspace`](./configuration.md).
+With a container terminal backend (`docker`, `modal`, `daytona`, `vercel_sandbox`, or a container plugin such as `singularity`), file paths belong to the sandbox rather than the host. Hermes therefore does not take checkpoints or record the agent-write ledger for those paths, and `/rollback` explains the limitation: it still lists existing host checkpoints but refuses diff and restore, on the CLI and in messaging-gateway chats alike; `/diff session` answers with the same reason. The TUI and Desktop behave the same: `/rollback list` still works while `/rollback diff` and `/rollback <N>` are refused with that reason. Local and SSH backends are unaffected. To point `terminal.cwd` at the container-side view of a mounted directory see [`terminal.docker_mount_cwd_to_workspace`](./configuration.md).
 
 - **Git availability** — if `git` is not found on `PATH`, checkpoints are transparently disabled.
 - **Directory scope** — Hermes skips overly broad directories (root `/`, home `$HOME`).
@@ -11741,7 +11744,7 @@ The terminal tool can execute commands in different environments:
 | `local` | Run on your machine (default) | Development, trusted tasks |
 | `docker` | Isolated containers | Security, reproducibility |
 | `ssh` | Remote server | Sandboxing, keep agent away from its own code |
-| `singularity` | HPC containers | Cluster computing, rootless |
+| `singularity` (plugin) | HPC containers | Cluster computing, rootless |
 | `modal` | Cloud execution | Serverless, scale |
 | `daytona` | Cloud sandbox workspace | Persistent remote dev environments |
 | `vercel_sandbox` | Vercel Sandbox cloud microVM | Cloud execution with snapshot-backed filesystem persistence |
@@ -11751,7 +11754,7 @@ The terminal tool can execute commands in different environments:
 ```yaml
 # In ~/.hermes/config.yaml
 terminal:
-  backend: local    # or: docker, ssh, singularity, modal, daytona, vercel_sandbox
+  backend: local    # or: docker, ssh, modal, daytona, vercel_sandbox, or a plugin backend (singularity)
   cwd: "."          # Working directory
   timeout: 180      # Command timeout in seconds
 ```
@@ -11811,7 +11814,11 @@ TERMINAL_SSH_KEY=~/.ssh/id_rsa
 
 ### Singularity/Apptainer
 
+An official plugin ([`singularity`](https://github.com/NousResearch/hermes-official-plugins/tree/main/singularity)), formerly built in; `hermes update` installs it for profiles that already use it.
+
 ```bash
+hermes plugins install singularity
+
 # Pre-build SIF for parallel workers
 apptainer build ~/python.sif docker://python:3.11-slim
 
@@ -11862,7 +11869,7 @@ Configure CPU, memory, disk, and persistence for all container backends:
 
 ```yaml
 terminal:
-  backend: docker  # or singularity, modal, daytona, vercel_sandbox
+  backend: docker  # or modal, daytona, vercel_sandbox, singularity (plugin)
   container_cpu: 1              # CPU cores (default: 1)
   container_memory: 5120        # Memory in MB (default: 5GB)
   container_disk: 51200         # Disk in MB (default: 50GB)
@@ -16465,7 +16472,8 @@ What changes in `host` mode:
   flight returns a tool error and Hermes restarts the host and reloads its plugins (bounded retries).
 - **A few surfaces need in-process code** and fail that plugin with a clear reason instead of loading:
   gateway platform adapters (`register_platform`), approval transports, Telegram/platform handlers,
-  model-provider profiles that build their own SDK client (`create_client`), streaming and websocket
+  model-provider profiles that build their own SDK client (`create_client`), terminal backends (the
+  backend's commands fail with this reason; the `singularity` plugin is one), streaming and websocket
   dashboard endpoints, and plugins that monkeypatch Hermes modules. Run those with `isolation: in_process`.
 
 **Locking it for a shared deployment.** `plugins.isolation` is ordinary profile config, so whoever can
@@ -19668,7 +19676,7 @@ The "(Orchestrators)" tools — `kanban_list`, `kanban_create`, `kanban_link`, `
 
 Three reasons:
 
-1. **Backend portability.** Workers whose terminal tool points at a remote backend (Docker / Modal / Singularity / SSH) would run `hermes kanban complete` *inside* the container, where `hermes` isn't installed and `~/.hermes/kanban.db` isn't mounted. The kanban tools run in the agent's own Python process and always reach `~/.hermes/kanban.db` regardless of terminal backend.
+1. **Backend portability.** Workers whose terminal tool points at a remote backend (Docker / Modal / SSH / a plugin sandbox) would run `hermes kanban complete` *inside* the container, where `hermes` isn't installed and `~/.hermes/kanban.db` isn't mounted. The kanban tools run in the agent's own Python process and always reach `~/.hermes/kanban.db` regardless of terminal backend.
 2. **No shell-quoting fragility.** Passing `--metadata '{"files": [...]}'` through shlex + argparse is a latent footgun. Structured tool args skip it entirely.
 3. **Better errors.** Tool results are structured JSON the model can reason about, not stderr strings it has to parse.
 
@@ -23825,7 +23833,7 @@ The input dataset is a JSONL file (one JSON object per line). Each entry must ha
 ```
 
 Entries can optionally include:
-- `image` or `docker_image`: A container image to use for this prompt's sandbox (works with Docker, Modal, and Singularity backends)
+- `image` or `docker_image`: A container image to use for this prompt's sandbox (works with Docker, Modal, Daytona and plugin backends such as Singularity)
 - `cwd`: Working directory override for the task's terminal session
 
 ## Configuration Options
@@ -40918,7 +40926,7 @@ When the agent triggers a dangerous command approval (`rm -rf`, `DROP TABLE`, et
 Hermes checks every command against a curated list of dangerous patterns before execution. This includes recursive deletes, SQL drops, piping curl to shell, and more. Don't disable this in production — it exists for good reasons.
 
 :::warning
-When running in a container backend (Docker, Singularity, Modal, Daytona), dangerous command checks are **skipped** because the container is the security boundary. Make sure your container images are properly locked down.
+When running in a container backend (Docker, Modal, Daytona, or a container plugin such as Singularity), dangerous command checks are **skipped** because the container is the security boundary. Make sure your container images are properly locked down.
 :::
 
 ### Use Allowlists for Messaging Bots
@@ -45202,7 +45210,7 @@ hermes-agent/
 │   ├── credential_files.py   # File-based credential passthrough
 │   ├── env_passthrough.py    # Env var passthrough for sandboxes
 │   ├── ansi_strip.py         # ANSI escape stripping
-│   └── environments/         # Terminal backends (local, docker, ssh, modal, daytona, singularity)
+│   └── environments/         # Terminal backends (local, docker, ssh, modal, daytona, vercel_sandbox)
 │
 ├── gateway/                  # Messaging platform gateway
 │   ├── run.py                # GatewayRunner facade — message dispatch (+ run_*.py siblings)
@@ -45311,7 +45319,7 @@ A shared runtime resolver used by CLI, gateway, cron, ACP, and auxiliary calls. 
 
 ### Tool System
 
-Central tool registry (`tools/registry.py`) with 70+ registered tools across ~28 toolsets. Each tool file self-registers at import time. The registry handles schema collection, dispatch, availability checking, and error wrapping. Terminal tools support 7 backends (local, Docker, SSH, Daytona, Modal, Singularity, Vercel Sandbox).
+Central tool registry (`tools/registry.py`) with 70+ registered tools across ~28 toolsets. Each tool file self-registers at import time. The registry handles schema collection, dispatch, availability checking, and error wrapping. Terminal tools support 6 built-in backends (local, Docker, SSH, Daytona, Modal, Vercel Sandbox) plus plugin backends (e.g. Singularity).
 
 → [Tools Runtime](./tools-runtime.md)
 
@@ -53877,7 +53885,7 @@ These variables configure the [Tool Gateway](../user-guide/features/tool-gateway
 
 | Variable | Description |
 |----------|-------------|
-| `TERMINAL_ENV` | Backend: `local`, `docker`, `ssh`, `singularity`, `modal`, `daytona`, `vercel_sandbox` |
+| `TERMINAL_ENV` | Backend: `local`, `docker`, `ssh`, `modal`, `daytona`, `vercel_sandbox`, or a plugin backend (`singularity`) |
 | `HERMES_DOCKER_BINARY` | Override the container binary Hermes shells out to (e.g. `podman`, `/usr/local/bin/docker`). When unset, Hermes auto-discovers `docker` or `podman` on `PATH`. Needed when both are installed and you want the non-default, or when the binary lives outside `PATH`. |
 | `TERMINAL_DOCKER_IMAGE` | Docker image (default: `nousresearch/hermes-sandbox:desktop`) |
 | `TERMINAL_DOCKER_FORWARD_ENV` | JSON array of env var names to explicitly forward into Docker terminal sessions. Note: skill-declared `required_environment_variables` are forwarded automatically — you only need this for vars not declared by any skill. |
@@ -53885,7 +53893,7 @@ These variables configure the [Tool Gateway](../user-guide/features/tool-gateway
 | `TERMINAL_DOCKER_ENV` | JSON object of extra env vars to set inside Docker terminal sessions (e.g. `{"FOO":"bar"}`) |
 | `TERMINAL_DOCKER_EXTRA_ARGS` | JSON array of extra `docker run` arguments (e.g. `["--memory","4g"]`) |
 | `TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE` | Advanced opt-in: mount the launch cwd into Docker `/workspace` (`true`/`false`, default: `false`) |
-| `TERMINAL_SINGULARITY_IMAGE` | Singularity image or `.sif` path |
+| `TERMINAL_SINGULARITY_IMAGE` | Singularity image or `.sif` path (read by the [`singularity` plugin](https://github.com/NousResearch/hermes-official-plugins/tree/main/singularity)) |
 | `TERMINAL_MODAL_IMAGE` | Modal container image |
 | `TERMINAL_DAYTONA_IMAGE` | Daytona sandbox image |
 | `TERMINAL_VERCEL_RUNTIME` | Vercel Sandbox runtime (`node24`, `node22`, `python3.13`) |
@@ -53905,7 +53913,7 @@ For cloud sandbox backends, persistence is filesystem-oriented. `TERMINAL_LIFETI
 | `TERMINAL_SSH_PORT` | SSH port (default: 22) |
 | `TERMINAL_SSH_KEY` | Path to private key |
 
-## Container Resources (Docker, Singularity, Modal, Daytona)
+## Container Resources (Docker, Modal, Daytona, container plugin backends)
 
 | Variable | Description |
 |----------|-------------|
@@ -73558,8 +73566,10 @@ from operator config.
 # Terminal Environment Provider Plugins
 
 Hermes runs shell commands through a pluggable set of **terminal backends**.
-The built-in backends (local, Docker, Singularity, Modal, Daytona, Vercel
-Sandbox, SSH) live in the core repo under `tools/environments/`. Third-party
+The built-in backends (local, Docker, Modal, Daytona, Vercel Sandbox, SSH)
+live in the core repo under `tools/environments/`. The official
+[Singularity/Apptainer plugin](https://github.com/NousResearch/hermes-official-plugins/tree/main/singularity)
+is a complete worked example of this page. Third-party
 sandbox vendors integrate as **plugins** instead — a standalone plugin repo
 installed under `~/.hermes/plugins/`, registering a backend the user selects
 exactly like a built-in one via `terminal.backend` in `config.yaml`.
@@ -73661,8 +73671,8 @@ hermes config set terminal.backend acmebox
 ## Rules
 
 - **Reserved names.** Registrations that collide with a built-in backend name
-  (`local`, `docker`, `singularity`, `modal`, `managed_modal`, `daytona`,
-  `vercel_sandbox`, `ssh`) are rejected. Plugins extend the backend set; they
+  (`local`, `docker`, `modal`, `managed_modal`, `daytona`, `vercel_sandbox`,
+  `ssh`) are rejected. Plugins extend the backend set; they
   never shadow in-tree backends.
 - **`create_environment` must accept `**kwargs`** and ignore unknown keys —
   the forward-compat contract that lets the factory signature evolve without
@@ -73688,6 +73698,15 @@ interface as `tools.environments.base.BaseEnvironment`:
 
 Subclassing `BaseEnvironment` is recommended (you inherit the shared file-sync
 and background-process plumbing) but not required.
+
+## Images
+
+Your backend reads its own image setting (a `config_schema` key, or a
+`terminal.<name>_image` key you document). Hermes passes `image=` only for a
+per-task override: a batch run (`batch_runner.py`) giving each prompt its own
+container registers it as `<name>_image` for the active backend, and that value
+reaches `create_environment(image=...)`. Otherwise `image` is `""`; fall back to
+your setting.
 
 ## Starting directory
 
@@ -73727,8 +73746,8 @@ Relative paths are ignored, because Hermes would anchor them on the host.
 
 ## Bot Desktop and `computer_use`
 
-The screen, `computer_use` and the browser follow the terminal into Docker, SSH
-and Singularity sandboxes by spawning long-lived processes there with stdin and
+The screen, `computer_use` and the browser follow the terminal into Docker and
+SSH sandboxes (and the Singularity plugin's) by spawning long-lived processes there with stdin and
 stdout left open. A plugin backend can opt in the same way:
 
 1. Set `supports_streams = True` on the provider. `bot_desktop.placement: auto`
@@ -73753,11 +73772,12 @@ the browser keep their scratch files under the environment's
 `get_temp_dir()`. An environment that doesn't subclass `BaseEnvironment` and
 has no such method gets the same default `BaseEnvironment` uses.
 
-Both `exec_prefix()` and the `~` home resolution read the environment object
-itself, so they work only for plugins loaded in-process. Under
-`plugins.isolation: host` the environment reaches Hermes as an opaque
-placeholder: Bot Desktop refuses a `supports_streams` backend with a message
-naming the setting, and `default_cwd = "~"` stays a literal `~`.
+A terminal backend runs only in-process: its environment object is what the
+terminal tool, file tools, `exec_prefix()` and the `~` home resolution all
+drive. Under `plugins.isolation: host` the object cannot cross the host
+boundary, so creating the environment refuses with a message naming
+`plugins.isolation: in_process` (before the host starts a sandbox), and Bot
+Desktop refuses a `supports_streams` backend the same way.
 
 ## Session isolation semantics
 
@@ -73981,10 +74001,10 @@ The terminal system supports multiple backends:
 - local
 - docker
 - ssh
-- singularity
 - modal
 - daytona
 - vercel_sandbox
+- plugin backends registered through `ctx.register_terminal_environment_provider` (e.g. `singularity`)
 
 It also supports:
 
@@ -83954,7 +83974,7 @@ browser act on, streamed live into Hermes Desktop. Watch what the bot does,
 **hand control back** and let it continue with the session you just signed in
 to. The bot keeps working after you close the app or turn off your laptop; the
 screen lives on the gateway host, not on your machine. If the gateway runs its
-`terminal` in a sandbox (`terminal.backend: docker`, `ssh` or `singularity`),
+`terminal` in a sandbox (`terminal.backend: docker`, `ssh`, or a streaming plugin backend such as `singularity`),
 the screen lives **inside that sandbox** instead, alongside the shell, so the
 bot's `computer_use` and browser never act outside the boundary you drew (see
 [Where the screen runs](#where-the-screen-runs)).
@@ -84176,7 +84196,7 @@ same place. `bot_desktop.placement` decides where:
 | `terminal.backend` | `placement: auto` (default) | What that means |
 |---|---|---|
 | `local` | gateway host | The terminal, the screen, the browser and `computer_use` all share the machine running the gateway. |
-| `docker`, `ssh`, `singularity` | **inside the sandbox** | Xvnc + Xfce, Chromium and cua-driver run in the container / on the SSH host, spawned through the same `docker exec` / `ssh` channel the terminal uses. The pane streams the sandbox's screen; nothing of the host desktop is reachable. |
+| `docker`, `ssh`, `singularity` (plugin) | **inside the sandbox** | Xvnc + Xfce, Chromium and cua-driver run in the container / on the SSH host, spawned through the same `docker exec` / `ssh` channel the terminal uses. The pane streams the sandbox's screen; nothing of the host desktop is reachable. |
 | A plugin backend that declares `supports_streams` | **inside the sandbox** | Same as above, through the plugin's own exec channel. |
 | `modal`, `daytona`, `vercel_sandbox`, other plugin backends | **refused** | These backends cannot host a display yet. Rather than quietly running the screen on the host beside the sandbox you chose for the agent, `Start` explains and points at `placement: gateway`. |
 
@@ -84927,7 +84947,7 @@ no-foreground invariant, click-dispatch internals — see
 `computer_use` acts on the same machine the bot's screen lives on, never on
 the machine running Hermes Desktop. On a gateway with `terminal.backend:
 local` that is the gateway host. With a sandboxed terminal (`docker`, `ssh`,
-`singularity`, or a plugin backend that declares `supports_streams`) the
+or a plugin backend that declares `supports_streams`, such as `singularity`) the
 driver runs **inside the sandbox** on the sandbox's own
 display, so it can only ever touch what the terminal can; the sandbox image
 must carry `cua-driver` (`nousresearch/hermes-sandbox:desktop` does). Modal,
