@@ -103,7 +103,7 @@ Repo: https://github.com/NousResearch/hermes-agent
 ## Media & Web
 
 - [Voice Mode](./user-guide/features/voice-mode.md): Real-time voice conversations with Hermes Agent — CLI, Telegram, Discord (DMs, text channels, and voice channels)
-- [Browser](./user-guide/features/browser.md): Control browsers with multiple providers, local Chromium-family browsers via CDP, or cloud browsers for web interaction, form filling, scraping, and more.
+- [Browser](./user-guide/features/browser.md): Drive a real browser with browser_exec — Hermes-launched Chromium, cloud browsers, Lightpanda, or your own Chrome via CDP — for web interaction, form filling, scraping, and more.
 - [Vision](./user-guide/features/vision.md): Paste images from your clipboard into the Hermes CLI for multimodal vision analysis.
 - [Image Generation](./user-guide/features/image-generation.md): Generate images via FAL.ai — 11 models including FLUX 2, GPT Image (1.5 & 2), Nano Banana Pro, Ideogram, Recraft V4 Pro, Krea 2, and more, selectable via `hermes tools`.
 - [Text-to-Speech](./user-guide/features/tts.md): Text-to-speech and voice message transcription across all platforms

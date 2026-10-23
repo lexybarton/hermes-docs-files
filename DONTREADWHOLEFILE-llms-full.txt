@@ -76,12 +76,14 @@ The desktop/server scripts are not the Termux installation path.
 The scripts clone the source, bootstrap uv, and delegate dependency preparation
 to PM. PM provides pinned Python, Node.js, npm, ripgrep, and FFmpeg. The source
 installation selects the `all` Python extra, not every optional extra.
-PM also installs the browser and computer-use tools by default: `agent-browser`
-and its pinned Chromium, and `cua-driver` (the computer-use driver, on macOS,
-Windows and glibc Linux). If a download fails, the install still completes and
-prints the command to retry. The default browser driver (browser-harness, the
-engine of the Browser Use CLI) is a regular Python dependency, so every install,
-the Desktop app included, already has it.
+PM also installs the browser and computer-use tools by default: a pinned
+Chromium (Chrome for Testing) that Hermes launches for local browsing, and
+`cua-driver` (the computer-use driver, on macOS, Windows and glibc Linux). If a
+download fails, the install still completes and prints the command to retry.
+The browser driver behind `browser_exec` (browser-harness, the engine of the
+Browser Use CLI) is a regular Python dependency, so every install, the Desktop
+app included, already has it. Where PM has no Chromium build (Android/Termux,
+musl Linux), Hermes uses a system `chromium` on `PATH` instead.
 Other optional tools use their feature-specific installation paths.
 
 A new install lands on the latest stable release, the channel `hermes update`
@@ -92,7 +94,7 @@ follows from then on (see [Updating](./updating.md)). To install the tip of
 To leave the browser tools out, pass `--skip-browser` on POSIX or `-SkipBrowser`
 on Windows; for the computer-use driver, `--skip-computer-use` /
 `-SkipComputerUse`. Hermes remembers these choices: later installs and
-`hermes update` do not add them back. Run `hermes pm install agent-browser` or
+`hermes update` do not add them back. Run `hermes pm install chromium` or
 `hermes pm install cua-driver` to install them and undo the choice.
 
 The scripts create a launcher and prepare the data directory. Interactive runs
@@ -210,7 +212,7 @@ Run the source installer as the intended service user. Its home, tool store,
 configuration, and launcher must belong to that user.
 
 1. As an administrator, install the source-build prerequisites and any Linux
-   libraries needed by the selected browser backend.
+   libraries Chromium needs (only if the service will browse locally).
 2. As the service user, run the regular installer:
 
    ```bash
@@ -5874,7 +5876,7 @@ tool_loop_guardrails:
 Hard stops are designed to catch **replays** — the same call, unchanged, with nothing happening in between — not legitimate iteration:
 
 - **Edit → re-run is never a loop.** Any successful mutating call (`write_file`, `patch`, a green `terminal`/`execute_code`, a browser action, a job/message/cron mutation) marks progress for every failing call still being counted. The next identical retry (re-running a red test after a fix, re-snapshotting after a click) starts a fresh streak instead of accumulating toward a block.
-- **Distinct red commands are diagnosis, not a loop.** For tools whose non-zero exit is ordinary output (`terminal`, `execute_code`, process pollers, `browser_navigate`, `web_extract`) the `same_tool_failure` threshold only warns and never halts. Only an exact-args replay with no intervening change, or an identical-result streak, can stop them.
+- **Distinct red commands are diagnosis, not a loop.** For tools whose non-zero exit is ordinary output (`terminal`, `execute_code`, process pollers, `browser_exec`, `web_extract`) the `same_tool_failure` threshold only warns and never halts. Only an exact-args replay with no intervening change, or an identical-result streak, can stop them.
 - **A halt ends the turn, not the session.** The agent replies with which guardrail fired and why; replying "continue" resumes with fresh per-turn counters.
 
 ### Per-turn runaway-loop caps
@@ -6544,37 +6546,68 @@ web:
 
 ## Browser
 
-Configure browser automation behavior:
+Configure browser automation behavior. Every browser key lives under `browser:`;
+see the [Browser feature page](./features/browser.md) for how the browser sources
+(local Chromium, cloud providers, Lightpanda, `/browser connect`, real profile) fit together.
 
 ```yaml
 browser:
-  inactivity_timeout: 120        # Seconds before auto-closing idle sessions
-  command_timeout: 30             # Timeout in seconds for browser commands (screenshot, navigate, etc.)
-  record_sessions: false         # Auto-record browser sessions as WebM videos to ~/.hermes/browser_recordings/
-  # Optional CDP override — when set, Hermes attaches directly to your own
-  # Chromium-family browser (via /browser connect) rather than starting a headless browser.
+  inactivity_timeout: 120        # Seconds before an idle browser is closed
+  command_timeout: 30            # Chromium launch timeout floor (seconds)
+  headed: false                  # true = visible Chromium window (local); keeps the browser open between turns
+  engine: auto                   # auto (Chromium) | lightpanda ("chrome" is accepted as auto)
+  # Local Chromium launched by Hermes
+  executable_path: ""            # Chromium binary override; "" = the packaged Chromium
+  user_data_dir: ""              # Persistent profile shared by every session; "" = fresh profile per session
+  chromium_args: []              # Extra Chromium command-line flags, e.g. ["--lang=de-DE"]
+  # Cloud browser selection (written by `hermes tools` → Browser Automation)
+  cloud_provider: local          # local | browserbase | browser-use | firecrawl | nous | <provider plugin>; unset = autodetect from credentials
+  auto_local_for_private_urls: true  # With a cloud provider, open LAN/localhost URLs in a local Chromium
+  allow_private_urls: false      # Allow private/internal addresses (localhost, 192.168.x.x, ...)
+  # Optional CDP override — when set, the browser tools attach to your own
+  # Chromium-family browser (as /browser connect does) instead of launching one.
   cdp_url: ""
-  # Dialog supervisor — controls how native JS dialogs (alert / confirm / prompt)
-  # are handled when a CDP backend is attached (Browserbase, local Chromium-family
-  # browser via /browser connect). Ignored on Camofox and default local agent-browser mode.
+  use_real_profile: false        # Browse on a managed copy of your real browser profile (opt-in)
+  # Dialog supervisor — how native JS dialogs (alert / confirm / prompt / beforeunload) are handled
   dialog_policy: must_respond    # must_respond | auto_dismiss | auto_accept
   dialog_timeout_s: 300          # Safety auto-dismiss under must_respond (seconds)
-  camofox:
-    managed_persistence: false   # When true, Camofox sessions persist cookies/logins across restarts
-    user_id: ""                  # Optional externally managed Camofox userId
-    session_key: ""              # Optional session key sent when Hermes creates a tab
-    adopt_existing_tab: false    # Reuse an existing tab for this identity before creating one
 ```
+
+**Executable resolution.** Hermes launches the first Chromium it finds:
+`browser.executable_path` → the Chromium installed by Hermes's package manager
+(`hermes pm install chromium`) → `/etc/hermes/chromium-executable-path` (official
+Docker image) → a system `chromium` / `chromium-browser` on `PATH` (Termux and
+platforms without a packaged build). With none, the browser tool reports a hint
+instead of failing silently.
+
+**Turning browsing off.** There is no browser config switch: disable the `browser`
+toolset with `hermes tools` (or `hermes tools disable browser [--platform NAME]`).
 
 **Dialog policies:**
 
-- `must_respond` (default) — capture the dialog, surface it in `browser_snapshot.pending_dialogs`, and wait for the agent to call `browser_dialog(action=...)`. After `dialog_timeout_s` seconds with no response, the dialog is auto-dismissed to prevent the page's JS thread from stalling forever.
-- `auto_dismiss` — capture, dismiss immediately. The agent still sees the dialog record in `browser_snapshot.recent_dialogs` with `closed_by="auto_policy"` after the fact.
+- `must_respond` (default) — capture the dialog and wait for the agent to call `browser_dialog(action=...)`. After `dialog_timeout_s` seconds with no response, the dialog is auto-dismissed to prevent the page's JS thread from stalling forever.
+- `auto_dismiss` — capture, dismiss immediately.
 - `auto_accept` — capture, accept immediately. Useful for pages with aggressive `beforeunload` prompts.
 
 See the [browser feature page](./features/browser.md#browser_dialog) for the full dialog workflow.
 
-The browser toolset supports multiple providers. See the [Browser feature page](./features/browser.md) for details on Browserbase, Browser Use, and local Chromium-family CDP setup.
+**Removed keys (migrated automatically).** `browser.backend` is gone — `browser_exec` is the
+only browser path. An old `backend: off` (quoted or not) is removed with a one-time notice to
+disable the `browser` toolset instead, shown by `hermes update` or, when Hermes migrated the config as it
+started, as a warning at the start of the first session. Any other value is removed with a note naming it
+and what replaced it (`camofox`: the Camofox plugin, `local`: the packaged Chromium browser_exec launches,
+a cloud name: `browser.cloud_provider`).
+`snapshot_threshold`, `record_sessions`, `allow_unsafe_evaluate` and `restrict_evaluate`
+belonged to the removed built-in browser tools and no longer have an effect. The
+`browser.camofox.*` keys are read by the Camofox plugin (`hermes plugins install camofox`), not by core.
+The old `AGENT_BROWSER_*` environment variables are no longer read; on update their values
+are copied from the profile's `.env` into the matching keys when those keys are unset
+(`AGENT_BROWSER_EXECUTABLE_PATH` → `executable_path`, `AGENT_BROWSER_PROFILE` → `user_data_dir`,
+`AGENT_BROWSER_ARGS` → `chromium_args`, `AGENT_BROWSER_HEADED` → `headed`, `AGENT_BROWSER_ENGINE` → `engine`).
+`engine: auto` and `headed: false` count as unset, because the environment variable overrode them
+before. A relative `AGENT_BROWSER_PROFILE` was resolved against the working directory, so it is
+written as that absolute path (the working directory of the process that migrated the config), with a
+notice, shown the same way, naming the path it pinned so you can check your browser logins are there.
 
 ## Timezone
 
@@ -6640,7 +6673,7 @@ security:
       - "/etc/hermes/blocked-sites.txt"
 ```
 
-When enabled, any URL matching a blocked domain pattern is rejected before the web or browser tool executes. This applies to `web_search`, `web_extract`, `browser_navigate`, and any tool that accesses URLs.
+When enabled, any URL matching a blocked domain pattern is rejected before the web or browser tool executes. This applies to `web_search`, `web_extract`, browser navigation, and any tool that accesses URLs.
 
 Domain rules support:
 - Exact domains: `admin.example.com`
@@ -9888,7 +9921,8 @@ The image uses Debian 13.4 and includes:
 - s6-overlay for supervision and zombie-process cleanup.
 
 Chromium is staged through PM, not `npx playwright install`. The build records
-its resolved executable in `/etc/hermes/agent-browser-executable-path`.
+its resolved executable in `/etc/hermes/chromium-executable-path`, which Hermes
+reads when it launches the browser.
 `PLAYWRIGHT_BROWSERS_PATH` names `/opt/hermes/tools`, outside the data mount.
 
 Every image, including the unsuffixed (non-`-desktop`) tags, carries the full
@@ -10273,7 +10307,7 @@ docker exec -u root hermes chmod 0755 /opt/hermes
 
 ### Browser tools not working
 
-Playwright needs shared memory. Add `--shm-size=1g` to your Docker run command:
+Chromium needs shared memory. Add `--shm-size=1g` to your Docker run command:
 
 ```sh
 docker run -d \
@@ -11055,7 +11089,7 @@ security:
       - "/etc/hermes/blocked-sites.txt"
 ```
 
-When a blocked URL is requested, the tool returns an error explaining the domain is blocked by policy. The blocklist is enforced across `web_search`, `web_extract`, `browser_navigate`, and all URL-capable tools.
+When a blocked URL is requested, the tool returns an error explaining the domain is blocked by policy. The blocklist is enforced across `web_search`, `web_extract`, `browser_exec`, and all URL-capable tools.
 
 See [Website Blocklist](./configuration.md#website-blocklist) in the configuration guide for full details.
 
@@ -11706,7 +11740,7 @@ High-level categories:
 | **Web** | `web_search`, `web_extract` | Search the web and extract page content. |
 | **X Search** | `x_search` | Search X (Twitter) posts and threads via xAI's built-in `x_search` Responses tool — gated on xAI credentials (SuperGrok OAuth or `XAI_API_KEY`); off by default, opt in via `hermes tools` → 🐦 X (Twitter) Search. |
 | **Terminal & Files** | `terminal`, `process`, `read_file`, `patch` | Execute commands and manipulate files. |
-| **Browser** | `browser_navigate`, `browser_snapshot`, `browser_vision` | Interactive browser automation with text and vision support. |
+| **Browser** | `browser_exec`, `browser_cdp`, `browser_dialog`, `browser_vault` | Browser automation: `browser_exec` drives Chromium with Python over CDP (screenshots included). The Camofox browser is a separate catalog plugin (`hermes plugins install camofox`). |
 | **Media** | `vision_analyze`, `image_generate`, `text_to_speech` | Multimodal analysis and generation. |
 | **Agent orchestration** | `todo`, `clarify`, `execute_code`, `delegate_task` | Planning, clarification, code execution, and subagent delegation. |
 | **Memory & recall** | `memory`, `session_search` | Persistent memory and session search. |
@@ -18800,7 +18834,7 @@ The model only ever sees the names and descriptions you configured, never raw pr
 
 **Failures are explicit, never a silent switch.** If the selected backend is missing (plugin not installed or disabled) or reports it cannot run, `delegate_task` returns a tool error naming the backend and the fix, and no subagent starts; it never quietly runs the children on the default route. Within a batch, a task its backend cannot route (an unknown option, a parameter the selected backend does not take, a profile that does not exist, a `service_tier` the route does not offer, an unknown `reasoning_effort`, missing credentials) is refused alone: its result entry has `status: "error"`, the reason, and `route.refused: true`, while the other tasks run. A model route without its own `fallback_providers` uses `delegation.fallback_providers`; `fallback_providers: []` on the route disables fallback for it. A profile route uses that profile's own fallback chain.
 
-**Switching back.** `/delegation default` (from the `advanced-delegation` plugin) switches the current session to the default backend, and `/delegation <backend> --global` writes `delegation.backend` to `config.yaml`, following the `/model` convention. A session switch changes routing from the next `delegate_task` call and lasts until the conversation ends (`/new`, `/resume`, an automatic reset); the per-task parameters the model sees (option or profile names) follow `config.yaml` and change at the next session, because the tool list is part of the cached prompt. Until then, a task that sends the previous backend's parameter (an `option` after switching to `profile_routes`) is refused with a message naming the session's backend, the parameter and the fix (`/delegation <backend> --global` then `/new`, because `/new` starts on the saved backend, or `/delegation <saved backend>` back); it never runs on the new backend's default route. Without the plugin, `hermes config set delegation.backend default` restores the default.
+**Switching back.** `/delegation default` (from the `advanced-delegation` plugin) saves `delegation.backend` to `config.yaml` and applies from the next session (`/new`): a running chat keeps routing on the backend it started with, because the per-task choices the model sees (option or profile names) are part of the cached tool list and the two switch together. A hand edit of `delegation.backend` behaves the same. `/delegation <backend> --now` also rebuilds the current chat's tools at its next turn, so it routes on and offers the new backend from there, at the cost of one prompt-cache miss (context compression, which rebuilds the tools anyway, picks up the saved backend too). A task that sends a parameter its chat's backend does not take is refused with a message naming the backend, the parameter and the fix (`/delegation <backend> --now`, or `/new`); it never runs on the backend's default route. Without the plugin, `hermes config set delegation.backend default` restores the default.
 
 :::note Profile routes share credentials
 Listing a profile in `delegation.backends.profile_routes` lets this profile's subagents use that profile's credentials, credential pool, `SOUL.md` and terminal policy. Only list profiles whose keys and terminal access you are happy for this profile's agent to use.
@@ -24727,55 +24761,187 @@ The hallucination filter catches most cases automatically. If you're still getti
 
 # Browser Automation
 
-Hermes Agent includes a full browser automation toolset with multiple backend options:
+The `browser` toolset gives the agent a real web browser. One tool does the
+driving — **`browser_exec`**, which runs model-written Python against the
+browser over the Chrome DevTools Protocol (CDP) — with three companion tools
+(`browser_cdp` and `browser_dialog` only while a CDP endpoint is configured, see
+[Companion tools](#companion-tools)):
 
-- **Browser Use cloud mode** via [Browser Use](https://browser-use.com) for managed Chromium with stealth, residential proxies, CAPTCHA solving, and reusable browser profiles
-- **Browserbase cloud mode** via [Browserbase](https://browserbase.com) as an alternative cloud browser provider with anti-bot tooling
-- **Browser Use mode** via the [Browser Use CLI 3.0](https://github.com/browser-use/browser-use), the default browser driver for local Chrome and Browser Use cloud browsers
-- **Firecrawl cloud mode** via [Firecrawl](https://firecrawl.dev) for cloud browsers with built-in scraping
-- **Camofox local mode** via [Camofox](https://github.com/jo-inc/camofox-browser) for local anti-detection browsing (Firefox-based fingerprint spoofing)
-- **Lightpanda local engine** via [Lightpanda](https://lightpanda.io) — a headless browser built from scratch in Zig for machines; instant start up, 16x lower memory and 9x faster than Chrome. Works in Browser Use mode (Hermes spawns it, no Chromium or Node needed) and with the built-in tools (automatic Chrome fallback for actions it doesn't support yet)
-- **Local Chromium-family CDP** — connect browser tools to your own Chrome, Brave, Chromium, or Edge instance using `/browser connect`
-- **Local browser mode** via the `agent-browser` CLI and a local Chromium installation
+| Tool | Purpose |
+|------|---------|
+| `browser_exec` | Navigate, read, click, type, scrape and screenshot by running Python with pre-imported browser helpers. |
+| `browser_cdp` | Send one raw CDP command (cookies, network control, iframe-scoped evaluation, anything the helpers don't cover). |
+| `browser_dialog` | Accept or dismiss a native JavaScript dialog (`alert` / `confirm` / `prompt` / `beforeunload`) blocking the page. |
+| `browser_vault` | Fill saved logins, cards, addresses and 2FA codes into the current page without the secrets entering the conversation. |
 
-In all modes, the agent can navigate websites, interact with page elements, fill forms, and extract information.
+Where the browser comes from is a separate choice:
 
-## Overview
+- **Local Chromium (default)** — Hermes launches its own packaged Chromium, headless, one browser per session. No API key, no setup.
+- **Cloud browsers** — the [Nous subscription](tool-gateway.md), [Browserbase](https://browserbase.com), [Browser Use](https://browser-use.com) cloud, [Firecrawl](https://firecrawl.dev), or a browser-provider plugin.
+- **[Lightpanda](https://lightpanda.io)** — a lightweight headless engine for text-first browsing on small machines.
+- **Your own browser** — attach to a running Chrome, Brave, Chromium or Edge with `/browser connect`.
+- **Your real profile** — a managed copy of your everyday browser profile, logins included (opt-in).
 
-Pages are represented as **accessibility trees** (text-based snapshots), making them ideal for LLM agents. Interactive elements get ref IDs (like `@e1`, `@e2`) that the agent uses for clicking and typing.
-
-Key capabilities:
-
-- **Multi-provider cloud execution** — Browser Use, Browserbase, or Firecrawl — no local browser needed
-- **Local Chromium-family integration** — attach to your running Chrome, Brave, Chromium, or Edge browser via CDP for hands-on browsing
-- **Cloud anti-bot support** — Browser Use Cloud includes stealth, residential proxies, and CAPTCHA solving
-- **Persistent cloud profiles** — Browser Use Cloud can reuse cookies, localStorage, and saved passwords across sessions
-- **Session isolation** — each task gets its own browser session
-- **Automatic cleanup** — inactive sessions are closed after a timeout
-- **Vision analysis** — screenshot + AI analysis for visual understanding
-
-## Setup
-
-:::tip Nous Subscribers
-If you have a paid [Nous Portal](https://portal.nousresearch.com) subscription, you can use browser automation through the **[Tool Gateway](tool-gateway.md)** without any separate API keys. New installs can run `hermes setup --portal` to log in and turn on every gateway tool at once; existing installs can pick **Nous Subscription** as the browser provider via `hermes model` or `hermes tools`.
+:::tip
+For simple information retrieval, prefer `web_search` or `web_extract` — they are faster and cheaper. Use the browser when the agent needs to **interact** with a page (click buttons, fill forms, handle dynamic content).
 :::
 
-### Browser Use cloud mode
+## How `browser_exec` works
 
-To use Browser Use as your cloud browser provider, add:
+Each call sends a block of Python (`code`) that runs with browser helpers
+already imported; whatever the code prints comes back as the result. The
+browser session persists across calls (open tabs, cookies, the current page),
+Python variables do not — every call starts a fresh interpreter. A per-session
+workspace directory (`$BH_AGENT_WORKSPACE`, also returned as `workspace`)
+survives between calls, so long extractions can append batches to a file and
+aggregate them at the end.
+
+The helpers:
+
+| Helper | Does |
+|--------|------|
+| `new_tab(url)` | Open a URL (use for the first navigation). |
+| `goto_url(url)` | Navigate the current tab (later navigations). |
+| `wait_for_load()` | Wait for the page to finish loading. |
+| `page_info()` | Summarize the current page state. |
+| `js(expr)` | Evaluate JavaScript and return the value (wrap function bodies as `js('(() => {...})()')`). |
+| `fill_input(selector, text)` | Type into an input. |
+| `click_at_xy(x, y)` | Click viewport coordinates. |
+| `capture_screenshot()` | Save a screenshot and print its path. |
+| `cdp('Domain.method', **kwargs)` | Raw CDP — e.g. `cdp('Accessibility.getFullAXTree')` for the accessibility tree, `cdp('DOM.getBoxModel', backendNodeId=n)` for click coordinates. |
+| `ensure_real_tab()` | Recover from a stale or internal tab. |
+
+The model batches a whole sub-procedure (navigate, wait, extract, act) into one
+call instead of spending a call per action:
+
+```python
+# Searching GitHub trending for Python repos
+new_tab("https://github.com/trending/python")
+wait_for_load()
+print(js("[...document.querySelectorAll('article h2 a')].slice(0, 10).map(a => a.textContent.trim())"))
+```
+
+**Screenshots.** On a model with native vision, an image saved by
+`capture_screenshot()` is attached to the tool result and the model inspects it
+directly. Text-only models are told to work text-first (`page_info()`, `js()`,
+`fill_input()`); they can still hand a saved path to `vision_analyze`. On
+messaging platforms you can ask the agent to send you a screenshot — it arrives
+as a native photo attachment.
+
+**Parameters.** Besides `code`, the tool takes `timeout_s` (default 300, max
+1800) and `session`. Each `session` name gets its own driver process and its
+own browser (a separate Chromium locally, a separate cloud browser on cloud
+providers), so parallel subagents or simultaneous chats don't clobber one
+shared browser. Omitting `session` uses the shared default session, which is
+fine for one-at-a-time browsing. When [real-profile browsing](#real-profile-browsing-use-your-own-logins)
+is on, the tool also exposes a `local` flag (see that section).
+
+:::note
+`browser_exec` executes model-written Python on your machine, so it is only
+offered to sessions that also have the `terminal` toolset. A platform
+configured without terminal access (for example a locked-down messaging
+surface) gets no browser.
+:::
+
+The driver is [browser-harness](https://github.com/browser-use/browser-use), the
+engine of the Browser Use CLI. It is a regular Python dependency of Hermes, so
+every install — the Desktop app included — ships it with no separate download.
+
+## Local Chromium (default)
+
+With no cloud provider, `/browser connect` endpoint or real-profile toggle
+configured, Hermes starts a Chromium for the session itself and points
+`browser_exec` at it. Your installed Chrome is never touched — there is no
+`chrome://inspect` toggle to enable and no "Allow remote debugging?" popup —
+and it works on headless servers with no desktop browser at all.
+
+- **One browser per session**, with a fresh, throwaway profile by default: the
+  agent starts logged into nothing, and nothing persists after the session.
+- **Headless by default.** Set `browser.headed: true` for a visible window (see
+  [below](#headed-mode-visible-browser-window)).
+- **Automatic cleanup.** The browser is closed after `browser.inactivity_timeout`
+  seconds idle (default 120), when Hermes exits, and by an orphan sweep if a
+  process crashed.
+
+**Which Chromium.** Hermes picks the first that exists:
+
+1. `browser.executable_path`, when set.
+2. The Chromium (Chrome for Testing) installed by Hermes's package manager — the
+   installers and `hermes update` install it by default.
+3. `/etc/hermes/chromium-executable-path` in the official Docker image.
+4. A system `chromium` / `chromium-browser` on `PATH` (Android/Termux, and
+   platforms the package manager has no Chromium build for).
+
+If none is found, the browser tool reports a clear hint instead of failing
+silently. If you installed with `--skip-browser` / `-SkipBrowser`, or the
+download failed, install it with:
+
+```bash
+hermes pm install chromium
+```
+
+This also undoes an earlier `--skip-browser` choice, so updates keep the
+browser current. On Linux, Chromium may also need distribution system
+libraries (`npx playwright install-deps chromium` installs them on
+Debian/Ubuntu). On Android/Termux, run `pkg install chromium` where your
+repository provides it; without a system Chromium, browsing is unavailable on
+that device.
+
+**Local options** (`~/.hermes/config.yaml`):
+
+```yaml
+browser:
+  executable_path: ""     # Chromium binary to launch instead of the packaged one
+  user_data_dir: ""       # persistent profile directory; "" = fresh profile per session
+  chromium_args: []       # extra Chromium command-line flags, e.g. ["--lang=de-DE"]
+  headed: false           # true = visible window
+  command_timeout: 30     # Chromium launch timeout floor (seconds)
+  inactivity_timeout: 120 # close an idle browser after N seconds
+```
+
+`browser.user_data_dir` keeps cookies and logins across sessions: every session
+then shares that one profile directory. Leave it empty for isolated, throwaway
+browsing.
+
+### Headed mode (visible browser window)
+
+```yaml
+browser:
+  headed: true  # default: false
+```
+
+Headed mode does two things:
+
+1. **Launches Chromium with a visible window**, so you can watch the agent work
+   and step in manually (sign-in challenges, CAPTCHAs).
+2. **Keeps the browser open between turns.** Normally the browser is cleaned up
+   after every agent reply; in headed mode the per-turn cleanup is skipped so
+   login state stays warm across the conversation.
+
+Idle browsers are still reaped after `browser.inactivity_timeout`, and all of
+them close on shutdown. On a display-less host (servers, CI) the browser always
+runs headless. Headed mode only affects local browsers — cloud sessions are
+unaffected.
+
+## Cloud browsers
+
+:::tip Nous Subscribers
+If you have a paid [Nous Portal](https://portal.nousresearch.com) subscription, you can use a cloud browser through the **[Tool Gateway](tool-gateway.md)** without any separate API keys. New installs can run `hermes setup --portal` to log in and turn on every gateway tool at once; existing installs can pick **Nous Subscription** as the browser provider via `hermes model` or `hermes tools`.
+:::
+
+Pick a provider in `hermes tools` → Browser Automation. `browser_exec` then
+drives that provider's browser exactly as it drives local Chromium.
+
+### Browser Use cloud
 
 ```bash
 # Add to ~/.hermes/.env
 BROWSER_USE_API_KEY=***
 ```
 
-Get your API key at [browser-use.com](https://browser-use.com).
+Get your API key at [browser-use.com](https://browser-use.com). Browser Use Cloud runs managed Chromium with [stealth](https://docs.browser-use.com/cloud/browser/stealth) and [residential proxies](https://docs.browser-use.com/cloud/browser/proxies) enabled by default, includes CAPTCHA solving, and supports [persistent profiles](https://docs.browser-use.com/cloud/guides/authentication) for cookies, localStorage, and saved passwords.
 
-Browser Use Cloud runs managed Chromium with [stealth](https://docs.browser-use.com/cloud/browser/stealth) and [residential proxies](https://docs.browser-use.com/cloud/browser/proxies) enabled by default, includes CAPTCHA solving, and supports [persistent profiles](https://docs.browser-use.com/cloud/guides/authentication) for cookies, localStorage, and saved passwords.
-
-### Browserbase cloud mode
-
-To use Browserbase-managed cloud browsers, add:
+### Browserbase
 
 ```bash
 # Add to ~/.hermes/.env
@@ -24783,68 +24949,54 @@ BROWSERBASE_API_KEY=***
 BROWSERBASE_PROJECT_ID=your-project-id-here
 ```
 
-Get your credentials at [browserbase.com](https://browserbase.com).
+Get your credentials at [browserbase.com](https://browserbase.com). Optional settings:
 
-:::note Selecting the provider
-The `.env` keys above supply **credentials only**. The active cloud browser is chosen by the `browser.cloud_provider` selection written by `hermes tools` → Browser Automation (`browserbase`, `browser-use`, `camofox`, or `nous` for the Nous Subscription). Once a selection exists, adding or removing a key does not switch providers — and a selected provider with a missing key errors with guidance to run `hermes tools` instead of silently rerouting. Never-configured setups still autodetect from available credentials.
-:::
+```bash
+# Residential proxies for better CAPTCHA solving (default: "true")
+BROWSERBASE_PROXIES=true
 
-### Browser Use mode (default)
+# Advanced stealth with custom Chromium — requires Scale Plan (default: "false")
+BROWSERBASE_ADVANCED_STEALTH=false
 
-Browser Use mode uses the [Browser Use CLI 3.0](https://github.com/browser-use/browser-use) instead of the built-in browser tools. The agent writes and executes Python in the browser to click, type, drag, scrape, and interact with webpages.
+# Session reconnection after disconnects — requires paid plan (default: "true")
+BROWSERBASE_KEEP_ALIVE=true
 
-**This is the default browser mode**: when `browser.backend` is unset, the agent gets the single `browser_exec` tool. Its engine is browser-harness (the Browser Use CLI is a thin wrapper around it), a regular Python dependency of Hermes, so every install ships it, including the Desktop app, with no separate download. If it is ever missing from Hermes's environment, Hermes falls back to the built-in browser tools and `hermes update` restores it.
-
-The mode is a **driver** that composes with your configured browser backend: it drives Hermes' own headless Chromium, a Nous-subscription cloud browser, Browserbase, Firecrawl, or Browser Use cloud browsers — whichever browser source is selected in `hermes tools` → Browser Automation. The one exception is Camofox, which has no CDP endpoint for the harness to attach to; Camofox setups automatically keep the built-in browser tools.
-
-**Local browsing uses the packaged Chromium, not your own Chrome.** With no cloud provider or `/browser connect` endpoint configured, Hermes launches the same Chromium that the built-in tools use (installed via `hermes tools` → Browser Automation, driven through agent-browser) and points the Browser Use CLI at it. Your installed Chrome is never touched, so there is no `chrome://inspect` remote-debugging toggle to enable and no "Allow remote debugging?" popup — and it works on headless hosts with no Chrome at all. The browser is shared with the built-in stack's lifecycle: it is closed after `browser.inactivity_timeout`, at exit, and by the orphan sweep. To drive a browser you're signed in to, use `/browser connect` or the [real-profile toggle](#real-profile-browsing-use-your-own-logins).
-
-**Concurrent sessions:** `browser_exec` accepts a `session=<name>` argument that isolates browser work per name on every backend. Each name gets its own harness daemon (its own IPC socket, log, and state) and its own browser (a separate packaged Chromium locally, a separate cloud browser on cloud backends) — so parallel subagents or simultaneous chats no longer clobber a single shared connection. Omitting `session` uses the shared default daemon, which is fine for one-at-a-time browsing.
-
-To opt out and force the built-in browser tools, use `/browser use off`, or:
-
-```yaml
-# Add to ~/.hermes/config.yaml
-browser:
-  backend: "off"
+# Custom session timeout in seconds (max 21600 = 6 hours) (default: project default)
+BROWSERBASE_SESSION_TIMEOUT=1800
 ```
 
-(`backend: "browser-use"` remains valid to force the mode explicitly.)
+Browserbase stealth features:
 
-Browser Use's own cloud browsers need `BROWSER_USE_API_KEY`; other browser sources use their existing credentials unchanged.
+| Feature | Default | Notes |
+|---------|---------|-------|
+| Basic Stealth | Always on | Random fingerprints, viewport randomization, CAPTCHA solving |
+| Residential Proxies | On | Routes through residential IPs for better access |
+| Advanced Stealth | Off | Custom Chromium build, requires Scale Plan |
+| Keep Alive | On | Session reconnection after network hiccups |
 
-:::note
-Because Browser Use mode executes model-written Python on your machine, the
-`browser_exec` tool is only offered to sessions that also have terminal
-access. Platforms configured without the terminal toolset (e.g. a locked-down
-messaging surface) keep the default browser tools instead.
-:::
+If paid features aren't available on your plan, Hermes automatically falls back — first disabling `keepAlive`, then proxies — so browsing still works on free plans.
 
-### Firecrawl cloud mode
-
-To use Firecrawl as your cloud browser provider, add:
+### Firecrawl
 
 ```bash
 # Add to ~/.hermes/.env
 FIRECRAWL_API_KEY=fc-***
-```
 
-Get your API key at [firecrawl.dev](https://firecrawl.dev). Then select Firecrawl as your browser provider:
-
-```bash
-hermes setup tools
-# → Browser Automation → Firecrawl
-```
-
-Optional settings:
-
-```bash
-# Self-hosted Firecrawl instance (default: https://api.firecrawl.dev)
+# Optional: self-hosted Firecrawl instance (default: https://api.firecrawl.dev)
 FIRECRAWL_API_URL=http://localhost:3002
 
-# Session TTL in seconds (default: 300)
+# Optional: session TTL in seconds (default: 300)
 FIRECRAWL_BROWSER_TTL=600
 ```
+
+Get your API key at [firecrawl.dev](https://firecrawl.dev), then select **Firecrawl** in `hermes tools` → Browser Automation.
+
+:::note Selecting the provider
+The `.env` keys above supply **credentials only**. The active browser is chosen by the `browser.cloud_provider` selection written by `hermes tools` → Browser Automation (`local`, `browserbase`, `browser-use`, `firecrawl`, or `nous` for the Nous Subscription; provider plugins add their own names). Once a selection exists, adding or removing a key does not switch providers — and a selected provider with a missing key errors with guidance to run `hermes tools` instead of silently rerouting. Never-configured setups still autodetect from available credentials.
+:::
+
+Cloud sessions consume provider credits. Hermes releases them when the
+conversation ends, after `browser.inactivity_timeout`, and on process exit.
 
 ### Hybrid routing: cloud for public URLs, local for LAN/localhost
 
@@ -24860,7 +25012,7 @@ the agent can screenshot your dashboard at `http://localhost:3000` AND scrape
 The cloud provider never sees the private URL.
 
 The feature is **on by default**. To disable it (all URLs go to the configured
-cloud provider, as before):
+cloud provider):
 
 ```yaml
 # ~/.hermes/config.yaml
@@ -24874,13 +25026,12 @@ With auto-routing disabled, private URLs are rejected with
 `browser.allow_private_urls: true` (which lets the cloud provider attempt them —
 usually won't work since Browserbase etc. can't reach your LAN).
 
-Requirements: the local sidecar uses the same `agent-browser` CLI as pure local
-mode, so you need it installed (`hermes setup tools → Browser Automation`
-auto-installs it). Post-navigation redirects from a public URL onto a private
-address are still blocked (you can't use a redirect-to-internal trick to reach
-your LAN through the public path).
+The sidecar is the same local Chromium described [above](#local-chromium-default),
+so it needs that Chromium installed. Post-navigation redirects from a public URL
+onto a private address are still blocked (you can't use a redirect-to-internal
+trick to reach your LAN through the public path).
 
-### Real profile browsing (use your own logins)
+## Real profile browsing (use your own logins)
 
 By default, local browsing runs in a clean, throwaway profile — the agent is
 logged into nothing. Turn on **real profile browsing** to let the agent browse
@@ -24915,8 +25066,7 @@ working while the agent tweets, fills forms, or scrapes on your behalf.
 (Headless here uses Chrome's *new* headless mode, which reads your normal
 cookie store, so your logins still load.) If you'd rather watch it work, the
 same [headed-mode](#headed-mode-visible-browser-window) toggle applies —
-`browser.headed: true` (or `AGENT_BROWSER_HEADED=1`) opens a visible window for
-real-profile browsing too. On a display-less host (servers, CI) it always runs
+`browser.headed: true` opens a visible window for real-profile browsing too. On a display-less host (servers, CI) it always runs
 headless regardless.
 
 If your browser has several profiles (say a work profile and a personal one)
@@ -24974,11 +25124,11 @@ up your profile.
 - **Supported browsers:** Chrome, Edge, Brave, Brave Origin, Chromium (whichever is your OS
   default). A non-Chromium default (e.g. Firefox) gets a fresh browser and a clear
   message rather than a guess at which profile to use.
-- **Works on any backend.** On a local backend it's automatic once the toggle
-  is on. Under a **cloud** browser backend, the agent can still open a
+- **Works with any browser source.** Locally it's automatic once the toggle
+  is on. Under a **cloud** browser provider, the agent can still open a
   real-profile local session on demand via the `browser_exec` tool's `local`
   argument (the tool only exposes that argument when this toggle is on) — the
-  cloud backend keeps serving everything else.
+  cloud provider keeps serving everything else.
 - **Security framing:** this is a consent-gated convenience, not an isolation
   boundary. A page the agent visits runs with your real logins, so only enable
   it when you want the agent acting as you. Off by default.
@@ -24986,7 +25136,7 @@ up your profile.
   Browser Profile** (the switch sits above the backend options), or in
   Settings → Config under the `browser` section.
 
-#### Scheduled and unattended runs
+### Scheduled and unattended runs
 
 A real-profile session lets a `cronjob` drive a site you're already signed into.
 The snapshot runs headless by default, and the auth files (`Cookies`,
@@ -25020,219 +25170,28 @@ shape — a JSON watch contract written during setup, then one scheduled tick th
 re-reads it, compares, and alerts on change — though it covers the scheduling
 half, not logins.
 
-### Camofox local mode
-
-[Camofox](https://github.com/jo-inc/camofox-browser) is a self-hosted Node.js server wrapping Camoufox (a Firefox fork with C++ fingerprint spoofing). It provides local anti-detection browsing without cloud dependencies.
-
-```bash
-# Clone the Camofox browser server first
-git clone https://github.com/jo-inc/camofox-browser
-cd camofox-browser
-
-# Build and start with Docker using the default container settings
-# (auto-detects arch: aarch64 on M1/M2, x86_64 on Intel)
-make up
-
-# Stop and remove the default container
-make down
-
-# Force a clean rebuild (for example, after upgrading VERSION/RELEASE)
-make reset
-
-# Just download binaries without building
-make fetch
-
-# Override arch or version explicitly
-make up ARCH=x86_64
-make up VERSION=135.0.1 RELEASE=beta.24
-```
-
-`make up` starts the default container immediately. If you want custom runtime settings such as a larger Node heap, VNC, or a persistent profile directory, build the image first and then run it yourself:
-
-```bash
-# Build the image without starting the default container
-make build
-
-# Start with persistence, VNC live view, and a larger Node heap
-mkdir -p ~/.camofox-docker
-docker run -d \
-  --name camofox-browser \
-  --restart unless-stopped \
-  -p 9377:9377 \
-  -p 6080:6080 \
-  -p 5901:5900 \
-  -e CAMOFOX_PORT=9377 \
-  -e ENABLE_VNC=1 \
-  -e VNC_BIND=0.0.0.0 \
-  -e VNC_RESOLUTION=1920x1080 \
-  -e MAX_OLD_SPACE_SIZE=2048 \
-  -v ~/.camofox-docker:/root/.camofox \
-  camofox-browser:135.0.1-aarch64
-```
-
-With VNC enabled, the browser runs in headed mode and can be watched live in your browser at `http://localhost:6080` (noVNC). You can also connect a native VNC client to `localhost:5901`.
-
-If you already ran `make up`, stop and remove that default container before starting the custom one:
-
-```bash
-make down
-# then run the custom docker run command above
-```
-
-Then set in `~/.hermes/.env`:
-
-```bash
-CAMOFOX_URL=http://localhost:9377
-```
-
-If Camofox is running in Docker and you want it to open web apps served from the host machine, enable loopback rewriting. `CAMOFOX_URL` should still point at the host-published control API, but page URLs such as `http://127.0.0.1:3000` must be opened from inside the container as `http://host.docker.internal:3000`:
-
-```yaml
-# ~/.hermes/config.yaml
-browser:
-  camofox:
-    rewrite_loopback_urls: true
-    loopback_host_alias: host.docker.internal  # default; use a LAN IP if needed
-```
-
-Equivalent env vars:
-
-```bash
-CAMOFOX_REWRITE_LOOPBACK_URLS=true
-CAMOFOX_LOOPBACK_HOST_ALIAS=host.docker.internal
-```
-
-The rewrite only applies to page navigation URLs with loopback hosts (`localhost`, `127.0.0.1`, `::1`). It does not change `CAMOFOX_URL`. Leave it disabled for non-Docker Camofox installs, where the browser already runs on the host and loopback URLs are correct.
-
-Or configure via `hermes tools` → Browser Automation → Camofox.
-
-Camofox is selected like any other browser backend: pick **Camofox** in `hermes tools` → Browser Automation, which writes `browser.cloud_provider: camofox` to `config.yaml`. `CAMOFOX_URL` is only the server address — setting it no longer selects the backend by itself once a browser selection exists (never-configured setups still autodetect it).
-
-#### Persistent browser sessions
-
-By default, each Camofox session gets a random identity — cookies and logins don't survive across agent restarts. To enable persistent browser sessions, add the following to `~/.hermes/config.yaml`:
-
-```yaml
-browser:
-  camofox:
-    managed_persistence: true
-```
-
-Then fully restart Hermes so the new config is picked up.
-
-:::warning Nested path matters
-Hermes reads `browser.camofox.managed_persistence`, **not** a top-level `managed_persistence`. A common mistake is writing:
-
-```yaml
-# ❌ Wrong — Hermes ignores this
-managed_persistence: true
-```
-
-If the flag is placed at the wrong path, Hermes silently falls back to a random ephemeral `userId` and your login state will be lost on every session.
-:::
-
-##### What Hermes does
-- Sends a deterministic profile-scoped `userId` to Camofox so the server can reuse the same Firefox profile across sessions.
-- Skips server-side context destruction on cleanup, so cookies and logins survive between agent tasks.
-- Scopes the `userId` to the active Hermes profile, so different Hermes profiles get different browser profiles (profile isolation).
-
-##### What Hermes does not do
-- It does not force persistence on the Camofox server. Hermes only sends a stable `userId`; the server must honor it by mapping that `userId` to a persistent Firefox profile directory.
-- If your Camofox server build treats every request as ephemeral (e.g. always calls `browser.newContext()` without loading a stored profile), Hermes cannot make those sessions persist. Make sure you are running a Camofox build that implements userId-based profile persistence.
-
-##### Verify it's working
-
-1. Start Hermes and your Camofox server.
-2. Open Google (or any login site) in a browser task and sign in manually.
-3. End the browser task normally.
-4. Start a new browser task.
-5. Open the same site again — you should still be signed in.
-
-If step 5 logs you out, the Camofox server isn't honoring the stable `userId`. Double-check your config path, confirm you fully restarted Hermes after editing `config.yaml`, and verify your Camofox server version supports persistent per-user profiles.
-
-##### Where state lives
-
-Hermes derives the stable `userId` from the profile-scoped directory `~/.hermes/browser_auth/camofox/` (or the equivalent under `$HERMES_HOME` for non-default profiles). The actual browser profile data lives on the Camofox server side, keyed by that `userId`. To fully reset a persistent profile, clear it on the Camofox server and remove the corresponding Hermes profile's state directory.
-
-#### Externally managed Camofox sessions
-
-When another app drives the visible Camofox browser (a desktop assistant, a custom integration, another agent), configure Hermes to operate inside that same identity instead of spawning its own isolated profile.
-
-Three knobs control the behavior:
-
-| Setting | Env var | Effect |
-|---------|---------|--------|
-| `browser.camofox.user_id` | `CAMOFOX_USER_ID` | Camofox `userId` Hermes uses when creating tabs. Setting this opts the session into "externally managed" mode. |
-| `browser.camofox.session_key` | `CAMOFOX_SESSION_KEY` | `sessionKey` (a.k.a. `listItemId`) sent on tab creation. Used to match an existing tab during adoption. Defaults to a per-task value if unset. |
-| `browser.camofox.adopt_existing_tab` | `CAMOFOX_ADOPT_EXISTING_TAB` | When true, Hermes calls `GET /tabs?userId=<user_id>` on first use and reuses an existing tab before creating a new one. |
-
-Env vars take precedence over `config.yaml`. Either form works:
-
-```yaml
-browser:
-  camofox:
-    user_id: shared-camofox
-    session_key: visible-tab
-    adopt_existing_tab: true
-```
-
-```bash
-CAMOFOX_USER_ID=shared-camofox
-CAMOFOX_SESSION_KEY=visible-tab
-CAMOFOX_ADOPT_EXISTING_TAB=true
-```
-
-**What changes when `user_id` is set:**
-
-- Hermes skips destructive cleanup at task end (same as `managed_persistence: true`). The other app's tab/cookies/profile survive.
-- Hermes does **not** call `DELETE /sessions/<user_id>` — that endpoint wipes all user data, so it would nuke the external app's session if it fired.
-
-**How tab adoption works (when `adopt_existing_tab: true`):**
-
-1. On the first browser tool call after a process start, Hermes issues `GET /tabs?userId=<user_id>` (5-second timeout).
-2. If any tab in the response has `listItemId == session_key`, Hermes adopts the most recently created one in that group.
-3. Otherwise, Hermes adopts the most recently created tab for the user (any `listItemId`).
-4. If no tabs exist or the request fails, Hermes falls back to creating a new tab on the next operation.
-
-Adoption only fires until `tab_id` is populated for the session. If the external app closes the adopted tab mid-run, the next browser tool call will surface a Camofox error — Hermes does not re-poll for a fresh tab on every call.
-
-**Picking `session_key`:** if you want Hermes to reliably attach to a *specific* existing tab, set `session_key` to the `listItemId` the external app used when creating it. If you leave `session_key` unset and only set `user_id`, Hermes generates a per-task `session_key` (`task_<id>`) — Hermes will share cookies and the profile with the external app, but will open its own tab alongside instead of reusing one.
-
-**Concurrency note:** the external app and Hermes can drive the same Camofox `userId` simultaneously, but Camofox does not coordinate per-tab focus between clients. Coordinate ownership at the application layer (e.g. the external app pauses while Hermes runs).
-
-#### VNC live view
-
-When Camofox runs in headed mode (with a visible browser window), it exposes a VNC port in its health check response. Hermes automatically discovers this and includes the VNC URL in navigation responses, so the agent can share a link for you to watch the browser live.
-
-### Lightpanda local engine
+## Lightpanda local engine
 
 [Lightpanda](https://lightpanda.io) is an open-source headless browser written from scratch. It starts instantly, runs 9x faster and uses 16x less memory than Chrome, which matters for agents that live on small VMs for long stretches.
 
-Lightpanda is a **local engine** (a browser source, like "Local Browser"), not a cloud provider. Install the binary and put it on your `PATH` (see the [Lightpanda installation guide](https://lightpanda.io/docs/run-locally/installation/one-liner)), then pick **Lightpanda** in `hermes tools` → Browser Automation, or set:
+Lightpanda is a **local engine** (a browser source, like local Chromium), not a cloud provider. Install the binary and put it on your `PATH` (see the [Lightpanda installation guide](https://lightpanda.io/docs/run-locally/installation/one-liner)), then pick **Lightpanda** in `hermes tools` → Browser Automation, or set:
 
 ```yaml
 # Add to ~/.hermes/config.yaml
 browser:
   cloud_provider: local
-  engine: lightpanda
+  engine: lightpanda   # auto (default, Chromium) | lightpanda
 ```
 
-Or via environment variable:
+Hermes launches `lightpanda serve --host 127.0.0.1 --port <free>` itself — one process per `browser_exec` session name (or per task) — and points `browser_exec` at it. No Chromium or Node.js is needed. The process is reaped after `browser.inactivity_timeout`, on exit, and by the orphan sweep if Hermes crashes. All of these processes share one on-disk HTTP cache at `$HERMES_HOME/cache/browser-use/lightpanda/http-cache`, so repeat visits skip re-downloading assets. Hermes passes the cache flag only when the installed Lightpanda supports it (0.3.x+); older binaries simply run without a cache. To clear it, stop your Lightpanda sessions first, then delete that directory.
 
-```bash
-AGENT_BROWSER_ENGINE=lightpanda
-```
+Lightpanda has no graphical renderer, so `capture_screenshot()` is unavailable and the tool description tells the model to work text-first; it also holds one page per session, so the model is told to call `new_tab()` once and `goto_url()` afterwards (tracked upstream in [lightpanda-io/browser#1962](https://github.com/lightpanda-io/browser/issues/1962)).
 
-The engine works with both browser drivers:
+**When the engine is ignored.** `browser.engine` is the lowest-precedence browser setting: a cloud provider (including the Nous subscription browser — and on never-configured setups, any `BROWSERBASE_API_KEY` / `BROWSER_USE_API_KEY` in `~/.hermes/.env` auto-selects one), a `browser.cdp_url` / `/browser connect` override, or `browser.use_real_profile` all take precedence. Picking Lightpanda in `hermes tools` writes `cloud_provider: local` for you; `/browser status` and `hermes doctor` report when the engine is configured but shadowed, and by what.
 
-- **Browser Use mode (the default).** Hermes launches `lightpanda serve --host 127.0.0.1 --port <free>` itself — one process per `browser_exec` session name (or per task) — and points the Browser Use CLI at it. No Chromium, Playwright or Node.js is needed. The process is reaped after `browser.inactivity_timeout`, on exit, and by the orphan sweep if Hermes crashes. All of these processes share one on-disk HTTP cache at `$HERMES_HOME/cache/browser-use/lightpanda/http-cache`, so repeat visits skip re-downloading assets. Hermes passes the cache flag only when the installed Lightpanda supports it (0.3.x+); older binaries simply run without a cache. To clear it, stop your Lightpanda sessions first, then delete that directory. Lightpanda has no graphical renderer, so `capture_screenshot()` is unavailable and the tool description tells the model to work text-first; it also holds one page per session, so the model is told to call `new_tab()` once and `goto_url()` afterwards (tracked upstream in [lightpanda-io/browser#1962](https://github.com/lightpanda-io/browser/issues/1962)).
-- **Built-in browser tools** (`/browser use off`). Hermes drives Lightpanda through `agent-browser --engine lightpanda` over CDP, the same way it drives local Chrome, with **automatic Chrome fallback**: Lightpanda handles the actions it supports (navigate, snapshot, click, type, scroll, back, press, eval) and Hermes transparently retries on Chrome for anything it doesn't. Screenshots and `browser_vision` are routed straight to Chrome.
+## Your own browser via CDP (`/browser connect`)
 
-**When the engine is ignored.** `browser.engine` is the lowest-precedence browser setting: a cloud provider (including the Nous subscription browser — and on never-configured setups, any `BROWSERBASE_API_KEY` / `BROWSER_USE_API_KEY` in `~/.hermes/.env` auto-selects one), Camofox, a `browser.cdp_url` / `/browser connect` override, or `browser.use_real_profile` all take precedence. Picking Lightpanda in `hermes tools` writes `cloud_provider: local` for you; `/browser status` and `hermes doctor` report when the engine is configured but shadowed, and by what.
-
-### Local Chromium-family browser via CDP (`/browser connect`)
-
-Instead of a cloud provider, you can attach Hermes browser tools to your own running Chrome, Brave, Chromium, or Edge instance via the Chrome DevTools Protocol (CDP). This is useful when you want to see what the agent is doing in real-time, interact with pages that require your own cookies/sessions, or avoid cloud browser costs.
+Instead of the Chromium Hermes launches or a cloud provider, you can attach the browser tools to your own running Chrome, Brave, Chromium, or Edge instance via the Chrome DevTools Protocol (CDP). This is useful when you want to see what the agent is doing in real-time, interact with pages that require your own cookies/sessions, or avoid cloud browser costs.
 
 :::note
 `/browser connect` is an **interactive-CLI slash command** — it is not dispatched by the gateway. If you try to run it inside a WebUI, Telegram, Discord, or other gateway chat, the message will be sent to the agent as plain text and the command will not execute. Start Hermes from the terminal (`hermes` or `hermes chat`) and issue `/browser connect` there.
@@ -25291,7 +25250,7 @@ Then launch the Hermes CLI and run `/browser connect`.
 A dedicated profile starts out signed out of everything. If you want the agent to browse with your existing logins *and* no approval dialog, use [`browser.use_real_profile`](#real-profile-browsing-use-your-own-logins) instead: it snapshots your active profile into a copy and drives that, which is a non-default user-data-dir and so never triggers either mechanism.
 :::
 
-When connected via CDP, all browser tools (`browser_navigate`, `browser_click`, etc.) operate on your live browser instance instead of spinning up a cloud session.
+When connected, `browser_exec`, `browser_cdp`, `browser_dialog` and `browser_vault` all drive your live browser instead of launching their own. The endpoint can also be set persistently with `browser.cdp_url` in `config.yaml` or the `BROWSER_CDP_URL` environment variable.
 
 ### WSL2 + Windows Chrome: prefer MCP over `/browser connect`
 
@@ -25309,178 +25268,28 @@ See the MCP guide for the practical setup:
 
 - [Use MCP with Hermes](../../guides/use-mcp-with-hermes.md#wsl2-bridge-hermes-in-wsl-to-windows-chrome)
 
-### Local browser mode
+## Bot Desktop screen
 
-If you do **not** set any cloud credentials and don't use `/browser connect`, Hermes can still use the browser tools through a local Chromium install driven by `agent-browser`.
+On a gateway with the [Bot Desktop screen](bot-screen.md) running, the bot's
+browser and the dock's **Browser** icon are the same headed Chromium with one
+persistent profile per bot, so you can take over, sign in to a site, and hand
+the session back to the agent. See that page for the profile location and how
+`browser.executable_path` / `browser.user_data_dir` apply there.
 
-### Optional Environment Variables
+## Companion tools
 
-```bash
-# Residential proxies for better CAPTCHA solving (default: "true")
-BROWSERBASE_PROXIES=true
-
-# Advanced stealth with custom Chromium — requires Scale Plan (default: "false")
-BROWSERBASE_ADVANCED_STEALTH=false
-
-# Session reconnection after disconnects — requires paid plan (default: "true")
-BROWSERBASE_KEEP_ALIVE=true
-
-# Custom session timeout in seconds (max 21600 = 6 hours) (default: project default)
-# Examples: 600 (10min), 1800 (30min), 21600 (6h max)
-BROWSERBASE_SESSION_TIMEOUT=1800
-
-# Inactivity timeout before auto-cleanup in seconds (default: 120)
-BROWSER_INACTIVITY_TIMEOUT=120
-
-# Local browser engine. Equivalent to browser.engine in config.yaml. In
-# Browser Use mode (default) "lightpanda" makes Hermes spawn `lightpanda serve`;
-# with the built-in tools it is passed to agent-browser as --engine.
-#   auto       — Chrome (default)
-#   lightpanda — Lightpanda
-#   chrome     — force Chrome explicitly
-AGENT_BROWSER_ENGINE=auto
-
-# Extra Chromium launch flags (comma- or newline-separated). Hermes auto-injects
-# `--no-sandbox,--disable-dev-shm-usage` when it detects root or AppArmor-restricted
-# unprivileged user namespaces (Ubuntu 23.10+, DGX Spark, many container images),
-# so most users don't need to set this. Set it manually only if you need a flag
-# Hermes doesn't add automatically; setting it disables the auto-injection.
-AGENT_BROWSER_ARGS=--no-sandbox
-```
-
-### Install agent-browser CLI
-
-The installers and `hermes update` install `agent-browser` and its pinned
-Chromium through Hermes's package manager by default. If you installed with
-`--skip-browser` / `-SkipBrowser`, or the download failed, install them with:
-
-```bash
-hermes pm install agent-browser
-```
-
-This also undoes an earlier `--skip-browser` choice, so updates keep the
-browser tools current. An `agent-browser` already on your `PATH` also works.
-On Linux, Chromium may also need system libraries
-(`npx playwright install-deps chromium`). On Android/Termux, run
-`npm install -g agent-browser && agent-browser install` instead.
-
-:::info
-The `browser` toolset must be included in your config's `toolsets` list or enabled via `hermes config set toolsets '["hermes-cli", "browser"]'`.
-:::
-
-## Available Tools
-
-### `browser_navigate`
-
-Navigate to a URL. Must be called before any other browser tool. Initializes the Browserbase session.
-
-```
-Navigate to https://github.com/NousResearch
-```
-
-:::tip
-For simple information retrieval, prefer `web_search` or `web_extract` — they are faster and cheaper. Use browser tools when you need to **interact** with a page (click buttons, fill forms, handle dynamic content).
-:::
-
-### `browser_snapshot`
-
-Get a text-based snapshot of the current page's accessibility tree. Returns interactive elements with ref IDs like `@e1`, `@e2` for use with `browser_click` and `browser_type`.
-
-- **`full=false`** (default): Compact view showing only interactive elements
-- **`full=true`**: Complete page content
-
-Snapshots larger than `browser.snapshot_threshold` (default 15,000 characters — the same per-page budget as `web_extract`) are automatically truncated at line boundaries; no LLM summarization is involved. When that happens, the complete snapshot is saved to `~/.hermes/cache/web/` and the tool output includes the file path plus a ready-to-use `read_file` call, so the agent can page through the full accessibility tree — including element refs beyond the cut — without re-snapshotting.
-
-Increase the threshold for long pages where more source content should reach the agent inline:
-
-```yaml
-# ~/.hermes/config.yaml
-browser:
-  snapshot_threshold: 30000
-```
-
-You can also run `hermes config set browser.snapshot_threshold 30000`. The setting applies to both explicit `browser_snapshot` calls and the automatic snapshot returned after navigation, including the Camofox backend (minimum 1000). Restart the current Hermes session after changing it so the browser config cache reloads.
-
-### `browser_click`
-
-Click an element identified by its ref ID from the snapshot.
-
-```
-Click @e5 to press the "Sign In" button
-```
-
-### `browser_type`
-
-Type text into an input field. Clears the field first, then types the new text.
-
-```
-Type "hermes agent" into the search field @e3
-```
-
-### `browser_scroll`
-
-Scroll the page up or down to reveal more content.
-
-```
-Scroll down to see more results
-```
-
-### `browser_press`
-
-Press a keyboard key. Useful for submitting forms or navigation.
-
-```
-Press Enter to submit the form
-```
-
-Supported keys: `Enter`, `Tab`, `Escape`, `ArrowDown`, `ArrowUp`, and more.
-
-### `browser_back`
-
-Navigate back to the previous page in browser history.
-
-### `browser_get_images`
-
-List all images on the current page with their URLs and alt text. Useful for finding images to analyze.
-
-### `browser_vision`
-
-Take a screenshot and analyze it with vision AI. Use this when text snapshots don't capture important visual information — especially useful for CAPTCHAs, complex layouts, or visual verification challenges.
-
-The screenshot is saved persistently and the file path is returned alongside the AI analysis. On messaging platforms (Telegram, Discord, Slack, WhatsApp), you can ask the agent to share the screenshot — it will be sent as a native photo attachment via the `MEDIA:` mechanism.
-
-```
-What does the chart on this page show?
-```
-
-Screenshots are stored in `~/.hermes/cache/screenshots/` and automatically cleaned up after 24 hours.
-
-### `browser_console`
-
-Get browser console output (log/warn/error messages) and uncaught JavaScript exceptions from the current page. Essential for detecting silent JS errors that don't appear in the accessibility tree.
-
-```
-Check the browser console for any JavaScript errors
-```
-
-Use `clear=True` to clear the console after reading, so subsequent calls only show new messages.
-
-`browser_console` also evaluates JavaScript when called with an `expression` argument — same shape as DevTools console, the result comes back parsed (JSON-serialized objects become dicts; primitive values stay primitive).
-
-```
-browser_console(expression="document.querySelector('h1').textContent")
-browser_console(expression="JSON.stringify(performance.timing)")
-```
-
-When a CDP supervisor is active for the current session (typical for any session that's run `browser_navigate` against a CDP-capable backend), evaluation runs over the supervisor's persistent WebSocket — no subprocess startup cost. Falls through to the standard agent-browser CLI path otherwise. Behaviour is identical either way; only latency changes.
-
-Evaluation is unrestricted by default — the agent can use `fetch`, read storage, query form values, and run any DOM extraction. Requests targeting private/internal addresses are still blocked on non-local backends (the SSRF guard is independent of this setting). If you browse hostile pages with a logged-in profile and want a strict denylist over sensitive JS primitives (cookies, storage, clipboard, network calls, form values), opt in with `browser.restrict_evaluate: true` in `config.yaml`. Note the denylist matches primitive *names*, so it also blocks legitimate expressions that merely contain words like `fetch` or `cookie`.
+`browser_vault` operates on the same browser session `browser_exec` drives —
+local Chromium, a cloud browser, or the browser attached with `/browser connect`.
+`browser_cdp` and `browser_dialog` are offered only while a CDP endpoint is
+configured — `/browser connect`, `BROWSER_CDP_URL` or `browser.cdp_url` — and act
+on that browser; a launched local or cloud session does not bring them.
 
 ### `browser_cdp`
 
-Raw Chrome DevTools Protocol passthrough — the escape hatch for browser operations not covered by the other tools. Use for native dialog handling, iframe-scoped evaluation, cookie/network control, or any CDP verb the agent needs.
-
-**Only available when a CDP endpoint is reachable at session start** — meaning `/browser connect` has attached to a running Chrome, Brave, Chromium, or Edge browser, or `browser.cdp_url` is set in `config.yaml`. The default local agent-browser mode, Camofox, and cloud providers (Browserbase, Browser Use, Firecrawl) do not currently expose CDP to this tool — cloud providers have per-session CDP URLs but live-session routing is a follow-up.
+Raw Chrome DevTools Protocol passthrough — the escape hatch for one-off
+operations: native dialog handling, iframe-scoped evaluation, cookie/network
+control, or any CDP verb the agent needs. (Inside `browser_exec`, the `cdp()`
+helper covers the same ground for multi-step work.)
 
 **CDP method reference:** https://chromedevtools.github.io/devtools-protocol/ — the agent can `web_extract` a specific method's page to look up parameters and return shape.
 
@@ -25506,135 +25315,97 @@ browser_cdp(method="Network.getAllCookies")
 
 Browser-level methods (`Target.*`, `Browser.*`, `Storage.*`) omit `target_id`. Page-level methods (`Page.*`, `Runtime.*`, `DOM.*`, `Emulation.*`) require a `target_id` from `Target.getTargets`. Each stateless call is independent — sessions do not persist between calls.
 
-**Cross-origin iframes:** pass `frame_id` (from `browser_snapshot.frame_tree.children[]` where `is_oopif=true`) to route the CDP call through the supervisor's live session for that iframe. This is how `Runtime.evaluate` inside a cross-origin iframe works on Browserbase, where stateless CDP connections would hit signed-URL expiry. Example:
-
-```
-browser_cdp(
-  method="Runtime.evaluate",
-  params={"expression": "document.title", "returnByValue": True},
-  frame_id="<frame_id from browser_snapshot>",
-)
-```
-
-Same-origin iframes don't need `frame_id` — use `document.querySelector('iframe').contentDocument` from a top-level `Runtime.evaluate` instead.
+**Cross-origin iframes:** pass the `frame_id` of an out-of-process (cross-origin) iframe to route the call through the CDP supervisor's live session for that frame. This is how `Runtime.evaluate` inside a cross-origin iframe works on Browserbase, where stateless CDP connections would hit signed-URL expiry. Same-origin iframes don't need `frame_id` — use `document.querySelector('iframe').contentDocument` from a top-level `Runtime.evaluate` instead.
 
 ### `browser_dialog`
 
-Responds to a native JS dialog (`alert` / `confirm` / `prompt` / `beforeunload`). Before this tool existed, dialogs would silently block the page's JavaScript thread and subsequent `browser_*` calls would hang or throw; now the agent sees pending dialogs in `browser_snapshot` output and responds explicitly.
+Responds to a native JS dialog (`alert` / `confirm` / `prompt` / `beforeunload`). An open dialog blocks the page's JavaScript thread, so browser work on that page stalls until it is answered.
 
-**Workflow:**
-1. Call `browser_snapshot`. If a dialog is blocking the page, it shows up as `pending_dialogs: [{"id": "d-1", "type": "alert", "message": "..."}]`.
-2. Call `browser_dialog(action="accept")` or `browser_dialog(action="dismiss")`. For `prompt()` dialogs, pass `prompt_text="..."` to supply the response.
-3. Re-snapshot — `pending_dialogs` is empty; the page's JS thread has resumed.
+A persistent **CDP supervisor** — one WebSocket per task subscribed to Page/Runtime/Target events — detects dialogs as they open. The agent answers with `browser_dialog(action="accept")` or `browser_dialog(action="dismiss")`; for `prompt()` dialogs it passes `prompt_text="..."`, and when more than one dialog is queued it passes the `dialog_id` to pick one. The page's JS thread then resumes.
 
-**Detection happens automatically** via a persistent CDP supervisor — one WebSocket per task that subscribes to Page/Runtime/Target events. The supervisor also populates a `frame_tree` field in the snapshot so the agent can see the iframe structure of the current page, including cross-origin (OOPIF) iframes.
-
-**Availability matrix:**
-
-| Backend | Detection via `pending_dialogs` | Response (`browser_dialog` tool) |
-|---|---|---|
-| Local Chrome via `/browser connect` or `browser.cdp_url` | ✓ | ✓ full workflow |
-| Browserbase | ✓ | ✓ full workflow (via injected XHR bridge) |
-| Camofox / default local agent-browser | ✗ | ✗ (no CDP endpoint) |
-
-**How it works on Browserbase.** Browserbase's CDP proxy auto-dismisses real native dialogs server-side within ~10ms, so we can't use `Page.handleJavaScriptDialog`. The supervisor injects a small script via `Page.addScriptToEvaluateOnNewDocument` that overrides `window.alert`/`confirm`/`prompt` with a synchronous XHR. We intercept those XHRs via `Fetch.enable` — the page's JS thread stays blocked on the XHR until we call `Fetch.fulfillRequest` with the agent's response. `prompt()` return values round-trip back into page JS unchanged.
+**How it works on Browserbase.** Browserbase's CDP proxy auto-dismisses real native dialogs server-side within ~10ms, so `Page.handleJavaScriptDialog` can't be used. The supervisor injects a small script via `Page.addScriptToEvaluateOnNewDocument` that overrides `window.alert`/`confirm`/`prompt` with a synchronous XHR, and intercepts those XHRs via `Fetch.enable` — the page's JS thread stays blocked on the XHR until the supervisor calls `Fetch.fulfillRequest` with the agent's response. `prompt()` return values round-trip back into page JS unchanged.
 
 **Dialog policy** is configured in `config.yaml` under `browser.dialog_policy`:
 
 | Policy | Behavior |
 |--------|----------|
-| `must_respond` (default) | Capture, surface in snapshot, wait for explicit `browser_dialog()` call. Safety auto-dismiss after `browser.dialog_timeout_s` (default 300s) so a buggy agent can't stall forever. |
-| `auto_dismiss` | Capture, dismiss immediately. Agent still sees the dialog in `browser_state` history but doesn't have to act. |
+| `must_respond` (default) | Capture the dialog and wait for an explicit `browser_dialog()` call. Safety auto-dismiss after `browser.dialog_timeout_s` (default 300s) so a buggy agent can't stall forever. |
+| `auto_dismiss` | Capture, dismiss immediately. The agent doesn't have to act. |
 | `auto_accept` | Capture, accept immediately. Useful when navigating pages with aggressive `beforeunload` prompts. |
 
-**Frame tree** inside `browser_snapshot.frame_tree` is capped to 30 frames and OOPIF depth 2 to keep payloads bounded on ad-heavy pages. A `truncated: true` flag surfaces when limits were hit; agents needing the full tree can use `browser_cdp` with `Page.getFrameTree`.
+### `browser_vault`
 
-## Practical Examples
+Uses saved logins, passwords, cards, addresses and one-time codes on the
+current page without the secrets ever entering the conversation. The agent
+calls `browser_vault(action="list")` to see saved items as handles, then `fill`,
+`save_login`, `enter_code` or `unlock` (1Password / Bitwarden). Fills are
+refused unless the page origin matches the saved item. See the
+[credential vault](credential-vault.md) page for setup, password-manager
+backends, and headless use.
 
-### Filling Out a Web Form
+## Turning browsing off
+
+There is no config switch for the browser — disable the `browser` toolset
+instead. Run `hermes tools` and untick **Browser Automation** for the platforms
+that shouldn't browse, or from a script:
+
+```bash
+hermes tools disable browser                      # CLI
+hermes tools disable browser --platform telegram  # one gateway platform
+```
+
+`browser_exec` also disappears from any session without the `terminal` toolset.
+
+## Camofox
+
+Camofox moved to a plugin: `hermes plugins install camofox`. Existing Camofox
+setups (`CAMOFOX_URL` set, or `browser.cloud_provider: camofox`) are migrated automatically on
+update: the plugin is installed and the core `browser` toolset is turned off in that profile. A
+profile that had disabled `browser` everywhere (`agent.disabled_toolsets`) gets `camofox` disabled
+too, so browsing stays off.
+A `browser.camofox` block with no `CAMOFOX_URL` is not a Camofox setup. A profile that sets up the
+plugin after the update keeps `browser_exec` alongside it.
+
+## Practical examples
+
+### Filling out a web form
 
 ```
 User: Sign up for an account on example.com with my email john@example.com
 
-Agent workflow:
-1. browser_navigate("https://example.com/signup")
-2. browser_snapshot()  → sees form fields with refs
-3. browser_type(ref="@e3", text="john@example.com")
-4. browser_type(ref="@e5", text="SecurePass123")
-5. browser_click(ref="@e8")  → clicks "Create Account"
-6. browser_snapshot()  → confirms success
+Agent: browser_exec(code="""
+# Opening the signup form
+new_tab("https://example.com/signup")
+wait_for_load()
+fill_input("input[name=email]", "john@example.com")
+js("document.querySelector('button[type=submit]').click()")
+wait_for_load()
+print(page_info())
+""")
 ```
 
-### Researching Dynamic Content
+For the password, the agent uses `browser_vault` (`save_login` prompts you in a
+masked field) instead of typing a secret itself.
+
+### Researching dynamic content
 
 ```
 User: What are the top trending repos on GitHub right now?
 
-Agent workflow:
-1. browser_navigate("https://github.com/trending")
-2. browser_snapshot(full=true)  → reads trending repo list
-3. Returns formatted results
+Agent: browser_exec(code="""
+# Reading GitHub trending
+new_tab("https://github.com/trending")
+wait_for_load()
+print(js("[...document.querySelectorAll('article h2 a')].map(a => a.textContent.replace(/\\s+/g, ' ').trim())"))
+""")
 ```
-
-## Session Recording
-
-Automatically record browser sessions as WebM video files:
-
-```yaml
-browser:
-  record_sessions: true  # default: false
-```
-
-When enabled, recording starts automatically on the first `browser_navigate` and saves to `~/.hermes/browser_recordings/` when the session closes. Works in both local and cloud (Browserbase) modes. Recordings older than 72 hours are automatically cleaned up.
-
-## Headed Mode (Visible Browser Window)
-
-By default, the local browser runs headless. Enable headed mode to get a visible Chromium window you can watch and interact with:
-
-```yaml
-browser:
-  headed: true  # default: false
-```
-
-Or via environment variable: `AGENT_BROWSER_HEADED=1`.
-
-Headed mode does two things:
-
-1. **Launches Chromium with a visible window** (passes `--headed` to agent-browser in local mode).
-2. **Keeps the window open between turns.** Normally the browser session is cleaned up after every agent reply; in headed mode the per-turn cleanup is skipped so you can watch the agent work, intervene manually (sign-in challenges, CAPTCHAs), and keep login state warm across the conversation.
-
-Idle sessions are still reaped after `browser.inactivity_timeout` (default 120s of no browser activity), and all sessions are closed on shutdown. Headed mode only affects the local browser — cloud sessions (Browserbase) are unaffected.
-
-## Stealth Features
-
-Browserbase provides automatic stealth capabilities:
-
-| Feature | Default | Notes |
-|---------|---------|-------|
-| Basic Stealth | Always on | Random fingerprints, viewport randomization, CAPTCHA solving |
-| Residential Proxies | On | Routes through residential IPs for better access |
-| Advanced Stealth | Off | Custom Chromium build, requires Scale Plan |
-| Keep Alive | On | Session reconnection after network hiccups |
-
-:::note
-If paid features aren't available on your plan, Hermes automatically falls back — first disabling `keepAlive`, then proxies — so browsing still works on free plans.
-:::
-
-## Session Management
-
-- Each task gets an isolated browser session via Browserbase
-- Sessions are automatically cleaned up after inactivity (default: 2 minutes)
-- A background thread checks every 30 seconds for stale sessions
-- Emergency cleanup runs on process exit to prevent orphaned sessions
-- Sessions are released via the Browserbase API (`REQUEST_RELEASE` status)
 
 ## Limitations
 
-- **Text-based interaction** — relies on accessibility tree, not pixel coordinates
-- **Snapshot size** — large pages are truncated at `browser.snapshot_threshold` (default 15,000 characters, matching `web_extract`; no LLM summarization); the complete snapshot is saved to `~/.hermes/cache/web/` and the output points at it for `read_file` paging
-- **Session timeout** — cloud sessions expire based on your provider's plan settings
-- **Cost** — cloud sessions consume provider credits; sessions are automatically cleaned up when the conversation ends or after inactivity. Use `/browser connect` for free local browsing.
-- **No file downloads** — cannot download files from the browser
+- **Session timeout** — cloud sessions expire based on your provider's plan settings.
+- **Cost** — cloud sessions consume provider credits; sessions are cleaned up when the conversation ends or after inactivity. Local Chromium and `/browser connect` are free.
+- **Lightpanda** — no screenshots and one page per session.
+- **No terminal, no browser** — `browser_exec` runs Python, so sessions without the `terminal` toolset don't get it.
 
 ---
 
@@ -35010,12 +34781,14 @@ If `web.backend` is not set, the backend is auto-detected from whichever API key
 
 ## Browser Automation
 
-Hermes includes full browser automation with multiple backend options for navigating websites, filling forms, and extracting information:
+Hermes includes full browser automation through `browser_exec` (Python over CDP) for navigating websites, filling forms, and extracting information, with several places the browser can run:
 
 - **Browser Use Cloud** — Managed Chromium with stealth, residential proxies, CAPTCHA solving, and reusable browser profiles
 - **Browserbase** — Alternative cloud browser provider with managed browsers, anti-bot tooling, CAPTCHA solving, and residential proxies
 - **Local Chromium-family CDP** — Connect to your running Chrome, Brave, Chromium, or Edge browser using `/browser connect`
-- **Local Chromium** — Headless local browser via the `agent-browser` CLI
+- **Local Chromium** — Headless local Chromium that Hermes launches itself (the default)
+
+The Camofox anti-detection browser is a catalog plugin: `hermes plugins install camofox`.
 
 See [Browser Automation](../user-guide/features/browser.md) for setup and usage.
 
@@ -38055,9 +37828,9 @@ hermes acp --check
 
 ### Browser tools (optional)
 
-Browser tools (`browser_navigate`, `browser_click`, etc.) depend on the
-`agent-browser` npm package and Chromium, which aren't part of the Python
-wheel. Install them with:
+Browser tools (`browser_exec` and the CDP tools `browser_cdp`,
+`browser_dialog`, `browser_vault`) need a local Chromium, which isn't part of
+the Python wheel. Install it with:
 
 ```bash
 hermes acp --setup-browser           # interactive (prompts before ~400 MB download)
@@ -38068,9 +37841,8 @@ This is the standalone command. The terminal-auth flow (`hermes acp --setup`) al
 
 What it does:
 
-- Installs Node.js 26 into `~/.hermes/node/` if missing
-- `npm install -g agent-browser @askjo/camofox-browser` into that prefix (no sudo needed — `npm`'s `--prefix` points at the user-writable Hermes-managed Node)
-- Installs Playwright Chromium, or uses a detected system Chrome/Chromium when available
+- Installs Hermes' pinned Chromium (the `chromium` package) through the package manager; no Node.js or npm involved
+- Hermes launches that Chromium itself when `browser_exec` first needs a browser
 
 The bootstrap is idempotent — re-running it is fast and skips work that's already done.
 
@@ -38767,94 +38539,17 @@ Returns a machine-readable description of the API server's stable surface for ex
 
 Use this endpoint when integrating dashboards, browser UIs, or control planes so they can discover whether the running Hermes version supports runs, streaming, cancellation, and session continuity without depending on private Python internals.
 
-## Browser-extension control
+## Browser-extension control (removed)
 
-Hermes can route browser tools through an authenticated extension that controls
-the browser session associated with the current Hermes session. The feature is
-disabled by default; set `browser.extension_control.enabled` to `true` to opt in:
-
-```yaml
-browser:
-  extension_control:
-    enabled: true
-```
-
-The local API path also requires the API server bearer key. A controller may
-register only for an existing server session. Hermes derives the controller
-principal from authenticated server state; a client-supplied `principal_id` is
-ignored.
-
-Discover the live contract through `GET /v1/capabilities`. The
-`browser_extension_control` object reports whether the feature is enabled, the
-protocol version, transport names, and the exact capability allowlist:
-
-```text
-controller.noop
-browser_back
-browser_click
-browser_navigate
-browser_press
-browser_screenshot
-browser_scroll
-browser_snapshot
-browser_tab_activate
-browser_tabs
-browser_type
-```
-
-Requested capabilities outside that list are filtered out. Raw CDP, arbitrary
-script evaluation, console access, uploads, image extraction, and vision are not
-part of the controller protocol.
-
-When a request has no bound controller identity, or when the feature is disabled,
-Hermes preserves the existing browser backend. Once the gateway binds a
-controller principal and transport family to the request, that extension lane
-is authoritative: missing, ambiguous, disconnected, or incapable controllers
-fail closed instead of silently switching to a different local/cloud browser.
-After an exact controller is selected, its result or error is authoritative and
-Hermes never retries the same action through another backend.
-
-### Local API registration
-
-1. Send an authenticated `POST /v1/browser-control/register` with
-   `protocol_version`, `session_id`, `controller_id`, `browser_profile_id`, and
-   the requested `capabilities`.
-2. Hermes returns a single-use ticket with a 30-second TTL and the filtered,
-   server-bound controller scope.
-3. Open `GET /v1/browser-control/ws` with both WebSocket subprotocols:
-   `hermes-browser-control-v1` and
-   `hermes-browser-control-ticket.<ticket>`.
-
-The ticket is never accepted in the query string. Unknown, expired, reused, or
-malformed tickets fail before WebSocket upgrade.
-
-### Controller frames
-
-Hermes sends `browser.controller.command` frames containing `command_id`,
-`action`, immutable `arguments`, browser/controller ids, and the originating
-`tool_call_id`. The controller replies with `browser.controller.result`, the
-same `command_id`, an exact boolean `ok`, and either `result` or `error`.
-Cancellation and timeout emit `browser.controller.cancel`; late results are
-ignored.
-
-An unexpected socket loss marks the controller offline and preserves work
-already in flight until each command's original deadline. A reconnect with the
-same principal, profile, session, controller id, browser profile, and transport
-identity refreshes the transport without admitting new work before any deferred
-cancels are flushed. Negotiated capabilities may change on that reconnect; they
-are not an identity field. A different controller id or browser profile in the
-same authenticated session lane is a hard replacement: old pending work is
-cancelled before the successor becomes routable. Send
-`browser.controller.detach` on the authenticated controller transport for an
-intentional hard detach — that immediately cancels pending work. Merely closing
-the socket is treated as a recoverable disconnect.
-
-The authenticated dashboard transport exposes the same registration, result,
-heartbeat, capability, and ownership semantics over its Gateway RPC/event
-channel. In both transports, selection requires one unambiguous exact match on
-principal, profile, session, controller, browser profile, transport family, and
-capability. Once selected, a controller failure is authoritative and is never
-retried through a different browser backend.
+The browser-extension controller protocol (`POST /v1/browser-control/register`,
+`GET /v1/browser-control/ws`, the `/v1/artifacts/*` routes, the dashboard
+`browser.controller.*` RPCs and the `browser.extension_control` config key) has
+been removed. It routed the old `browser_navigate`/`browser_click`/… tools,
+which no longer exist: browser automation is now `browser_exec` over CDP. To let
+Hermes drive a browser you already run, point it at that browser's DevTools
+endpoint with `browser.cdp_url` in `config.yaml` or `/browser connect` — see
+[Your own browser via CDP](./browser#your-own-browser-via-cdp-browser-connect).
+Upgrading drops a leftover `browser.extension_control` block from `config.yaml`.
 
 ## Per-request model selection
 
@@ -44869,7 +44564,7 @@ Choose the highest (least-footprint) rung that correctly solves the problem:
    core-schema footprint, reusable by any MCP host, reached via the built-in MCP client.
 6. **New core tool** — only when fundamental, broadly useful to nearly every user, and
    unreachable via terminal + file or an MCP server (terminal, read_file, web_search,
-   browser_navigate).
+   browser_exec).
 
 ## Common contribution paths
 
@@ -45263,7 +44958,9 @@ hermes-agent/
 │   ├── process_registry.py   # Background process management
 │   ├── file_tools.py         # read_file, write_file, patch, search_files
 │   ├── web_tools.py          # web_search, web_extract
-│   ├── browser_tool.py       # Browser automation tools facade (+ browser_tool_*.py siblings)
+│   ├── browser_use_cli.py    # browser_exec — Python over CDP (browser-harness)
+│   ├── browser_session.py    # Per-task browser sessions (+ browser_session_*.py siblings)
+│   ├── browser_launcher.py   # Local Chromium launch, reuse and orphan reaping
 │   ├── code_execution_tool.py # execute_code sandbox
 │   ├── delegate_tool.py      # Subagent delegation
 │   ├── mcp_tool.py           # MCP client facade (+ mcp_tool_*.py siblings)
@@ -50129,7 +49826,7 @@ metadata:
     requires_toolsets: [web]            # Optional — only show when these toolsets are active
     requires_tools: [web_search]        # Optional — only show when these tools are available
     fallback_for_toolsets: [browser]    # Optional — hide when these toolsets are active
-    fallback_for_tools: [browser_navigate]  # Optional — hide when these tools exist
+    fallback_for_tools: [browser_exec]  # Optional — hide when these tools exist
     config:                              # Optional — config.yaml settings the skill needs
       - key: my.setting
         description: "What this setting controls"
@@ -50189,7 +49886,7 @@ metadata:
     requires_toolsets: [web]           # Hide if the web toolset is NOT active
     requires_tools: [web_search]       # Hide if web_search tool is NOT available
     fallback_for_toolsets: [browser]   # Hide if the browser toolset IS active
-    fallback_for_tools: [browser_navigate]  # Hide if browser_navigate IS available
+    fallback_for_tools: [browser_exec]  # Hide if browser_exec IS available
 ```
 
 | Field | Behavior |
@@ -53857,15 +53554,10 @@ For native Anthropic auth, Hermes prefers Claude Code's own credential files whe
 | `BROWSERBASE_PROJECT_ID` | Browserbase project ID |
 | `BROWSER_USE_API_KEY` | Browser Use cloud browser API key ([browser-use.com](https://browser-use.com/)) |
 | `FIRECRAWL_BROWSER_TTL` | Firecrawl browser session TTL in seconds (default: 300) |
-| `BROWSER_CDP_URL` | Chrome DevTools Protocol URL for local browser (set via `/browser connect`, e.g. `ws://localhost:9222`) |
-| `CAMOFOX_URL` | Camofox local anti-detection browser server address (default: `http://localhost:9377`). Address only — it does not select Camofox as the backend; pick Camofox in `hermes tools` (`browser.cloud_provider: camofox`) |
-| `CAMOFOX_API_KEY` | Optional bearer token sent as Authorization header to a remote/authenticated Camofox server |
-| `CAMOFOX_USER_ID` | Optional externally managed Camofox user ID for shared visible sessions |
-| `CAMOFOX_SESSION_KEY` | Optional Camofox session key used when creating tabs for `CAMOFOX_USER_ID` |
-| `CAMOFOX_ADOPT_EXISTING_TAB` | Set to `true` to reuse an existing Camofox tab before creating a new one |
+| `BROWSER_CDP_URL` | Chrome DevTools Protocol endpoint the browser tools attach to instead of launching Chromium (set via `/browser connect`, e.g. `ws://localhost:9222`; same as `browser.cdp_url`) |
+| `CAMOFOX_*` | Read only by the Camofox plugin (`hermes plugins install camofox`); core Hermes ignores them. |
 | `BROWSER_INACTIVITY_TIMEOUT` | Browser session inactivity timeout in seconds |
-| `AGENT_BROWSER_ARGS` | Extra Chromium launch flags (comma- or newline-separated). Hermes auto-injects `--no-sandbox,--disable-dev-shm-usage` when running as root or on AppArmor-restricted unprivileged user namespaces (Ubuntu 23.10+, DGX Spark, many container images); set this manually only to override or add other flags. |
-| `AGENT_BROWSER_ENGINE` | Local browser engine: `auto` (default — Chromium-family via CDP), `lightpanda` (Browser Use mode spawns `lightpanda serve`; the built-in tools pass `--engine lightpanda` to agent-browser), or `chrome`. Same as `browser.engine` in config.yaml. |
+| `AGENT_BROWSER_*` | No longer read. On update, values in the profile's `.env` are copied into config when the key is unset (`browser.engine: auto` and `browser.headed: false` count as unset; a relative `AGENT_BROWSER_PROFILE` becomes an absolute path): `AGENT_BROWSER_EXECUTABLE_PATH` → `browser.executable_path`, `AGENT_BROWSER_PROFILE` → `browser.user_data_dir`, `AGENT_BROWSER_ARGS` → `browser.chromium_args`, `AGENT_BROWSER_HEADED` → `browser.headed`, `AGENT_BROWSER_ENGINE` → `browser.engine`. |
 | `FAL_KEY` | Image generation ([fal.ai](https://fal.ai/)) |
 | `KREA_API_KEY` | Krea API key for Krea 3 and Krea 2 image generation ([krea.ai](https://krea.ai/)) |
 | `GROQ_API_KEY` | Groq Whisper STT API key ([groq.com](https://groq.com/)) |
@@ -54637,7 +54329,7 @@ Older configs with `compression.summary_model`, `compression.summary_provider`, 
 | `AUXILIARY_VISION_API_KEY` | API key paired with `AUXILIARY_VISION_BASE_URL` |
 
 :::note
-`AUXILIARY_WEB_EXTRACT_*` variables are obsolete: `web_extract` and browser snapshots no longer use an auxiliary LLM. Long pages and snapshots are truncated deterministically with the full text stored on disk for `read_file` paging.
+`AUXILIARY_WEB_EXTRACT_*` variables are obsolete: `web_extract` no longer uses an auxiliary LLM. Long pages are truncated deterministically with the full text stored on disk for `read_file` paging.
 :::
 
 For task-specific direct endpoints, Hermes uses the task's configured API key or `OPENAI_API_KEY`. It does not reuse `OPENROUTER_API_KEY` for those custom endpoints.
@@ -54682,7 +54374,7 @@ Use `hermes config set` to set environment variables — every `UPPER_SNAKE` nam
 
 This page documents Hermes' built-in tools, grouped by toolset. Availability varies by platform, credentials, and enabled toolsets.
 
-**Quick counts (current registry):** ~100 tools — 10 browser tools (core) + 2 CDP-gated browser tools + 5 browser-vault tools + `browser_exec`, 4 file tools, 2 terminal tools (`terminal`, `process_manage`), 11 desktop-GUI tools (`read_terminal`, `close_terminal`, `desktop_preview`, `drive_preview`, `annotate_preview`, `read_window_below`, `focus_pane`, `react_to_message`, `gui_tour`, `show_tip`, `set_theme` — desktop-app sessions only), 2 web tools, 5 Feishu tools, 5 Yuanbao tools, 14 kanban tools (registered when the kanban dispatcher spawns the agent), 1 project tool (`desktop_project`; desktop/GUI sessions), 2 Discord tools, 3 video tools (`video_generate`, `xai_video_edit`, `xai_video_extend`), and a handful of standalone tools (`memory`, `clarify`, `delegate_task`, `execute_code`, `cronjob_manage`, `session_search`, `skill_view`/`skill_manage`/`skills_list`, `text_to_speech`, `image_generate`, `vision_analyze`, `video_analyze`, `todo_list`, `computer_use`, `x_search`).
+**Quick counts (current registry):** ~85 tools — 4 browser tools (`browser_exec`, `browser_cdp`, `browser_dialog`, `browser_vault`), 4 file tools, 2 terminal tools (`terminal`, `process_manage`), 11 desktop-GUI tools (`read_terminal`, `close_terminal`, `desktop_preview`, `drive_preview`, `annotate_preview`, `read_window_below`, `focus_pane`, `react_to_message`, `gui_tour`, `show_tip`, `set_theme` — desktop-app sessions only), 2 web tools, 5 Feishu tools, 5 Yuanbao tools, 14 kanban tools (registered when the kanban dispatcher spawns the agent), 1 project tool (`desktop_project`; desktop/GUI sessions), 2 Discord tools, 3 video tools (`video_generate`, `xai_video_edit`, `xai_video_extend`), and a handful of standalone tools (`memory`, `clarify`, `delegate_task`, `execute_code`, `cronjob_manage`, `session_search`, `skill_view`/`skill_manage`/`skills_list`, `text_to_speech`, `image_generate`, `vision_analyze`, `video_analyze`, `todo_list`, `computer_use`, `x_search`).
 
 :::tip MCP Tools
 In addition to built-in tools, Hermes can load tools dynamically from MCP servers. MCP tools appear with the prefix `mcp__<server>__` (e.g., `mcp__github__create_issue` for the `github` MCP server). See [MCP Integration](../user-guide/features/mcp.md) for configuration.
@@ -54690,27 +54382,14 @@ In addition to built-in tools, Hermes can load tools dynamically from MCP server
 
 ## `browser` toolset
 
-| Tool | Description | Requires environment |
-|------|-------------|----------------------|
-| `browser_back` | Navigate back to the previous page in browser history. Requires browser_navigate to be called first. | — |
-| `browser_click` | Click on an element identified by its ref ID from the snapshot (e.g., '@e5'). The ref IDs are shown in square brackets in the snapshot output. Requires browser_navigate and browser_snapshot to be called first. | — |
-| `browser_console` | Get browser console output and JavaScript errors from the current page. Returns console.log/warn/error/info messages and uncaught JS exceptions. Use this to detect silent JavaScript errors, failed API calls, and application warnings. Requi… | — |
-| `browser_get_images` | Get a list of all images on the current page with their URLs and alt text. Useful for finding images to analyze with the vision tool. Requires browser_navigate to be called first. | — |
-| `browser_navigate` | Navigate to a URL in the browser. Initializes the session and loads the page. Must be called before other browser tools. For simple information retrieval, prefer a lightweight retrieval tool when one is available (faster, cheaper). Use browser tools when you need… | — |
-| `browser_press` | Press a keyboard key. Useful for submitting forms (Enter), navigating (Tab), or keyboard shortcuts. Requires browser_navigate to be called first. | — |
-| `browser_scroll` | Scroll the page in a direction. Use this to reveal more content that may be below or above the current viewport. Requires browser_navigate to be called first. | — |
-| `browser_snapshot` | Get a text-based snapshot of the current page's accessibility tree. Returns interactive elements with ref IDs (like @e1, @e2) for browser_click and browser_type. full=false (default): compact view with interactive elements. full=true: comp… | — |
-| `browser_type` | Type text into an input field identified by its ref ID. Clears the field first, then types the new text. Requires browser_navigate and browser_snapshot to be called first. | — |
-| `browser_vision` | Take a screenshot of the current page so you can inspect it visually. Use this when you need to understand what the page looks like — especially for CAPTCHAs, visual verification challenges, complex layouts, or cases where the text snapshot misses important visual information. On native-vision models the screenshot is attached directly; otherwise falls back to an auxiliary vision mo… | — |
-
-## `browser` toolset (CDP-gated tools)
-
-These two tools live in the `browser` toolset but only register when a Chrome DevTools Protocol endpoint is reachable at session start — via `/browser connect`, `browser.cdp_url` config, a Browserbase session, or Camofox.
+`browser_exec` and `browser_vault` drive the browser session — the Chromium Hermes launches, a cloud browser, or the browser attached with `/browser connect`. `browser_cdp` and `browser_dialog` are offered only while a CDP endpoint is configured (`/browser connect`, `BROWSER_CDP_URL` or `browser.cdp_url`) and act on that browser; they are absent for launched and cloud sessions. See [Browser Automation](../user-guide/features/browser.md).
 
 | Tool | Description | Requires environment |
 |------|-------------|----------------------|
-| `browser_cdp` | Send a raw Chrome DevTools Protocol command. Escape hatch for browser operations not covered by the higher-level `browser_*` tools. See https://chromedevtools.github.io/devtools-protocol/ | CDP endpoint |
-| `browser_dialog` | Respond to a native JavaScript dialog (alert / confirm / prompt / beforeunload). Call `browser_snapshot` first — pending dialogs appear in its `pending_dialogs` field. Then call `browser_dialog(action='accept'\|'dismiss')`. | CDP endpoint |
+| `browser_exec` | Drive a real web browser by running Python with pre-imported helpers (`new_tab`, `goto_url`, `wait_for_load`, `page_info`, `js`, `fill_input`, `click_at_xy`, `capture_screenshot`, `cdp`, `ensure_real_tab`). Browser state persists across calls; Python variables do not. `session` isolates concurrent work; `timeout_s` defaults to 300 (max 1800). | `terminal` toolset |
+| `browser_cdp` | Send a raw Chrome DevTools Protocol command. Escape hatch for browser operations the `browser_exec` helpers don't cover. See https://chromedevtools.github.io/devtools-protocol/ | CDP endpoint |
+| `browser_dialog` | Respond to a native JavaScript dialog (alert / confirm / prompt / beforeunload) blocking the page: `browser_dialog(action='accept'\|'dismiss')`, with `prompt_text` for `prompt()` and `dialog_id` when several are queued. | CDP endpoint |
+| `browser_vault` | Use saved logins, passwords, cards, addresses and one-time codes on the current page without secrets entering the conversation. Actions: `list`, `fill`, `save_login`, `enter_code`, `unlock`. | — |
 
 ## `clarify` toolset
 
@@ -55113,7 +54792,7 @@ Or in-session:
 
 | Toolset | Tools | Purpose |
 |---------|-------|---------|
-| `browser` | `browser_back`, `browser_cdp`, `browser_click`, `browser_console`, `browser_dialog`, `browser_exec`, `browser_get_images`, `browser_navigate`, `browser_press`, `browser_scroll`, `browser_snapshot`, `browser_type`, `browser_vault`, `browser_vision` | Core browser automation. `browser_cdp` and `browser_dialog` are gated at runtime — registered only when a CDP endpoint is reachable at session start (via `/browser connect`, `browser.cdp_url` config, Browserbase, or Camofox). `browser_dialog` works together with the `pending_dialogs` and `frame_tree` fields that `browser_snapshot` adds when a CDP supervisor is attached. `browser_exec` replaces the other browser tools when `browser.backend` is `browser-use`; `browser_vault` rides with the browser for credential forms and is deferred behind tool search by default. Quick lookups belong to the `web`/`search` toolsets — `web_search` is deliberately NOT a member, so `disabled_toolsets: [browser]` cannot strip it (#64503). |
+| `browser` | `browser_cdp`, `browser_dialog`, `browser_exec`, `browser_vault` | Core browser automation. `browser_exec` drives the browser by running Python with pre-imported helpers (offered only to sessions that also have `terminal`); `browser_cdp`, `browser_dialog` and `browser_vault` operate on the same browser session. `browser_vault` rides with the browser for credential forms and is deferred behind tool search by default. Disabling this toolset is how you turn browsing off. Quick lookups belong to the `web`/`search` toolsets — `web_search` is deliberately NOT a member, so `disabled_toolsets: [browser]` cannot strip it (#64503). |
 | `clarify` | `clarify` | Ask the user a question when the agent needs clarification. |
 | `code_execution` | `execute_code` | Run Python scripts that call Hermes tools programmatically. |
 | `connections` | `manage_connections` | Connect the user to apps: managed connector accounts through the Nous gateway, and local MCP servers from the catalog. It can add a second named account of an app and rename accounts. On the desktop every action is a card that blocks until the user settles it; off the desktop managed actions return a connect link per app. |
@@ -57572,7 +57251,7 @@ default path.
 
 # Building a Browser Provider Plugin
 
-Browser provider plugins register a **cloud browser backend** that services cloud-mode `browser_*` tool calls (navigate, click, screenshot, …). Built-in providers — Browserbase, Browser Use, and Firecrawl — all ship as plugins under `plugins/browser/<name>/`. You can add a new one, or override a bundled one, by dropping a directory next to them.
+Browser provider plugins register a **cloud browser backend**: when `browser.cloud_provider` selects it, `browser_exec` (and the CDP tools `browser_cdp`, `browser_dialog`, `browser_vault`) drive a remote browser session it creates instead of a local Chromium. Built-in providers — Browserbase, Browser Use, and Firecrawl — all ship as plugins under `plugins/browser/<name>/`. You can add a new one, or override a bundled one, by dropping a directory next to them.
 
 :::tip
 Browser backends are one of several **backend plugins** Hermes supports. The others (with their own ABCs) are [Web Search Provider Plugins](./web-search-provider-plugin.md) (which this ABC deliberately mirrors), [Image Generation](./image-gen-provider-plugin.md), [Video Generation](./video-gen-provider-plugin.md), [Memory Providers](./memory-provider-plugin.md), [Context Engines](./context-engine-plugin.md), [Secret Sources](./secret-source-plugin.md), and [Model Providers](./model-provider-plugin.md). General tool/hook/CLI plugins live in [Build a Hermes Plugin](./plugins/index.md).
@@ -57580,9 +57259,9 @@ Browser backends are one of several **backend plugins** Hermes supports. The oth
 
 ## How it fits together
 
-A browser provider does **not** implement browsing. It implements **session lifecycle**: create a remote browser session, hand back a CDP websocket URL, and tear the session down. Hermes' own browser stack (`agent-browser` + `tools/browser_tool.py`) connects to whatever CDP URL you return and drives the page from there — every provider gets the full `browser_*` toolset for free.
+A browser provider does **not** implement browsing. It implements **session lifecycle**: create a remote browser session, hand back a CDP websocket URL, and tear the session down. Hermes hands the CDP URL you return to `browser_exec`, which drives the page from there — every provider gets the full browser toolset (`browser_exec`, `browser_cdp`, `browser_dialog`, `browser_vault`) for free.
 
-The active provider is selected by `browser.cloud_provider` in `config.yaml`; the dispatcher in `tools/browser_tool.py` is a pure registry lookup with no per-provider conditionals.
+The active provider is selected by `browser.cloud_provider` in `config.yaml`; the resolver in `tools/browser_session_cloud.py` is a pure registry lookup with no per-provider conditionals.
 
 ## Discovery
 
@@ -57652,7 +57331,7 @@ class MyBackendProvider(BrowserProvider):
         """Create a remote browser session; return the session-metadata contract."""
         session = my_api.create_browser(...)
         return {
-            "session_name": f"my-backend-{task_id}",  # unique agent-browser session name
+            "session_name": f"my-backend-{task_id}",  # unique session name
             "bb_session_id": session.id,              # provider session ID (for cleanup)
             "cdp_url": session.cdp_ws_url,            # CDP websocket URL
             "features": {"stealth": True},            # feature flags you enabled
@@ -57672,14 +57351,14 @@ class MyBackendProvider(BrowserProvider):
 
 `create_session()` must return at least `session_name`, `bb_session_id`, `cdp_url`, and `features`. Two quirks worth knowing:
 
-- **`bb_session_id` is a legacy key name** kept verbatim for backward compatibility with `tools/browser_tool.py` — it holds *your* provider's session ID regardless of vendor. Don't rename it.
+- **`bb_session_id` is a legacy key name** kept verbatim for backward compatibility with the browser session code — it holds *your* provider's session ID regardless of vendor. Don't rename it.
 - `create_session()` **may raise** — `ValueError` for missing credentials, `RuntimeError` for network/API failures. The dispatcher surfaces these to the user. This differs from `close_session`/`emergency_cleanup`, which must never raise.
 
 An optional `external_call_id` key supports managed-gateway billing.
 
 ### `get_setup_schema()` — the `hermes tools` picker row
 
-Override this to appear as a first-class option in the Browser Automation picker with API-key prompts and an install hook:
+Override this to appear as a first-class option in the Browser Automation picker with API-key prompts (an optional `post_setup` key names an install hook to run after selection):
 
 ```python
 def get_setup_schema(self) -> dict:
@@ -57692,7 +57371,6 @@ def get_setup_schema(self) -> dict:
              "prompt": "My Backend API key",
              "url": "https://mybackend.example"},
         ],
-        "post_setup": "agent_browser",   # ensures local Chromium is installed (agent-browser itself resolves via npx)
     }
 ```
 
@@ -57731,22 +57409,20 @@ The CDP supervisor closes two long-standing gaps in Hermes' browser tooling:
    page's JS thread. Without supervision, the agent has no way to know a
    dialog is open — subsequent tool calls hang or throw opaque errors.
 2. **Cross-origin iframes (OOPIFs)** are invisible to top-level
-   `Runtime.evaluate`. The agent can see iframe nodes in the DOM snapshot but
+   `Runtime.evaluate`. The agent can see iframe nodes in the DOM but
    can't click, type, or eval inside them without a CDP session attached to
    the child target.
 
 The supervisor solves both by holding a persistent WebSocket to the backend's
-CDP endpoint per browser task, surfacing pending dialogs and frame structure
-into `browser_snapshot`, and exposing a `browser_dialog` tool for explicit
-responses.
+CDP endpoint per browser task, tracking pending dialogs and frame structure
+in its snapshot, and exposing a `browser_dialog` tool for explicit responses.
 
 ## Backend support
 
 | Backend | Dialog detect | Dialog respond | Frame tree | OOPIF `Runtime.evaluate` via `browser_cdp(frame_id=...)` |
 |---|---|---|---|---|
-| Local Chrome (`--remote-debugging-port`) / `/browser connect` | ✓ | ✓ full workflow | ✓ | ✓ |
+| Local Chromium (launched by Hermes for `browser_exec`) / `/browser connect` | ✓ | ✓ full workflow | ✓ | ✓ |
 | Browserbase | ✓ (via bridge) | ✓ full workflow (via bridge) | ✓ | ✓ |
-| Camofox | ✗ no CDP (REST-only) | ✗ | partial via DOM snapshot | ✗ |
 
 **Browserbase quirk.** Browserbase's CDP proxy uses Playwright internally and
 auto-dismisses native dialogs within ~10ms, so `Page.handleJavaScriptDialog`
@@ -57762,7 +57438,8 @@ From the page's perspective, `prompt()` still returns the agent-supplied
 string. From the agent's perspective, it's the same `browser_dialog(action=...)`
 API either way.
 
-Camofox is unsupported — no CDP surface, REST-only.
+The Camofox catalog plugin (`hermes plugins install camofox`) drives a REST-only
+browser with no CDP surface, so the supervisor does not apply to it.
 
 ## Architecture
 
@@ -57787,9 +57464,9 @@ frozen snapshot without awaiting.
 
 ### Lifecycle
 
-- **Start:** `SupervisorRegistry.get_or_start(task_id, cdp_url)` — called by
-  `browser_navigate`, Browserbase session create, `/browser connect`.
-  Idempotent.
+- **Start:** `SupervisorRegistry.get_or_start(task_id, cdp_url)` — called when
+  `browser_exec` attaches to a session (local, cloud provider or CDP override)
+  and on `/browser connect`. Idempotent.
 - **Stop:** session teardown or `/browser disconnect`. Cancels the asyncio
   task, closes the WebSocket, discards state.
 - **Dropped endpoint:** after a successful attach the supervisor reconnects with
@@ -57805,12 +57482,12 @@ frozen snapshot without awaiting.
 
 Configurable via `config.yaml` under `browser.dialog_policy`:
 
-- **`must_respond`** (default) — capture, surface in `browser_snapshot`, wait
+- **`must_respond`** (default) — capture, surface in `pending_dialogs`, wait
   for explicit `browser_dialog(action=...)` call. After a 300s safety timeout
   with no response, auto-dismiss and log. Prevents a buggy agent from stalling
   forever.
-- `auto_dismiss` — record and dismiss immediately; agent sees it after the
-  fact via `browser_state` inside `browser_snapshot`.
+- `auto_dismiss` — record and dismiss immediately; it shows up after the
+  fact in `recent_dialogs`.
 - `auto_accept` — record and accept (useful for `beforeunload` where the
   workflow wants to navigate away cleanly).
 
@@ -57876,13 +57553,12 @@ browser_dialog(action, prompt_text=None, dialog_id=None)
 - `prompt_text=...` → text to supply to a `prompt()` dialog
 - `dialog_id=...` → disambiguate when multiple dialogs are queued (rare)
 
-Tool is response-only. The agent reads pending dialogs from `browser_snapshot`
-output before calling.
+Tool is response-only. With a single pending dialog, `dialog_id` can be
+omitted.
 
-### `browser_snapshot` extension
+### Supervisor snapshot
 
-Adds three optional fields to the existing snapshot output when a supervisor
-is attached:
+`CDPSupervisor.snapshot()` carries three fields while a supervisor is attached:
 
 ```json
 {
@@ -57919,22 +57595,19 @@ is attached:
   pages. `truncated: true` surfaces when limits were hit; agents needing
   the full tree can use `browser_cdp` with `Page.getFrameTree`.
 
-No new tool schema surface for any of these — the agent reads the snapshot it
-already requests.
-
 ### Availability gating
 
-Both surfaces gate on `_browser_cdp_check` (supervisor can only run when a CDP
-endpoint is reachable). On Camofox / no-backend sessions, the dialog tool is
-hidden and the snapshot omits the new fields — no schema bloat.
+`browser_dialog` and `browser_cdp` gate on CDP reachability (the supervisor
+can only run when a CDP endpoint is reachable). Without one, the dialog tool is
+hidden — no schema bloat.
 
 ## Cross-origin iframe interaction
 
 `browser_cdp(frame_id=...)` routes CDP calls (notably `Runtime.evaluate`)
 through the supervisor's already-connected WebSocket using the OOPIF's child
-`sessionId`. Agents pick frame_ids out of
-`browser_snapshot.frame_tree.children[]` where `is_oopif=true` and pass them
-to `browser_cdp`. For same-origin iframes (no dedicated CDP session), the
+`sessionId`. Agents pick frame_ids out of the supervisor's
+`frame_tree.children[]` where `is_oopif=true` (or from `Page.getFrameTree` via
+`browser_cdp`) and pass them to `browser_cdp`. For same-origin iframes (no dedicated CDP session), the
 agent uses `contentWindow`/`contentDocument` from a top-level
 `Runtime.evaluate` instead — the supervisor surfaces an error pointing at that
 fallback when `frame_id` belongs to a non-OOPIF.
@@ -57948,13 +57621,13 @@ expiry, while the supervisor's long-lived connection keeps a valid session.
 - `tools/browser_supervisor.py` — `CDPSupervisor`, `SupervisorRegistry`, `PendingDialog`, `FrameInfo`
 - `tools/browser_supervisor_capture.py` — `CapturedCDP` / `CapturedCDPInvalid`, the trusted-plugin CDP seam behind `SUPERVISOR_REGISTRY.capture`
 - `tools/browser_dialog_tool.py` — `browser_dialog` tool handler
-- `tools/browser_tool.py` — `browser_navigate` start-hook, `browser_snapshot` merge, `/browser connect` reattach, `_cleanup_browser_session` teardown
+- `tools/browser_session_cdp.py` — `ensure_cdp_supervisor` / `stop_cdp_supervisor`, `/browser connect` reattach, dialog-policy config
+- `tools/browser_session_lifecycle.py` — per-session teardown (supervisor stopped first)
 - `toolsets.py` — registers `browser_dialog` in `browser`, `hermes-acp`, `hermes-api-server`, and core toolsets (gated on CDP reachability)
 - `hermes_cli/config.py` — `browser.dialog_policy` and `browser.dialog_timeout_s` defaults
 
 ## Non-goals
 
-- Detection/interaction for Camofox (upstream gap; tracked separately)
 - Streaming dialog/frame events live to the user (would require gateway hooks)
 - Persisting dialog history across sessions (in-memory only)
 - Per-iframe dialog policies (agent can express this via `dialog_id`)
@@ -58479,7 +58152,7 @@ Hermes is a large repository, and most contributions touch exactly one subsystem
 | Skills (bundled & optional) | `skills/`, `optional-skills/` | [Creating Skills](creating-skills.md) |
 | Cron / scheduled jobs | `cron/` | [Cron Internals](cron-internals.md) |
 | Session storage | `hermes_state.py`, `hermes_state_*.py` | [Session Storage](session-storage.md) |
-| Browser stack | `tools/browser_tool.py`, `tools/browser_supervisor.py`, `tools/browser_cdp_tool.py` | [Browser Supervisor](browser-supervisor.md) |
+| Browser stack | `tools/browser_use_cli.py` (`browser_exec`), `tools/browser_session*.py`, `tools/browser_launcher.py`, `tools/browser_supervisor.py`, `tools/browser_cdp_tool.py` | [Browser Supervisor](browser-supervisor.md) |
 | Egress firewall | `agent/proxy_sources/iron_proxy.py` | [Egress Internals](egress-internals.md) |
 | ACP (IDE integration) | `acp_adapter/` | [ACP Internals](acp-internals.md) |
 | Desktop app | `apps/desktop/` | [Desktop Plugin SDK](desktop-plugin-sdk.md), [Worktree UI Development](worktree-ui-dev.md) |
@@ -59388,7 +59061,7 @@ inherits the parent's route when those are empty. It is itself a plugin, the bun
 `ctx.register_delegation_provider()` seam as yours; it is also the smallest complete example.
 A configured backend that is not installed or reports unavailable **fails closed**: `delegate_task`
 returns a tool error naming the backend and the fix, no child starts, and its schema parameters are
-absent. A session can override the backend (`agent.delegation_backends`, below).
+absent. `/delegation` switches the backend (`agent.delegation_backends`, below).
 
 ## Skeleton
 
@@ -59518,7 +59191,7 @@ Every result entry of a task routed by a non-default backend carries `route`: th
 `reasoning_effort` is `null` when the provider's default applies; `fallback_activated: true` is added
 when a fallback provider took over. The `default` backend's children leave the result entry unchanged.
 
-## Picker metadata and session switching
+## Picker metadata and switching backends
 
 `display_name` and `summary` (one user-facing line; never shown to the model) label your backend in
 pickers such as `/delegation`. A plugin uses `ctx.delegation_backends` (same methods; `list_backends()` returns
@@ -59528,30 +59201,29 @@ the plugin host. Core code calls `agent.delegation_backends` directly:
 | Call | Does |
 |---|---|
 | `list_backends() -> list[BackendInfo]` | `default` first, then every registered backend: `name`, `label`, `description`, `available`, `reason` (the fix, when unavailable). |
-| `get_session_backend(session_key) -> str \| None` | The session's override, `None` when it follows `config.yaml`. |
-| `set_session_backend(session_key, name \| None)` | Switch one session (`None` clears). Raises `ValueError` with the reason for a backend that cannot run. |
-| `set_global_backend(name, *, session_key="")` | Write `delegation.backend` to the active profile's `config.yaml` and drop that session's override. Raises `PermissionError` on a package-manager-managed install. |
+| `set_global_backend(name, *, session_key="", apply_now=False)` | Write `delegation.backend` to the active profile's `config.yaml`. `apply_now=True` also rebuilds the tool list of the session `session_key` names at its next turn. Raises `PermissionError` on a package-manager-managed install, and `ValueError` with the reason for a backend that cannot run (or `apply_now` without a `session_key`); nothing is written then. |
 
 A plugin command that edits model routes can reuse the interactive model picker under its own heading:
 `hermes_cli.auth_model_picker.prompt_model_selection(model_ids, current_model="", title="Select the model for this route:")`
 returns the chosen model id, or `None` when cancelled.
 
-`session_key` is the `session_key` a plugin command handler receives. A session switch decides routing
-from that session's next `delegate_task` call; the `delegate_task` schema (your parameters) follows
-`config.yaml`, because it is part of the cached prompt and is never rebuilt mid-conversation. After a
-switch the model can still send the previous backend's parameters, so core refuses each task carrying a
-parameter the session's backend does not declare (fail closed per task, like any other refusal) instead
-of dropping it and running the task on the new backend's default route:
+`session_key` is the `session_key` a plugin command handler receives. A session routes on the backend its
+`delegate_task` schema (your parameters) was built from: core captures it with the session's tools and pins it
+with them to the session row, so a fresh agent continuing the session (gateway, `--resume`) restores both. The
+schema is part of the cached prompt, so a save, or a hand edit of `delegation.backend`, changes nothing in a running
+session and applies from its next session (`/new`). `apply_now=True` (what `/delegation <backend> --now` passes)
+rebuilds that session's tools at its next turn instead, and routing moves with them: one prompt-cache break by the
+user's choice, the same opt-in as `/skills install --now`. Context compression rebuilds the tools anyway and picks up
+the saved backend. A task carrying a parameter its session's backend does not declare (a model inventing one) is
+refused alone, never dropped and run on the default route:
 
 ```text
-Task 0: this session's delegation backend is 'profile_routes', which does not take 'option' (declared by
-'model_map'), so this task was not started. Run `/delegation profile_routes --global` then `/new` for a
-session whose delegate_task choices match 'profile_routes', or `/delegation model_map` to switch this
-session back to the saved backend.
+Task 0: the delegation backend is 'profile_routes', which does not take 'option' (declared by 'model_map'), so
+this task was not started. This session's delegate_task was built for another backend: run
+`/delegation profile_routes --now` to rebuild this session's delegate_task for 'profile_routes', or start a new
+session with /new.
 ```
 
-`/new` starts on the saved backend (`delegation.backend`), so the fix persists the session's pick first or
-names the saved one. When the session follows `config.yaml` (it changed mid-session), the fix is just `/new`.
 A parameter no installed backend declares is refused the same way, with "Resend it without ..." first.
 
 ## Prompt caching
@@ -67161,7 +66833,10 @@ A server entry key this Hermes does not know (one a newer release added) is
 ignored with a warning, which `hermes plugins validate` lists, and the package
 still installs. Releases from before this rule reject the package instead, and a
 release that ignores a key may behave less safely than intended, so declare a new
-key together with a catalog `requires_hermes` floor.
+key together with a catalog `requires_hermes` floor. `plugin.json` has no
+`requires_hermes` field, so that catalog floor is a portable package's only one: an install by
+catalog name refuses on an older Hermes, and `hermes plugins update` keeps the
+installed pin until Hermes is updated.
 
 An explicit per-server MCP call budget also reaches Hermes' outer tool executor. A call
 whose budget exceeds the shared concurrent-batch deadline becomes a sequential
@@ -68385,17 +68060,16 @@ ctx.register_tool(
 
 ### Overriding a built-in tool
 
-To replace a built-in tool with your own implementation (e.g. swap the
-default browser tool for a headed-Chrome CDP backend, or replace
+To replace a built-in tool with your own implementation (e.g. replace
 `web_search` with a custom corporate index), pass `override=True`:
 
 ```python
 def register(ctx):
     ctx.register_tool(
-        name="browser_navigate",             # same name as the built-in
-        toolset="plugin_my_browser",         # your own toolset namespace
+        name="web_search",                   # same name as the built-in
+        toolset="plugin_my_search",          # your own toolset namespace
         schema={...},
-        handler=my_custom_navigate,
+        handler=my_corporate_search,
         override=True,                       # explicit opt-in
     )
 ```
@@ -69854,9 +69528,16 @@ the gallery. There is no separate listing to maintain.
    reporting are opt-in. Reviewers summarise these as disclosure lines on the
    entry PR; undisclosed behaviour found in review is a request for changes.
 14. **Compatibility metadata is truthful.** `requires_hermes` is a SemVer floor
-   (`">=0.21.5"`), never a CalVer date, and never newer than the current release
-   (the loader skips the plugin otherwise). `version` matches the pinned code,
-   and Python dependencies resolve under Hermes's core constraints
+   (`">=0.21.5"`), never a CalVer date, and never newer than the current release.
+   The entry's `requires_hermes` is enforced: an install by catalog name refuses
+   on a Hermes it rejects, and `hermes plugins update` keeps an installed plugin
+   at its current pin until Hermes is updated. Declare the same floor in
+   `plugin.yaml` as well, because older Hermes versions enforce only that one
+   (the loader skips the plugin when it does not match). A portable package
+   (`plugin.json`) has no `requires_hermes` field, so the catalog entry's
+   `requires_hermes` is its only floor: set one when the package needs a recent
+   Hermes (a server declaration key an older release ignores). `version` matches the
+   pinned code, and Python dependencies resolve under Hermes's core constraints
    (`hermes plugins validate --install-deps` is what CI runs).
 15. **No skins or forks of bundled plugins.** A change to a bundled plugin is a
    PR against `hermes-agent`, not a competing listing, and vendor-lookalike skins
@@ -70198,7 +69879,7 @@ terminal.resize         clipboard.paste         image.attach
 
 `session.active_list`, `session.activate`, and `session.close` are the process-local live-session controls used by the TUI session switcher. Use `session.list` / `/resume` for saved transcript discovery; use the active-session methods only for sessions that are currently open in the TUI gateway process.
 
-Within one authenticated gateway, resuming or activating a live session attaches another event subscriber rather than replacing the previous connection. Streaming and terminal events go to all attached clients; disconnecting one client does not end a session another client is viewing. Existing submit exclusivity and configured busy-input policy remain in force. Attached clients can steer the session's subagents; browser-controller results still require the connection that registered that controller. This does not enable independent gateway processes to write the same session, nor does it imply durable prompt admission across an owner restart.
+Within one authenticated gateway, resuming or activating a live session attaches another event subscriber rather than replacing the previous connection. Streaming and terminal events go to all attached clients; disconnecting one client does not end a session another client is viewing. Existing submit exclusivity and configured busy-input policy remain in force. Attached clients can steer the session's subagents. This does not enable independent gateway processes to write the same session, nor does it imply durable prompt admission across an owner restart.
 
 ### Model overrides on `session.create`
 
@@ -70282,8 +69963,6 @@ POST /v1/runs/{id}/steer         Inject mid-run guidance at the next tool bounda
 POST /v1/runs/{id}/resolve-unknown Acknowledge an exact restart-unknown admission
 POST /v1/runs/{id}/stop          Interrupt the run
 GET  /v1/capabilities            Machine-readable feature flags
-POST /v1/browser-control/register Register a browser controller
-GET  /v1/browser-control/ws       Browser-controller WebSocket
 GET  /v1/models                  Lists hermes-agent
 GET  /api/model/options          Provider-aware picker inventory
 GET  /health, /health/detailed
@@ -70291,10 +69970,8 @@ GET  /health, /health/detailed
 
 Setup, headers (`X-Hermes-Session-Id`, `X-Hermes-Session-Key`), and frontend wiring: [API Server](../user-guide/features/api-server).
 
-Browser extensions can opt into the disabled-by-default controller protocol to
-drive the exact browser session that opened the Hermes conversation. The API
-and dashboard transports share one principal-bound broker and one explicit
-capability allowlist; see [Browser-extension control](../user-guide/features/api-server#browser-extension-control).
+The browser-extension controller protocol has been removed; to let Hermes drive a browser you
+already run, use `browser.cdp_url` or `/browser connect` — see [Browser-extension control (removed)](../user-guide/features/api-server#browser-extension-control-removed).
 
 ### Model catalog surfaces
 
@@ -71688,7 +71365,7 @@ itself ships.
 | `hermes.memory.op.count` | op (`add`/`replace`/`remove`/`read`/`search`/`other`), provider (`builtin`, a bundled memory plugin, else `plugin`), origin (`foreground`/`background_review`), outcome (`success`/`failed`/`rejected`), failure class | Is the learning loop writing memory, who asks for it (the user's turn or the background review), and how often writes are refused or fail, and why. Since package schema v4 `failure_class` names the reason from a closed list mapped from each refusal/failure return of the built-in store: `no_match` (old_text matched no entry), `ambiguous` (it matched several), `over_budget` (the write would pass the char limit), `would_empty` (a batch would remove the last entry), `drift` (the file holds text the store cannot round-trip), `read_failed` (the file exists but cannot be read), `retry_cap` (the per-turn retry budget is spent), `scan_blocked` (the content matched a threat pattern), `missing_content`, `missing_old_text`, `invalid_args`, `stale_entry` (a staged write's entry changed), `disabled` (that target is off in config), `staged` (held for the user's approval), `gate_refused` (the write-approval gate blocked it); `provider_error` / `exception` for a plugin provider's tool that returned an error or raised; `none` on success; `other`/`unknown` otherwise. A batch applies all or none, so every op row of a refused batch carries the class of the op that stopped it. Never the memory text, the old_text or the error message. |
 | `hermes.curator.run.count` | trigger (`scheduled`/`manual`), outcome (`success`/`failed`/`skipped`), archived/merged/patched/created buckets | Does the skill curator run, and does it actually consolidate anything. Dry runs report `skipped`; a scheduled check that finds another process already running the pass records nothing. Never skill names. |
 | `hermes.delegation.run.count` | subagent-count bucket, depth (`1`–`3`, `gte_4`), mode (`foreground`/`background`), outcome (`success`/`partial`/`failed`/`cancelled`) | How wide and deep delegate_task fan-outs go and how often every child finishes. One row per call, however many completion units it splits into. |
-| `hermes.execution_backend.count` | kind (`terminal`/`browser`/`code`), backend, outcome, error class | Which sandboxes carry real work and how reliable each is. Terminal backends are the `terminal.backend` values (else `other`); browser backends are `local`, `lightpanda`, `cdp`, `camofox`, `extension` or a bundled cloud provider (else `other`); execute_code is `local` or `remote`. A command's own nonzero exit is still a backend success, but a foreground command that hits its timeout is `failed`/`timeout`; terminal and execute_code calls a guard refuses before they reach the backend, Hermes' own listings for TUI/Desktop path completion, and calls made by the background review and curator forks are not counted. |
+| `hermes.execution_backend.count` | kind (`terminal`/`browser`/`code`), backend, outcome, error class | Which sandboxes carry real work and how reliable each is. Terminal backends are the `terminal.backend` values (else `other`); browser backends are `local`, `lightpanda`, `cdp` or a bundled cloud provider (else `other`; `camofox` and `extension` stay in the schema as legacy labels); execute_code is `local` or `remote`. A command's own nonzero exit is still a backend success, but a foreground command that hits its timeout is `failed`/`timeout`; terminal and execute_code calls a guard refuses before they reach the backend, Hermes' own listings for TUI/Desktop path completion, and calls made by the background review and curator forks are not counted. |
 | `hermes.platform.health` | platform, event (`connect_ok`/`connect_failed`/`reconnect`/`disconnect`), error class (`auth`/`network`/`rate_limited`/`config`/`other`) | Which messaging platforms fail to connect or drop, and why. `connect_failed` counts a failed-connect episode once per profile, platform and UTC day (the reconnect watcher's retries are not new rows; the next success ends the episode, and a platform still failing the next day counts again), with the error class of the episode's first failure. Classified from exception types, HTTP statuses and Hermes's own fatal codes, never error text. |
 | `hermes.platform.delivery` | platform, outcome (`sent`/`failed`), failure class (`rate_limited`/`too_long`/`auth`/`network`/`forbidden`/`other`) | How often replies fail to reach the user per platform (one count per logical reply, retries included). |
 | `hermes.gateway.reply_latency` | platform, first-response bucket (`lt_2s` … `gte_60s`) | Time from an accepted inbound message to the first visible reply text (stream first chunk or final message). |
@@ -71895,7 +71572,14 @@ field sets of `hermes.model_route.count`, `hermes.tool_call.count` and the task
 counters, so counters recorded before an upgrade drain safely.
 Vocabularies derived from in-repo registries (tool names, platforms, memory
 providers, error classes) are bounded by pattern in the JSON schema; the
-authoritative allowlist is `shared_metrics_contract.py`.
+authoritative allowlist is `shared_metrics_contract.py`. Values Hermes no longer
+emits stay accepted as legacy values so counters recorded by an older version
+still drain: the removed built-in browser tools (`browser_navigate`,
+`browser_snapshot`, `browser_click`, `browser_type`, `browser_scroll`,
+`browser_back`, `browser_press`, `browser_console`, `browser_get_images`,
+`browser_vision`) remain valid tool names, and `camofox` remains a valid browser
+backend label. Camofox now ships as the `camofox` catalog plugin, so its tools
+report `plugin`.
 
 Each package contains an `install_id` generated as a random UUID. Despite the
 schema field name, its current scope is one `HERMES_HOME`, so it is more
@@ -74211,7 +73895,7 @@ Each tool can optionally provide a `check_fn` — a callable that returns `True`
 
 - **API key present** — e.g., `lambda: bool(os.environ.get("SERP_API_KEY"))` for web search
 - **Service running** — e.g., checking if the Honcho server is configured
-- **Binary installed** — e.g., verifying `playwright` is available for browser tools
+- **Dependency installed** — e.g., verifying `browser-harness` is importable for `browser_exec`
 
 When `registry.get_definitions()` builds the schema list for the model, it runs each tool's `check_fn()`:
 
@@ -74252,7 +73936,7 @@ The main entry point is `model_tools.get_tool_definitions(enabled_toolsets, disa
 
 4. **Registry filtering** — the resolved tool name set is passed to `registry.get_definitions()`, which applies `check_fn` filtering and returns OpenAI-format schemas.
 
-5. **Dynamic schema patching** — after filtering, `execute_code` and `browser_navigate` schemas are dynamically adjusted to only reference tools that actually passed filtering (prevents model hallucination of unavailable tools).
+5. **Dynamic schema patching** — after filtering, schemas such as `execute_code`, `browser_cdp` and `delegate_task` are dynamically adjusted to only reference tools that actually passed filtering (prevents model hallucination of unavailable tools).
 
 ### Legacy toolset names
 
@@ -75503,8 +75187,10 @@ Battery optimization exemptions and `termux-wake-lock` can help, but do not guar
 The package does not include the `nemo-relay` exporter. Its vendored build
 toolchain does not support this target.
 
-The package does not include Electron, local Chromium, or desktop computer-use
-tools. A local Docker daemon is not part of the Termux environment. Remote
+The package does not include Electron, a bundled Chromium, or desktop
+computer-use tools. The browser tool launches a system `chromium` when one is on
+`PATH` (`pkg install chromium`, where your repository provides it); without one,
+browsing is unavailable and the browser tool says so. A local Docker daemon is not part of the Termux environment. Remote
 services have their own requirements and connectivity limits.
 
 Phone-native Termux:API microphone and clipboard adapters are not provided by
@@ -81259,7 +80945,7 @@ The same subscription unlocks the [Tool Gateway](../user-guide/features/tool-gat
 | **Web search & extract** | Nous-managed | Agent-grade search and full-page extraction. No search API key, no rate limit babysitting. |
 | **Image generation** | FAL | Nine models under one endpoint: FLUX 2 Klein 9B, FLUX 2 Pro, Z-Image Turbo, Nano Banana Pro (Gemini 3 Pro Image), GPT Image 1.5, GPT Image 2, Ideogram V3, Recraft V4 Pro, Qwen Image. |
 | **Text-to-speech** | OpenAI TTS | High-quality TTS without a separate OpenAI key. Enables [voice mode](../user-guide/features/voice-mode.md) across messaging platforms. |
-| **Cloud browser automation** | Browser Use | Headless Chromium sessions for `browser_navigate`, `browser_click`, `browser_type`, `browser_vision`. No Browserbase account needed. |
+| **Cloud browser automation** | Browser Use | Headless cloud Chromium sessions that `browser_exec` drives over CDP. No Browserbase account needed. |
 | **Cloud terminal sandbox** | Modal | Serverless terminal sandboxes for code execution (optional add-on). |
 
 Without the gateway, hooking each of those up means a web search account, a FAL account, a Browser Use account, an OpenAI key, and a Modal account — five separate signups, five separate dashboards, five separate top-up flows. With the gateway, all of it routes through one subscription.
@@ -82197,8 +81883,8 @@ hermes pm install chromium
 
 | Command | Effect |
 |---|---|
-| `pm install [names...]` | Install named packages. With no names, provision required tools plus Python, put those tools on PATH, and then sync the `all` extra. A bare install also installs the default optional tools (`agent-browser` and Chromium, `cua-driver`); a failed download of these prints a warning and does not fail the install. Naming a package you declined earlier undoes that choice. |
-| `pm install --without NAME` | Do a bare install without the default optional package `NAME` (`agent-browser` or `cua-driver`), and record that choice. Later bare installs and `hermes update` also leave it out. The installers' `--skip-browser` / `-SkipBrowser` and `--skip-computer-use` / `-SkipComputerUse` use this. |
+| `pm install [names...]` | Install named packages. With no names, provision required tools plus Python, put those tools on PATH, and then sync the `all` extra. A bare install also installs the default optional tools (`chromium`, the browser Hermes launches, and `cua-driver`); a failed download of these prints a warning and does not fail the install. Naming a package you declined earlier undoes that choice. |
+| `pm install --without NAME` | Do a bare install without the default optional package `NAME` (`chromium` or `cua-driver`), and record that choice. Later bare installs and `hermes update` also leave it out. The installers' `--skip-browser` / `-SkipBrowser` and `--skip-computer-use` / `-SkipComputerUse` (`--without cua-driver`) use this. The browser opt-out passes the legacy name `--without agent-browser`, which every PM release accepts and this one reads as `chromium`; a choice recorded under that name still skips `chromium`. |
 | `pm install --tools-only` | Install that tool closure and put it on PATH, then stop. The venv sync does not run. |
 | `pm env [names...]` | Print installed packages' PM-contributed environment values as JSON. It does not install missing packages, though a cold Hermes launch may prepare its own Python runtime first. |
 | `pm doctor` | Check installed tool identities, files, and digests against the lock. |
@@ -84350,7 +84036,7 @@ running as that user — another bot on the same host, and the bot's own
 `terminal` tool included — can reach them directly, bypassing the pane and the
 lease. The lease is a tool-level fence on `computer_use` and the browser tools,
 not an OS one. One boundary is wider than the OS user: Chromium's DevTools
-port (the dock's Browser and every agent-browser launch advertise one on
+port (the dock's Browser and every Chromium Hermes launches advertise one on
 loopback so the agent can attach) is reachable by **any** local user on the
 host, and Chromium offers no per-user restriction for it. Running each bot as
 its own OS user is out of scope; if that isolation matters to you, or the host
@@ -84500,9 +84186,9 @@ controller drops back to watching.
 ## Browser sessions that survive the handoff
 
 While the screen runs, the bot's browser tool and the dock's **Browser** icon are
-the same browser: the Chromium agent-browser drives, with one persistent
+the same browser: the Chromium `browser_exec` drives, with one persistent
 user-data-dir per bot (`<HERMES_HOME>/bot-desktop/browser-profile`; set
-`AGENT_BROWSER_PROFILE` to pin your own — `~` expands, and a relative path such
+`browser.user_data_dir` to pin your own — `~` expands, and a relative path such
 as `pin` resolves against that bot's `HERMES_HOME`, i.e. `<HERMES_HOME>/pin`).
 Click Browser during a takeover and you
 are in the bot's own windows and cookie jar; what you sign in to is what the bot
@@ -84513,28 +84199,28 @@ The dock is seeded **once**, the first time the screen starts for a profile.
 The guard is the panel layout file
 `<HERMES_HOME>/bot-desktop/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml`:
 while it exists the launcher leaves the panel alone, so changing
-`AGENT_BROWSER_EXECUTABLE_PATH` or `AGENT_BROWSER_PROFILE` and restarting the
+`browser.executable_path` or `browser.user_data_dir` and restarting the
 screen does not re-pin the Browser icon. Delete that file and the dock is
 rebuilt on the next `screen start` from whatever is installed then.
 
 Which Chromium the dock and the bot use: an explicit
-`AGENT_BROWSER_EXECUTABLE_PATH` wins; otherwise Hermes uses the PM-managed
+`browser.executable_path` wins; otherwise Hermes uses the PM-managed
 Chromium and falls back to a system `chromium` / `google-chrome`. A non-root
 user on a host with `kernel.apparmor_restrict_unprivileged_userns=1` (Ubuntu
 23.10 and later) gets the reverse order, because there the managed build cannot
 set up its sandbox and exits with `FATAL: No usable sandbox!`, while the
 distro's Chromium ships with an AppArmor profile that allows it. If the pick is
-wrong for your host, set `AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium` (or
-your Chrome path) in the gateway's environment. The official Docker image
-points `AGENT_BROWSER_EXECUTABLE_PATH` at PM's pinned full Chromium, which can
-draw a window, so the dock's Browser icon uses it; the `-desktop` tags also
-carry the distro `chromium` — set
-`AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium` on hosts that refuse the
-pinned build's sandbox. A Playwright *headless shell* is never used for the
+wrong for your host, set `browser.executable_path: /usr/bin/chromium` (or
+your Chrome path) in the bot's `config.yaml`. The official Docker image
+records PM's pinned full Chromium in `/etc/hermes/chromium-executable-path`;
+that build can draw a window, so the dock's Browser icon uses it. The
+`-desktop` tags also carry the distro `chromium` — set
+`browser.executable_path: /usr/bin/chromium` on hosts that refuse the pinned
+build's sandbox. A Playwright *headless shell* is never used for the
 icon: when it is the only browser, the pane / `screen status` report **no
 headed browser** until you install a headed one (`apt-get install chromium`).
-The dock icon starts the browser with the same sandbox settings agent-browser
-uses in that container, so the human's Browser and the bot's browser are one
+The dock icon starts the browser with the same sandbox settings Hermes's
+Chromium launcher uses in that container, so the human's Browser and the bot's browser are one
 and the same.
 
 ## CLI
@@ -84581,7 +84267,7 @@ it, so the restarted gateway re-attaches to a still-running sandbox, and
 The sandbox needs the desktop stack. `nousresearch/hermes-sandbox:desktop` is
 the default image for every container backend (Docker, Modal, Daytona,
 Singularity): the `nikolaik/python-nodejs` base (Python 3.13 / Node 26) plus
-TigerVNC, the Xfce components, a headed Chromium, `agent-browser`, `cua-driver`
+TigerVNC, the Xfce components, a headed Chromium, `cua-driver`
 and the everyday tools that base lacked (jq, ripgrep, fd, tmux, rsync, sudo for
 the image's `pn` user). Its default user is root, like the old default, so
 shell workflows do not change. An image you pinned yourself is left alone, and
@@ -84606,13 +84292,13 @@ admin raised `sessiondir max size`. This path is verified against the Apptainer
 documentation, not exercised live.
 
 An SSH host is whatever you point the backend at, so it carries the stack
-itself: the same binaries (TigerVNC, Xfce, `cua-driver`, `agent-browser` with a
-Chromium it can find), reachable from a **non-interactive login session**. That
+itself: the same binaries (TigerVNC, Xfce, `cua-driver`, a headed Chromium),
+reachable from a **non-interactive login session**. That
 last part is where a host built from the desktop image differs from `docker exec`:
 a Dockerfile `ENV` never reaches an ssh session, so the image also writes
 `PLAYWRIGHT_BROWSERS_PATH` to `/etc/environment` for PAM to apply. A host of
-your own needs the equivalent, or `agent-browser` reports "Chrome not found"
-over ssh while working in a local shell.
+your own needs the equivalent, or the browser finds no Chromium over ssh
+while working in a local shell.
 
 **Upgrading from the previous default.** A Docker sandbox you already have is
 kept, not replaced: when `docker_image` is unset and a persisted container runs
@@ -84755,7 +84441,7 @@ Not using OpenAI Codex? `hermes setup --portal` configures a non-Codex backend w
 - Run OpenAI agent turns against your **ChatGPT subscription** (no API key required) using the same auth flow Codex CLI uses.
 - Use **Codex's own toolset and sandbox** — `shell` for terminal/read/write/search, `apply_patch` for structured edits, `update_plan` for planning, all running inside seatbelt/landlock sandboxing.
 - **Native Codex plugins** — Linear, GitHub, Gmail, Calendar, Canva, etc. — installed via `codex plugin` are auto-migrated and active in your Hermes session.
-- **Hermes' richer tools come along** — web_search, web_extract, browser automation, vision, image generation, skills, and TTS work via an MCP callback. Codex calls back into Hermes for tools it doesn't have built in.
+- **Hermes' richer tools come along** — web_search, web_extract, vision, image generation, skills, and TTS work via an MCP callback. Codex calls back into Hermes for tools it doesn't have built in.
 - **Memory and skill nudges keep working** — Codex's events are projected into Hermes' message shape so the self-improvement loop sees a normal-looking transcript.
 - **Your Hermes persona rides along** — the composed system prompt (SOUL.md, MEMORY.md/USER.md, per-channel `system_prompt` overrides) is sent to the codex thread once as developer instructions when the thread starts, and Codex's built-in personality is disabled so it cannot compete with yours.
 
@@ -84798,7 +84484,6 @@ What's NOT migrated:
 Hermes registers itself as an MCP server so codex can call back for tools codex doesn't ship with. Available via the callback:
 
 - **`web_search`** / **`web_extract`** — Firecrawl-backed; tends to be cleaner than scraping for structured content.
-- **`browser_navigate` / `browser_click` / `browser_type` / `browser_press` / `browser_snapshot` / `browser_scroll` / `browser_back` / `browser_get_images` / `browser_console` / `browser_vision`** — full browser automation via Camofox or Browserbase.
 - **`vision_analyze`** — call a separate vision model to inspect an image (different from codex's `view_image` which loads it into the conversation).
 - **`image_generate`** — image generation through Hermes' image_gen plugin chain.
 - **`skill_view` / `skills_list`** — read from Hermes' skill library.
@@ -84830,7 +84515,7 @@ These four Hermes tools require the running AIAgent context (mid-loop state) to 
 What works inside a codex-runtime worker:
 - Codex's full toolset (shell, apply_patch, update_plan, view_image, web_search) — the worker does its actual task work natively
 - The migrated codex plugins — Linear, GitHub, etc.
-- The Hermes tool callback for browser_*, vision, image_gen, skills, TTS
+- The Hermes tool callback for web, vision, image_gen, skills, TTS
 
 What also works because the MCP callback exposes them:
 - **`kanban_complete` / `kanban_request_review` / `kanban_request_changes` / `kanban_block` / `kanban_comment` / `kanban_heartbeat`** — the worker handoff tools. These read `HERMES_KANBAN_TASK` from env (set by the dispatcher), gate access correctly, and write to the per-board SQLite DB pinned by `HERMES_KANBAN_DB`. Without these in the callback, a worker on this runtime could do its task but couldn't report back, hanging until the dispatcher's timeout.
@@ -84850,7 +84535,7 @@ The kanban tools are gated by `HERMES_KANBAN_TASK` env var the dispatcher sets �
 | `delegate_task` subagents | yes | not available — needs agent loop context |
 | `memory`, `session_search`, `todo` | yes | not available — needs agent loop context |
 | `web_search`, `web_extract` | yes | yes (via MCP callback) |
-| Browser automation (Camofox/Browserbase) | yes | yes (via MCP callback) |
+| Browser automation (`browser_exec`, `browser_cdp`, `browser_dialog`, `browser_vault`) | yes | not available — not exposed through the MCP callback |
 | `vision_analyze`, `image_generate` | yes | yes (via MCP callback) |
 | Image attachments in the user turn (screenshots, pasted images, `/image`) | yes (native multimodal) | yes — sent natively as app-server image inputs (data/http URLs) or local-image paths, never flattened to a text marker |
 | `skill_view`, `skills_list` | yes | yes (via MCP callback) |
@@ -85162,7 +84847,7 @@ What's NOT migrated:
 
 ## Hermes tool callback (the new MCP server)
 
-Codex's built-in toolset covers shell/file ops/patches but doesn't have web search, browser automation, vision, image generation, etc. To keep those usable in a codex turn, Hermes registers itself as an MCP server in `~/.codex/config.toml`:
+Codex's built-in toolset covers shell/file ops/patches but doesn't have web search, vision, image generation, etc. To keep those usable in a codex turn, Hermes registers itself as an MCP server in `~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.hermes-tools]
@@ -85175,9 +84860,9 @@ tool_timeout_sec = 600.0
 
 When the model calls `web_search` (or another exposed Hermes tool), codex spawns the `hermes_tools_mcp_server` subprocess via stdio, the request is dispatched through `model_tools.handle_function_call()`, and the result is projected back to codex like any other MCP response.
 
-**Tools available via the callback:** `web_search`, `web_extract`, `browser_navigate`, `browser_click`, `browser_type`, `browser_press`, `browser_snapshot`, `browser_scroll`, `browser_back`, `browser_get_images`, `browser_console`, `browser_vision`, `vision_analyze`, `image_generate`, `skill_view`, `skills_list`, `text_to_speech`.
+**Tools available via the callback:** `web_search`, `web_extract`, `vision_analyze`, `image_generate`, `skill_view`, `skills_list`, `text_to_speech`.
 
-**Tools NOT available:** `delegate_task`, `memory`, `session_search`, `todo`. These need the running AIAgent context to dispatch (mid-loop state) and a stateless MCP callback can't drive them. Use the default Hermes runtime (`/codex-runtime auto`) when you need these.
+**Tools NOT available:** `delegate_task`, `memory`, `session_search`, `todo`, and the browser tools. These need the running AIAgent context to dispatch (mid-loop state) and a stateless MCP callback can't drive them. Use the default Hermes runtime (`/codex-runtime auto`) when you need these.
 
 ## Disabling
 
@@ -85254,7 +84939,7 @@ If you find a bug, [open an issue](https://github.com/NousResearch/hermes-agent/
                                                         ▼
         ┌──────────────────────────────────────────────────────────┐
         │  hermes_tools_mcp_server.py (subprocess on demand)        │
-        │   web_search, web_extract, browser_*, vision_analyze,    │
+        │   web_search, web_extract, vision_analyze,               │
         │   image_generate, skill_view, skills_list, text_to_speech│
         └──────────────────────────────────────────────────────────┘
 ```
@@ -88874,7 +88559,7 @@ directory of the hermes-agent repository, declaring:
 | `category` | Browse shelf: `desktop` (default), `memory`, `platform`, `web`, `tools`, `voice`, `automation`, `models` or `general` |
 | `maintainer` | Who owns the plugin |
 | `capabilities` | Declared tools, hooks, middleware, and required env vars |
-| `requires_hermes` | Minimum Hermes version, e.g. `>=0.19` (optional) |
+| `requires_hermes` | Minimum Hermes version, e.g. `>=0.19` (optional). Enforced: installing on an older Hermes is refused with the version it needs, and `hermes plugins update` keeps the installed version until you update Hermes. `search` and `info` still list the entry, marked as needing a newer Hermes |
 | `platforms` | OS restrictions, empty = all (optional) |
 | `title` | Human name shown on cards, e.g. `NVIDIA App` (optional; defaults to `name`) |
 | `onboarding` | `true` offers the plugin on the desktop onboarding card, beside the hosted connectors, on the platforms it lists. Curated: official or verified entries only (optional, default `false`) |
@@ -89904,7 +89589,7 @@ The Tool Gateway is included with every paid [Nous Portal](https://portal.nousre
 | 🔍 | **Web search & extract** | Agent-grade web search and full-page extraction, managed by Nous. No rate limits to worry about — the gateway handles scaling. |
 | 🎨 | **Image generation** | One **Nous Subscription** row spanning the FAL catalog, the native Krea models, and Nous Portal image models: **Krea 3**, **FLUX 2**, **GPT Image**, **Nano Banana**, **Seedream**, **Ideogram**, **Recraft**, **Qwen**, **Krea 2**, and more. Pick the model once in `hermes tools`, which shows the live list. |
 | 🔊 | **Text-to-speech** | OpenAI TTS voices wired into the `text_to_speech` tool. Drop voice notes into Telegram, generate audio for pipelines, narrate anything. |
-| 🌐 | **Cloud browser automation** | Headless Chromium sessions via Browser Use. `browser_navigate`, `browser_click`, `browser_type`, `browser_vision` — all the agent-driving primitives, no Browserbase account required. |
+| 🌐 | **Cloud browser automation** | Headless cloud Chromium sessions via Browser Use, driven by `browser_exec` over CDP — no Browserbase account required. |
 
 All four are pay-as-you-use billed against your Nous subscription. Use any combination — run the gateway for web and images while keeping your own ElevenLabs key for TTS, or route everything through Nous.
 
@@ -89970,8 +89655,8 @@ Some accounts are also entitled to a **free tool pool** — a small managed-tool
 
 Picking a Nous model (`hermes model`) offers a per-tool checklist of gateway backends. Its behavior respects your existing setup:
 
-- Tools you've explicitly pointed at another backend (e.g. `web.backend: searxng`, `browser.cloud_provider: camofox`) are **never offered** — your selection can't be accidentally overwritten.
-- Tools configured via environment variables alone (e.g. `SEARXNG_URL`, `CAMOFOX_URL`) are offered **unchecked**, labeled to keep your own backend.
+- Tools you've explicitly pointed at another backend (e.g. `web.backend: searxng`, `browser.cloud_provider: browserbase`) are **never offered** — your selection can't be accidentally overwritten.
+- Tools configured via environment variables alone (e.g. `SEARXNG_URL`, `BROWSER_USE_API_KEY`) are offered **unchecked**, labeled to keep your own backend.
 - Only genuinely unconfigured tools come pre-checked.
 - Declines stick: if you submit the checklist with a tool unchecked, it won't be pre-checked on future Nous model swaps (stored in `tool_gateway_declined_tools` in `config.yaml`; checking it later clears the decline).
 
@@ -92167,7 +91852,7 @@ Each provider dispatch is also bounded by a wall-clock timeout (`web.extract_tim
 
 ### When truncation gets in the way
 
-If you specifically need the live DOM rather than extracted markdown — for example, a JS-heavy page where extraction returns little content — use `browser_navigate` + `browser_snapshot` instead. The browser tool returns the live accessibility tree (subject to its own snapshot cap on huge pages).
+If you specifically need the live DOM rather than extracted markdown — for example, a JS-heavy page where extraction returns little content — use `browser_exec` instead: open the page with `new_tab(url)` + `wait_for_load()`, then read it with `page_info()` or a `js()` DOM extraction. It works on the live, rendered page.
 
 ---
 
@@ -100071,7 +99756,7 @@ profile and never shares with the default or any sibling:
 | Working directory of a turn (unset `terminal.cwd`) | Same rule as a standalone gateway: `$HOME` for the local backend, sandbox default otherwise | Never the directory the multiplexer process was launched from |
 | Command approvals (`command_allowlist`, "always" choices) | The profile's own `config.yaml` | A default-profile "always" never pre-approves a secondary's command; a secondary's choice is saved to its own config |
 | Sandbox credential-file mounts (`terminal.credential_files`), `security.redact_secrets`, `browser.*` engine/headed flags, `lsp.*`, auxiliary-provider health marks, `logs/mcp-stderr.log` | The profile's own `config.yaml` / `.env` | Documented default — never the launch profile's cached value |
-| Cloud-SDK credential clients (Bedrock boto3 clients + model discovery, Azure Entra credential), credential-fetched catalogs (DeepInfra, Copilot context limits, Nous reasoning caps, Ramp Router efforts, xAI / OpenRouter image models, custom-endpoint `/models`), Camofox VNC address, computer-use aux-vision routing, remote-backend probe text, learned image token costs, `display.skin`, guest-mint back-off, banner skills, Yuanbao "active" adapter, Langfuse client | The profile's own `.env` / `config.yaml` / `<home>/cache` | Documented default — never the launch profile's cached value or its credentials |
+| Cloud-SDK credential clients (Bedrock boto3 clients + model discovery, Azure Entra credential), credential-fetched catalogs (DeepInfra, Copilot context limits, Nous reasoning caps, Ramp Router efforts, xAI / OpenRouter image models, custom-endpoint `/models`), computer-use aux-vision routing, remote-backend probe text, learned image token costs, `display.skin`, guest-mint back-off, banner skills, Yuanbao "active" adapter, Langfuse client | The profile's own `.env` / `config.yaml` / `<home>/cache` | Documented default — never the launch profile's cached value or its credentials |
 | Session-search knobs (`sessions.cjk_fts`, `sessions.search_slow_ms`) | The profile's `config.yaml` | Documented default — never the default profile's bridged value |
 | RoomLink capability catalog and the signed execution policy it advertises to a remote Bot (`approvals.mode`, `agent.max_turns`, `platform_toolsets.api_server`) | The served profile named by the request (`/p/<profile>/v1/room-members/...`, the RPC `profile` param); `target_profile` is **required** on every catalog — there is no `HERMES_PROFILE` fallback | Invitation/capabilities fail with the offending `target_profile` named; a profile that does not exist is refused, never resolved from the launch profile's config |
 | Platform proxies (`TELEGRAM_PROXY`, `DISCORD_PROXY`, `HTTPS_PROXY`, …) | The profile's own `.env` | Direct connection — never the default profile's proxy |
@@ -102752,14 +102437,15 @@ Windows package removal instead of deleting that root to repair an app.
 
 ## Browser tool
 
-Browser setup depends on the selected backend. PM supplies the pinned
-`agent-browser` and Chromium packages for the built-in backend. Browser Use
-has its own managed CLI installation through `hermes tools`. A self-contained
-MSIX includes supported browser tools in its payload.
+The browser tool (`browser_exec`) is part of Hermes's Python environment.
+For local browsing, Hermes launches the pinned Chromium that PM installs
+(`hermes pm install chromium` if it is missing); set `browser.executable_path`
+to use another Chromium-family binary. Cloud browsers are selected in
+`hermes tools`. A self-contained MSIX includes the browser tools in its payload.
 
-On Windows ARM64, the pinned Chromium and `agent-browser` binaries can use
+On Windows ARM64, the pinned Chromium is the x64 build and runs under
 Windows' x64 emulation. This differs from the native ARM64 Python runtime.
-See [Browser automation](./features/browser.md) for backend selection.
+See [Browser automation](./features/browser.md) for browser sources.
 
 ## Running Hermes on Windows — practical notes
 
@@ -102846,13 +102532,9 @@ You set it in the current process only; close and reopen the shell, or set it at
 
 **Browser tool launches but tools time out.**
 Run `hermes doctor` and `hermes pm doctor`. Use `hermes tools` to inspect the
-selected browser backend. Do not install an unrelated Playwright revision into
-a signed app payload.
-
-**`agent-browser` reports a Node version error.**
-Run `hermes pm doctor` and inspect which Hermes launcher started the process.
-PM supplies the managed Node version. Do not delete an unrelated system Node
-installation to repair Hermes.
+selected browser provider. A slow first Chromium start can be given more time
+with `browser.command_timeout` (the launch timeout floor, in seconds). Do not
+install an unrelated Playwright revision into a signed app payload.
 
 **Chinese / Japanese / Arabic characters show as `?` in the CLI.**
 The UTF-8 stdio shim didn't activate. Check that `HERMES_DISABLE_WINDOWS_UTF8` is NOT set (`Get-ChildItem env:HERMES_DISABLE_WINDOWS_UTF8`). If it's empty and you still see `?`, the console host (very old `cmd.exe`) may not support UTF-8 at all — switch to Windows Terminal.
