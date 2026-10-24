@@ -10391,7 +10391,7 @@ The full set of keys:
 |------|----------|
 | **smart** (default) | Use an auxiliary LLM to assess risk. Low-risk commands (e.g., `python -c "print('hello')"`) are auto-approved for that command only. Genuinely dangerous commands are auto-denied. Uncertain cases escalate to a manual prompt. |
 | **manual** | Always prompt the user for approval on dangerous commands. |
-| **off** | Disable all approval checks — equivalent to running with `--yolo`. All commands execute without prompts. |
+| **off** | Disable all approval checks — equivalent to running with `--yolo`. All commands execute without prompts, and write calls on `trust: untrusted` MCP servers run without the trust prompt. An MCP server's declared spend limit still asks (see [YOLO mode](#yolo-mode)). |
 
 :::warning
 Setting `approvals.mode: off` disables all safety prompts. Use only in trusted environments (CI/CD, containers, etc.).
@@ -10425,6 +10425,12 @@ When YOLO is active, Hermes shows two persistent visual reminders so it's hard t
 :::danger
 YOLO mode disables **all** dangerous command safety checks for the session — **except** the hardline blocklist (see below). Use only when you fully trust the commands being generated (e.g., well-tested automation scripts in disposable environments).
 :::
+
+YOLO and `approvals.mode: off` also skip the [`trust: untrusted`](../reference/mcp-config-reference.md) MCP prompt: a write-capable tool on an untrusted server runs without asking, with each source's usual reach. `/yolo` covers only the chat it was typed in (another chat is still asked); `--yolo` and `HERMES_YOLO_MODE` cover the sessions of the Hermes process they were given to; `approvals.mode: off` covers every chat and cron job of that profile. They do **not** skip:
+
+- **An MCP server's spend limit.** A call that would take the chat past a declared [`spend_limit`](./features/mcp.md#tool-costs-and-spend-limits) still asks, and where nobody can answer (a cron job, `hermes chat -q`) it is refused. The limit is a budget you set, not a safety prompt.
+- **Questions from an MCP server** ([elicitation](./features/mcp.md#mcp-elicitation-support)), which ask you for input rather than for permission.
+- **Payment-card fill prompts** from the [credential vault](./features/credential-vault.md#paying-and-filling-addresses), which hand a card to a page, and MCP event subscriptions, which install a standing trigger.
 
 For destructive session slash commands (`/clear`, `/new` / `/reset`, `/undo`, `/quit --delete` — `/exit --delete` is an alias), the CLI also prompts for confirmation before running them. See [Slash Commands — Confirmation prompts for destructive commands](../reference/slash-commands.md#confirmation-prompts-for-destructive-commands).
 
@@ -37512,6 +37518,13 @@ speaks SSE only (set `transport: sse`) or a proxy in front of it rejects the req
 means the token or OAuth grant is wrong; an HTML body means the URL points at a web page, not an MCP
 endpoint. `hermes logs --level debug` additionally shows the exact endpoint each connect attempt used.
 
+### A server's response is too large
+
+Hermes accepts up to 10 MiB in one HTTP response, or in one SSE event of a streamed response, so a
+large `tools/list` catalog or tool result (an editor screenshot, say) fits. On the legacy SSE
+transport (`transport: sse`) the MCP SDK caps each event at 1 MiB and offers no way to raise it; if
+the server also serves Streamable HTTP, remove `transport: sse` from its entry.
+
 ### Tools not appearing
 
 Possible causes:
@@ -37601,15 +37614,16 @@ mcp_servers:
 - The approval prompt names the cost: `Costs about 20 credits.` or `Costs 5-20 credits (per animation).`, plus `This chat has used about 40 credits on 'renders' (limit 100).` once the chat has spent something.
 - Hermes keeps a running total per chat and per server, counting the declared figure (the top of a range) for every costed call it approved and started. Declined or blocked calls add nothing; a call whose server dies before receiving it still counts, which errs toward asking sooner. The total lives in memory: it is a budget for one conversation, not the vendor's bill.
 - The total follows the conversation when context compression or `/branch` continues it under a new session id. Starting a new chat (`/new` in the CLI, a new Desktop chat) starts a new total; on messaging platforms the total belongs to the chat, so it survives `/new` there. Each cron run has its own total. Restarting Hermes resets every total.
-- With `spend_limit`, a costed call that would take the chat past the limit asks first, even on a `trust: full` server that otherwise never prompts, and every further costed call in that chat asks again ("Allow for this session" does not silence it). Where nobody can answer (cron jobs, `hermes chat -q`, a gateway with no approver), the call is refused without running and the model is told not to retry.
+- With `spend_limit`, a costed call that would take the chat past the limit asks first, even on a `trust: full` server that otherwise never prompts, and every further costed call in that chat asks again: that prompt offers only Allow Once and Deny, and an earlier Session or Always answer for the tool does not silence it. Where nobody can answer (cron jobs, `hermes chat -q`, a gateway with no approver), the call is refused without running and the model is told not to retry.
 - Below the limit, a `trust: full` server still runs costed tools without asking; on a `trust: untrusted` server every write-capable call already asks and the prompt now carries the cost. Tools annotated `readOnlyHint: true` stay unprompted unless the budget requires it.
+- [YOLO](../security.md#yolo-mode) (`/yolo`, `--yolo`) and `approvals.mode: off` skip the `trust: untrusted` prompt (`/yolo` for that chat, `--yolo` for that process, `approvals.mode: off` for that profile), but not the spend limit: below the limit a costed call runs without asking, and a call that would cross it still asks (or is refused where nobody can answer, such as a cron job with `approvals.mode: off`).
 - A malformed `tool_costs`, `spend_limit` or `cost_unit` skips the server with an error naming the key, so a budget you declared is never silently dropped. A `tool_costs` key the server does not offer (a typo, or Hermes' `mcp_<server>_` display prefix copied in) is named in a warning at connect time: use the server's own tool names.
 
 A [portable plugin package](../../developer-guide/plugins/index.md#portable-agent-plugins-v1-packages) can declare the same table for its server. If you add a same-name `mcp_servers` entry (for example to set `trust: full`), the package's `tool_costs`, `spend_limit` and `cost_unit` still apply unless your entry sets those keys itself; `spend_limit: 0` turns the package's limit off and `tool_costs: {}` drops its costs.
 
 ## MCP Elicitation Support
 
-MCP servers can ask the user for structured input mid-tool-call via the `elicitation/create` protocol (mcp Python SDK ≥ 1.11.0). Hermes routes **form-mode** elicitations through its existing approval surface — an interactive prompt in the CLI/TUI, or approval buttons on gateway platforms like Telegram and Slack — so the request reaches you wherever the session lives. **URL-mode** elicitations (where a server points you at an external URL) are declined as unsupported.
+MCP servers can ask the user for structured input mid-tool-call via the `elicitation/create` protocol (mcp Python SDK ≥ 1.11.0). Hermes routes **form-mode** elicitations through its existing approval surface — an interactive prompt in the CLI/TUI, or approval buttons on gateway platforms like Telegram and Slack — so the request reaches you wherever the session lives. Each answer covers that one request, so the prompt offers only Allow Once and Deny. YOLO and `approvals.mode: off` do not answer these for you: the server is asking you a question, not asking permission. **URL-mode** elicitations (where a server points you at an external URL) are declined as unsupported.
 
 Elicitation is **enabled by default** per server. Configure it under the `elicitation` key:
 
@@ -54981,7 +54995,7 @@ mcp_servers:
 | `sampling` | mapping | both | Server-initiated LLM request policy (see MCP guide) |
 | `elicitation` | mapping | both | Server-initiated user-input requests. `enabled` (default `true`) and `timeout` in seconds (default `300`). Form-mode requests route through the approval surface; URL-mode is declined (see MCP guide) |
 | `events` | bool | both | Experimental MCP events client with webhook delivery (default: `false`). Registers `list_event_types`, `subscribe_event` and `unsubscribe_event` for this server. Needs `platforms.webhook.extra.public_url` (HTTPS) and a running gateway. Hermes refreshes subscriptions only while it is connected to the server, so with `lazy: true` or `idle_timeout_seconds` a subscription can lapse until the next connection resubscribes it. See [MCP Events](../user-guide/features/mcp.md#mcp-events-experimental) |
-| `trust` | string | both | Trust tier: `full` (default) or `untrusted`. On an `untrusted` server, every write-capable tool call (any tool without a `readOnlyHint: true` annotation) requires user approval through the standard approval surface before it runs. `readOnlyHint` is a server-supplied *hint* — a lying server can at most skip approval for tools it claims are read-only, never gain extra access — so mark any server you don't fully control as `untrusted`. The same hint decides whether a call is transparently retried after the transport session expires mid-call: only `readOnlyHint: true` tools are replayed, while unannotated (write-capable) tools return an `outcome_uncertain` error — on a Streamable-HTTP server that expires idle sessions this means the first unannotated call after an idle period may fail and must be verified before re-invoking. Unrecognized values are treated as `untrusted` (fail-closed) A portable package can request `untrusted` for its own server in `plugin.json` (see [Portable Agent Plugins](../developer-guide/plugins/index.md#portable-agent-plugins-v1-packages)); a `config.yaml` entry with the same name always wins |
+| `trust` | string | both | Trust tier: `full` (default) or `untrusted`. On an `untrusted` server, every write-capable tool call (any tool without a `readOnlyHint: true` annotation) requires user approval through the standard approval surface before it runs. The prompt offers Allow Once, Session (that tool, for the rest of the chat) and Always (written to `command_allowlist` as `mcp:<server>/<tool>`; deleting the entry revokes it for every other chat, while the chat that answered Always keeps it until that chat ends); each covers one tool, never the server's others. [YOLO](../user-guide/security.md#yolo-mode) and `approvals.mode: off` skip this prompt (`/yolo` for that chat, `--yolo` for that process, `approvals.mode: off` for that profile); a declared `spend_limit` still asks. `readOnlyHint` is a server-supplied *hint* — a lying server can at most skip approval for tools it claims are read-only, never gain extra access — so mark any server you don't fully control as `untrusted`. The same hint decides whether a call is transparently retried after the transport session expires mid-call: only `readOnlyHint: true` tools are replayed, while unannotated (write-capable) tools return an `outcome_uncertain` error — on a Streamable-HTTP server that expires idle sessions this means the first unannotated call after an idle period may fail and must be verified before re-invoking. Unrecognized values are treated as `untrusted` (fail-closed) A portable package can request `untrusted` for its own server in `plugin.json` (see [Portable Agent Plugins](../developer-guide/plugins/index.md#portable-agent-plugins-v1-packages)); a `config.yaml` entry with the same name always wins |
 | `tool_costs` | mapping | both | What each tool spends, keyed by the MCP tool name: a non-negative number, a `[min, max]` range, or `{credits: <number or range>, note: "per animation"}`. The approval prompt names the cost and the chat's running total. Undeclared and zero-cost tools are unaffected. See [Tool costs and spend limits](../user-guide/features/mcp.md#tool-costs-and-spend-limits) |
 | `spend_limit` | number | both | Per-chat budget for this server's costed tools (`0`/absent = no limit). A costed call that would take the chat past it asks first, even on a `trust: full` server, and is refused where nobody can answer (cron, `chat -q`) |
 | `cost_unit` | string | both | Label shown with costs and totals (default: `credits`) |
@@ -60342,10 +60356,31 @@ ctx.register({
   area: TRANSCRIPT_DIRECTIVE_AREA,
   data: {
     name: 'task', // the model writes ::task{id="BB-12"}
-    render: ({ attrs, streaming }) => jsx(TaskCard, { taskId: attrs.id, streaming })
+    render: ({ attrs, sessionId, streaming }) => jsx(TaskCard, { taskId: attrs.id, sessionId, streaming })
   }
 })
 ```
+
+`render` receives `{ attrs, source, streaming, sessionId }`. `sessionId` names
+the chat whose transcript shows the card (its stored id, else its runtime id;
+`null` while that chat has no session yet). Pass it to the `host.composer`
+verbs so a card action lands in **that** chat, even when another chat open
+side by side holds the active composer:
+
+```javascript
+function TaskCard({ taskId, sessionId }) {
+  const next = () => {
+    // Older hosts don't pass sessionId (undefined): fall back to the active
+    // composer, which is what `null` addresses.
+    const sent = host.composer.submit(sessionId ?? null, `Continue task ${taskId}`)
+    if (!sent) host.notify({ kind: 'warning', message: 'Open that chat to continue' })
+  }
+  return jsx('button', { onClick: next, children: 'Next' })
+}
+```
+
+Addressed verbs fail closed: when the card's chat has no visible composer,
+`submit` returns `false` and nothing is sent anywhere else.
 
 Rules the host enforces so the surface stays safe:
 
@@ -60535,6 +60570,8 @@ ctx.os.notify({ title, body?, silent?, icon?, activate?, onActivate?, actions? }
 ctx.os.openExternal(url)                   // OS default handler (browser, mail, spotify:) → Promise<boolean>
 ctx.os.revealPath(path)                    // reveal in Finder / Explorer → Promise<boolean>
 ctx.os.writeClipboard(text)                // system clipboard → Promise<boolean>
+ctx.files.requestFolder()                  // the app's folder picker → { ok, folder: { id, name, path } | null }
+ctx.files.readText(folder, 'notes/a.md')   // folder = 'data' or a granted folder's id; path is relative
 ctx.pet.say(text, { id?, tone?, ttlMs? })   // line in the core pet's speech bubble → disposer
 ctx.pet.clear(id?)                         // drop one line (or all of yours)
 ctx.pet.visible                            // ReadableAtom<boolean> — is a pet on screen?
@@ -60722,6 +60759,73 @@ happens on user click — never from a background event alone.
 The other doors (`openExternal`, `revealPath`, `writeClipboard`) resolve
 `false` instead of throwing when the capability isn't available (older desktop
 shell, plain browser) — branch on the result rather than sniffing the bridge.
+
+### Files — `ctx.files` {#plugin-files}
+
+`ctx.files` is the one sanctioned way for a plugin to touch files on the
+computer running Desktop. A plugin reaches exactly two kinds of folder:
+
+- **Its own data folder**, handle `'data'`: private to the plugin, always
+  available, no prompt. Use it for caches, indexes and exports that are too big
+  for `ctx.storage`.
+- **Folders the user granted it**: `ctx.files.requestFolder()` opens the app's
+  own folder picker (titled with your plugin's name; you cannot change its
+  copy). The grant is remembered for your plugin across restarts, listed under
+  your plugin in **Capabilities → Plugins → Folder access**, and the user can
+  revoke it there at any time. Uninstalling the plugin drops its grants.
+
+Every call names a folder handle and a path **relative to that folder**. The
+app's main process checks each call: `..`, absolute paths, drive letters and
+symlinks that resolve outside the folder are refused, never normalized, and
+nothing inside Hermes' own data (the Hermes home with `config.yaml`, `.env`,
+auth and profiles; the app data folder with every plugin's data and the grants
+record) is reachable. A folder that holds or sits inside Hermes data (however
+it is spelled: a bind mount, a macOS firmlink, a WSL share or a
+`\\localhost\C$` share counts), a key folder such as `~/.ssh`, or a kernel
+filesystem such as `/proc` (wherever it is mounted) cannot be granted at all;
+the app tells the user why. Only plain files are read or written: a pipe, a
+device or a hard-linked file is refused, and a file swapped for a link between
+the app's check and its open is refused rather than followed.
+
+```ts
+// First run: ask once, remember the handle.
+let vault = (await ctx.files.folders())[0]
+if (!vault) {
+  const picked = await ctx.files.requestFolder()
+  if (!picked.ok || !picked.folder) return   // cancelled, refused, or an older app
+  vault = picked.folder
+}
+
+const listing = await ctx.files.list(vault.id, 'notes')        // { ok, entries: [{ name, path, isDirectory }], truncated }
+const note = await ctx.files.readText(vault.id, 'notes/a.md')  // { ok, text, size, mtimeMs }
+await ctx.files.writeText(vault.id, 'notes/b.md', '# B\n', { exclusive: true }) // refuses to replace a file
+await ctx.files.rename(vault.id, 'notes/b.md', 'c.md')         // same folder only
+await ctx.files.trash(vault.id, 'notes/c.md')                  // OS trash, recoverable
+await ctx.files.readDataUrl(vault.id, 'img/cover.png')         // { ok, url: 'data:image/png;base64,…' }
+await ctx.files.stat(vault.id, 'notes/a.md')                   // { ok, exists, isDirectory?, size?, mtimeMs? }
+await ctx.files.writeText('data', 'index.json', JSON.stringify(index))
+await ctx.files.release(vault.id)                              // give the folder back
+```
+
+No member throws. `dataFolder` is the string `'data'`; `folders()` resolves
+an array of `{ id, name, path }` (empty when the app has no door);
+`release(id)` resolves `true` when it gave a folder back and `false`
+otherwise. Every other member resolves `{ ok: true, … }` or
+`{ ok: false, error, message }`, where `error` is one of `invalid-path`, `outside-folder`, `protected`,
+`not-granted` (revoked, or another plugin's folder), `folder-missing`,
+`folder-changed` (the granted folder was moved or replaced: ask again),
+`not-found`, `exists`, `is-directory`, `not-a-directory`, `not-a-file`,
+`binary`, `too-large`, `sensitive-file` (`.env`, SSH keys and similar are
+refused even inside a granted folder, under any spelling the OS treats as the
+same name, and cannot be renamed or trashed),
+`io-error`, or `unavailable` (an app build without
+the door: feature-detect with `ctx.files?.…`). Limits: text reads and writes up
+to 4 MiB, data URLs up to 16 MiB, listings up to 10,000 entries. Reads are
+refused past the limit, never truncated. A write needs its parent folder to
+exist.
+
+Paths are on the machine running Desktop, not on a remote backend. To work
+with the backend's files, go through your plugin's `ctx.rest` routes.
 
 ### Pet bubble — `ctx.pet` {#pet-bubble}
 
@@ -61437,6 +61541,9 @@ const tab = ctx.storage.get('lastTab', 'summary')
 ctx.storage.remove('lastTab')
 ```
 
+For files (a vault, a notes folder, exports) use [`ctx.files`](#plugin-files):
+your own data folder plus folders the user grants you.
+
 ## Bundled plugins
 
 A plugin can ship in-tree at `apps/desktop/src/plugins/<id>/plugin.tsx` (default
@@ -61475,7 +61582,12 @@ or dynamic `import` of anything else, including `https:` URLs, fails the load).
 Neither is a sandbox. Doors that touch user data outside the app are gated
 on top of that: `ctx.preview.executeJavaScript` needs a declared capability
 and the user's per-origin consent ([Preview page scripts](#preview-page-scripts)).
-A future remote-source door will need a real boundary
+File access follows the same rule: a catalog plugin
+should read and write through [`ctx.files`](#plugin-files), not the raw
+`window.hermesDesktop` file bridge. `ctx.files` is enforced in the main
+process, so a plugin that uses it (or untrusted text it handles, such as a
+note name from the model) cannot leave the folders the user granted; the raw
+bridge has no such limit, which is why catalog review asks for `ctx.files`. A future remote-source door will need a real boundary
 (iframe/worker + CSP + capability gating) before it can land; do not treat this
 pipeline as a trust boundary.
 
@@ -61518,7 +61630,7 @@ pipeline as a trust boundary.
 | Category | Exports |
 |----------|---------|
 | Host | `host` (`.state.*`, `.settings`, `.notify`, `.notifyError`, `.navigate`, `.onEvent`, `.logs`, `.status`, `.restartGateway`, `.request`, `.composer`, `.spellcheck`, `.sessions`, `.skills`, `.toolsets`, `.profiles`, `.pluginDecisions`) |
-| Plugin contract | `HermesPlugin`, `PluginContext`, `PluginContribution`, `PluginStorage`, `PluginOs`, `PluginPet`, `PetSayOptions`, `PetMessageTone`, `PluginAppActionId`, `PluginAppActionInfo`, `PluginRunActionResult`, `PLUGIN_APP_ACTIONS`, `PluginRestOptions`, `PluginNativeNotificationInput`, `PluginNotificationAction`, `HermesOpenTarget`, `Contribution` |
+| Plugin contract | `HermesPlugin`, `PluginContext`, `PluginContribution`, `PluginStorage`, `PluginFiles`, `PluginFolder`, `PluginFileEntry`, `PluginFilesResult`, `PluginOs`, `PluginPet`, `PetSayOptions`, `PetMessageTone`, `PluginAppActionId`, `PluginAppActionInfo`, `PluginRunActionResult`, `PLUGIN_APP_ACTIONS`, `PluginRestOptions`, `PluginNativeNotificationInput`, `PluginNotificationAction`, `HermesOpenTarget`, `Contribution` |
 | Area constants | `PANES_AREA`, `ROUTES_AREA`, `SIDEBAR_NAV_AREA`, `STATUSBAR_AREAS`, `TITLEBAR_AREAS`, `WORKSPACE_PAGE_HEADER_AREA`, `PALETTE_AREA`, `KEYBINDS_AREA`, `THEMES_AREA`, `COMPOSER_AREAS`, `MODEL_MENU_ROW_AREA`, `KANBAN_CARD_AREAS`, `SESSION_ROW_AREAS`, `SIDEBAR_NAV_PREFS_AREA`, `APPEARANCE_AREAS`, `SETTINGS_PLUGINS_AREA` |
 | Area payloads | `PluginSettingsPage`, `PluginSettingsSubpage` (+ `pluginSettingsHref`), `RouteContribution`, `SidebarNavContribution`, `StatusbarItem`, `TitlebarTool`, `PaletteContribution`, `KeybindContribution`, `ComposerMiddleware`, `ComposerAttachmentProvider`, `ComposerContextMenuProvider` (+ `ComposerContextMenuItem`, `ComposerContextMenuContext`, `ComposerContextMenuAction`), `SessionRowSlotContribution`, `KanbanCardBadgeContribution` (+ `KanbanCard`, `KanbanCardBoard`, `KanbanCardBadge`, `KanbanCardBadgeTone`, `KANBAN_CARD_BADGE_HUES`, `KANBAN_CARD_BADGE_LIMITS`), `SidebarNavPrefsContribution` |
 | React / state | `useValue`, `atom`, `computed`, `useQuery`, `useMutation`, `useQueryClient`, `queryClient`, `Contribute`, `WorkspacePageHeaderControl` |
@@ -67002,7 +67114,7 @@ write-capable call instead of relying on the skill's instructions alone:
 
 The server name must match an `mcp.json` entry. With `untrusted`, every tool
 call to that server that is not annotated `readOnlyHint: true` asks the user
-first, and fails closed where nobody can answer (cron, unattended runs). The
+first (Once, Session or Always, per tool), and fails closed where nobody can answer (cron, unattended runs). The
 only other accepted value is `full`, the default, so a package can narrow
 access but never widen it. A `config.yaml` server with the same name replaces
 the package's entry, including its trust, but keeps the package's declared costs
