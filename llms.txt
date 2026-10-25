@@ -217,6 +217,7 @@ Repo: https://github.com/NousResearch/hermes-agent
 - [Billing Lifecycle (TUI)](https://hermes-agent.nousresearch.com/docs/developer-guide/billing-lifecycle): Map from every billing/subscription state and typed refusal to the exact TUI copy and recovery action
 - [Browser Provider Plugins](https://hermes-agent.nousresearch.com/docs/developer-guide/browser-provider-plugin): How to build a cloud browser backend plugin for Hermes Agent
 - [Browser CDP Supervisor](https://hermes-agent.nousresearch.com/docs/developer-guide/browser-supervisor): How Hermes detects and responds to native JS dialogs and interacts with cross-origin iframes via a persistent CDP connection.
+- [Browser Vault Plugins](https://hermes-agent.nousresearch.com/docs/developer-guide/browser-vault-plugin): Add a password manager to browser_vault with ctx.register_login_backend, and the isolation rules it runs under
 - [Chronos Managed-Cron Contract](https://hermes-agent.nousresearch.com/docs/developer-guide/chronos-managed-cron-contract): Agent ↔ NAS wire contract for the Chronos cron provider
 - [CLI Internals](https://hermes-agent.nousresearch.com/docs/developer-guide/cli-internals): How hermes_cli is shaped: slash dispatch, config loaders, the skin engine, the transactional update pipeline, and process-identity rules
 - [Codebase Ownership Map](https://hermes-agent.nousresearch.com/docs/developer-guide/codebase-ownership): Which directories belong to which subsystem, and where the right docs entry point lives for each
