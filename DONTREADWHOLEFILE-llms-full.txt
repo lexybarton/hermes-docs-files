@@ -978,7 +978,7 @@ For an admitted source checkout, `hermes update` runs these phases:
 1. **Pre-update snapshot** — Hermes saves selected state files for every profile in that profile's `state-snapshots/` directory. These include pairing data, cron jobs, `config.yaml`, `.env`, and `auth.json`. Automatic quick snapshots skip individual files larger than 1 GiB. `updates.pre_update_backup` selects `quick`, `full`, or `off`. Full archives use the [backup exclusions](../reference/faq.md#hermes-backup-vs-hermes-profile-export). Recovery uses [Snapshots and rollback](../user-guide/checkpoints-and-rollback.md). Quick snapshots recover state files, not application code. The snapshot is best-effort: if it fails, the update prints a `⚠ Pre-update snapshot FAILED` warning and continues, and the receipt records `pre_update_backup` as a failed step (a deliberate `off`/`--no-backup` lands in the receipt's skips with its reason instead).
 2. **Code update** — applies the configured source branch or stable release tag and updates submodules. On Linux and macOS every gateway running from this install is paused immediately before the first change to the checkout (see [Gateway downtime during an update](#gateway-downtime-during-an-update)); an update that has nothing to apply, or that fails before it changes the checkout, stops nothing.
 3. **Post-pull syntax validation + auto-rollback** — after the pull, Hermes compiles the nine critical files every `hermes` invocation imports at startup. If any fails to parse (e.g. an orphan merge-conflict marker, an accidentally truncated file), Hermes rolls the install back so your shell stays bootable: it resets the checkout to the commit it ran before the pull (`git reset --hard <pre-pull-sha>`), or, when the update switched away from a detached checkout or a parked feature branch, returns there with `git checkout --detach <sha>` / `git checkout <branch>` (a branch it cannot check out again is restored detached at the same commit). Re-run `hermes update` once the upstream fix lands.
-4. **Dependency preparation** — PM provisions required tools and prepares a complete Python environment from the new lock, existing extras, and enabled plugin requirements. It validates that environment before publishing its selection. A plugin never fails the update. A plugin that no longer fits the new core is added to `plugins.disabled` in every profile that enables it (a memory provider has `memory.provider` cleared). That covers a `requires-python` that excludes Hermes's Python, a `manifest_version` newer than this Hermes supports, and dependencies that the resolver proves can't resolve alongside core and earlier plugins in config order, or that fail their own build. A download or network failure gets one retry and is disabled if it fails again. The update prints `⚠ Disabled plugin '<name>' in <home>: <reason>`, records it in the receipt's warnings, and continues. Re-enable it with `hermes plugins enable <name>` once the plugin ships a compatible release, or once the network is back. A `requires_hermes` range the running version misses never disables a plugin, because a source checkout without release tags can read as an older release. That plugin sits out instead (`⚠ Left plugin '<name>' … out of this update`), stays enabled, and rejoins once Hermes reports a version it accepts. A secondary profile whose config cannot be read sits out the same way until the config is fixed. Only a core that cannot build on its own fails this step.
+4. **Dependency preparation** — PM provisions required tools and prepares a complete Python environment from the new lock, existing extras, and enabled plugin requirements. It validates that environment before publishing its selection. A plugin never fails the update. A plugin that no longer fits the new core is moved from `plugins.enabled` to `plugins.disabled` in every profile that enables it. A memory provider keeps its `memory.provider` selection; while the plugin is disabled, Hermes uses built-in memory and says so at startup, in `hermes memory status` and in `hermes doctor`. That covers a `requires-python` that excludes Hermes's Python, a `manifest_version` newer than this Hermes supports, and dependencies that the resolver proves can't resolve alongside core and earlier plugins in config order, or that fail their own build. A download or network failure gets one retry and is disabled if it fails again. The update prints `⚠ Disabled plugin '<name>' in <home>: <reason>`, records it in the receipt's warnings and under `plugins.disabled_by_update` in that profile's config, and continues. The next update retries a plugin disabled by a download failure; one the resolver or its own build rejected is retried by the first update where the plugin or Hermes's dependencies have changed. Retries run after the enabled plugins have built, and turns it back on (memory provider included) once it fits, for example after the plugin ships a compatible release or Hermes fixes what broke it. A retried plugin never displaces an enabled one. A provider-only record is retried only while `memory.provider` still names it. To turn it back on sooner, run `hermes plugins enable <name>`. To keep it off, run `hermes plugins disable <name>`, which stops the retries. Updates before this behaviour could leave a plugin listed in both `plugins.enabled` and `plugins.disabled`, where it loads nowhere; `hermes doctor` reports that state, and `hermes plugins enable <name>` or `hermes plugins disable <name>` settles it. A `requires_hermes` range the running version misses never disables a plugin, because a source checkout without release tags can read as an older release. That plugin sits out instead (`⚠ Left plugin '<name>' … out of this update`), stays enabled, and rejoins once Hermes reports a version it accepts. A secondary profile whose config cannot be read sits out the same way until the config is fixed. Only a core that cannot build on its own fails this step.
 5. **Config migration** — detects new config options added since your version and prompts you to set them
 6. **Desktop rebuild (stage-and-swap)** — if the Hermes Desktop app was built from this checkout, it is rebuilt so the GUI matches the new code. The rebuild packs into a temporary staging directory next to `apps/desktop/release/`, verifies the staged app, and only then renames it over the previous build (on Windows a real-time scanner briefly holding `release/win-unpacked` is ridden out with a few short retries). A rebuild that fails at any point — corrupt Electron download, missing dependency, disk full — leaves the previous app untouched and launchable; the update prints a `⚠` line, still finishes the remaining steps (config migration, gateway restart) and exits 0 with a `build` follow-up in its receipt, and the next launch, `hermes update` or `hermes desktop --build-only --force-build` retries the rebuild. On macOS the rebuilt bundle is then copied (with `ditto`, signature intact) over a stale `/Applications/Hermes.app` or `~/Applications/Hermes.app`, so the copy Finder and the Dock launch matches the backend; an installed copy that is currently running is left alone and the update tells you to quit it and run `hermes update` again. If a copy an earlier update installed has since been removed (including dragged to the Trash), the update rebuilds it if needed, puts it back and says so, so Finder, the Dock and Spotlight find Hermes again; `hermes uninstall` removes the app for good. On Windows, when the update finishes from inside the Desktop app it would rebuild (the app completing an interrupted update at launch), the rebuild is skipped with a notice instead: Windows locks a running app's files, and stopping the app would end the update with it. The rest of the update completes; quit Hermes Desktop and run `hermes desktop` from a terminal, or use **Update now** in **Settings → About**, to rebuild and reopen it.
 7. **Gateway auto-restart**: on Linux and macOS, gateways paused for the update are started again as soon as the dependencies are prepared and the launchers refreshed, before the product builds; on Windows they restart after the builds. Any other running gateway is refreshed after the update completes. Service-managed gateways (systemd on Linux, launchd on macOS) restart through the service manager. Manual gateways are relaunched when Hermes can map their PID to a profile. Manually launched `hermes serve` / `hermes dashboard` backends are different: the updater leaves them running and asks their owner to restart them. See [Manual backend restart reminders](#manual-backend-restart-reminders). Backends owned by a running Desktop app remain the app's responsibility.
@@ -1866,7 +1866,7 @@ Quick reference for the most common things Nix users want to customize:
 | Add project context to the workspace | `documents."AGENTS.md"` | `./documents/AGENTS.md` |
 | Run the backend for the desktop app or the dashboard | `backend.mode` | `"serve"` or `"dashboard"` |
 | Add MCP tool servers | `mcpServers.<name>` | See [MCP Servers](#mcp-servers) |
-| Enable Discord/Telegram/Slack | `extraDependencyGroups` | `[ "messaging" ]` |
+| Add an optional extra the package does not ship | `extraDependencyGroups` | `[ "google-meet" ]` |
 | Mount host directories into container | `container.extraVolumes` | `[ "/data:/data:rw" ]` |
 | Pass GPU access to container | `container.extraOptions` | `[ "--gpus" "all" ]` |
 | Use Podman instead of Docker | `container.backend` | `"podman"` |
@@ -2317,12 +2317,14 @@ The package's `site-packages` is added to PYTHONPATH in the hermes wrapper. `imp
 
 ### Optional Dependency Groups (`extraDependencyGroups`)
 
-For optional extras declared in hermes-agent's `pyproject.toml`, use `extraDependencyGroups` to include them in the sealed venv at build time. This is required for any extra not in the default `[all]` set — on Nix, runtime installation into the read-only store is not possible.
+For optional extras declared in hermes-agent's `pyproject.toml`, use `extraDependencyGroups` to include them in the sealed venv at build time. This is required for any extra the selected package does not already ship — on Nix, runtime installation into the read-only store is not possible.
 
 ```nix
-# Enable Discord, Telegram, Slack
-services.hermes-agent.extraDependencyGroups = [ "messaging" ];
+# Add Google Meet support on top of what the package ships
+services.hermes-agent.extraDependencyGroups = [ "google-meet" ];
 ```
+
+`extraDependencyGroups` and `extraPythonPackages` **add to** the groups the selected package ships; they never replace them. The `default` package already ships `messaging`, `voice`, `exa` and the other groups in the table below, so naming one of those changes nothing. The same holds for `pkgs.hermes-agent.override { extraDependencyGroups = [ ... ]; }`. For a smaller build, start from a smaller package: `package = inputs.hermes-agent.packages.${system}.minimal;` (or `#messaging`), or `.override { defaultDependencyGroups = [ ]; }` to drop the shipped groups and list only the ones you want.
 
 These groups join the core dependency resolution at build time. Conflicting
 requirements can still fail that resolution. The table lists common groups;
@@ -2382,7 +2384,9 @@ External flakes can override the package directly:
     nixpkgs.overlays = [ hermes-agent.overlays.default ];
     # Then:
     #   pkgs.hermes-agent.override { extraPythonPackages = [...]; }
-    #   pkgs.hermes-agent.override { extraDependencyGroups = [ "voice" ]; }
+    #   pkgs.hermes-agent.override { extraDependencyGroups = [ "google-meet" ]; }
+    # Both add to the groups the default package ships. To drop those:
+    #   pkgs.hermes-agent.override { defaultDependencyGroups = [ ]; }
   };
 }
 ```
@@ -2528,7 +2532,7 @@ nix build .#checks.x86_64-linux.config-roundtrip    # merge script preserves use
 | `extraPackages` | `listOf package` | `[]` | Extra packages available to the agent. Added to the hermes user's per-user profile so terminal commands, skills, and cron jobs all see them |
 | `extraPlugins` | `listOf package` | `[]` | Directory plugin packages to symlink into `$HERMES_HOME/plugins/`. Each must contain `plugin.yaml` |
 | `extraPythonPackages` | `listOf package` | `[]` | Python packages added to PYTHONPATH for entry-point plugin discovery. Use the selected package’s `python.pkgs` |
-| `extraDependencyGroups` | `listOf str` | `[]` | pyproject.toml optional extras to include in the sealed venv (e.g. `["voice"]`). Resolved by uv — no collisions |
+| `extraDependencyGroups` | `listOf str` | `[]` | pyproject.toml optional extras added to the groups `package` already ships (e.g. `["google-meet"]`). Resolved by uv — no collisions |
 | `restart` | `str` | `"always"` | The systemd `Restart=` policy. macOS does not use it. |
 | `restartSec` | `int` | `5` | The systemd `RestartSec=` value. macOS does not use it. |
 
@@ -3526,7 +3530,7 @@ On macOS, `F7` means the physical F7 function key. MacBook keyboards may use tha
 - **`/terminal-setup`** installs local VS Code / Cursor / Windsurf terminal bindings for better `Cmd+Enter` and undo/redo parity on macOS.
 - **Slash autocompletion** opens as a floating panel with descriptions, not an inline dropdown.
 - **Typing while the agent is busy** (`display.busy_input_mode: queue`, the TUI default) submits the message to the gateway immediately. The gateway's durable session queue orders it behind the running turn, so it survives a gateway crash or restart and shows up as `[queued] …` in the `queued (N)` panel of every client attached to the session — the Desktop app sees the same list. Your message's transcript bubble appears when its turn actually starts. `steer` and `interrupt` still act on the live turn as before.
-- **`Ctrl+X`** opens the live session switcher. When a queued message is highlighted (sent while the agent was still running), it still deletes that queued message instead — for a gateway-queued row this cancels it on the gateway (`prompt.cancel`), so it disappears for every viewer; picking and re-sending an edited row cancels the original and submits the edit as a new input. **`Esc`** cancels editing and unhighlights without deleting.
+- **`Ctrl+X`** opens the live session switcher. When a queued message is highlighted (sent while the agent was still running), it still deletes that queued message instead — for a gateway-queued row this cancels it on the gateway (`prompt.cancel`), so it disappears for every viewer; picking and re-sending an edited row cancels the original and submits the edit as a new input (if the original has already started by then, it is stopped and the edit runs after it). **`Esc`** cancels editing and unhighlights without deleting.
 - **`Ctrl+G` / `Ctrl+X Ctrl+E`** — open the current input buffer in `$EDITOR` for multi-line / long-prompt composition; save-and-exit sends the contents back as the prompt.
 
 ## Slash commands
@@ -4699,6 +4703,13 @@ This applies **after** per-platform tool config (`platform_toolsets` written by
 platform's saved config still lists it. Use this when you want a single
 switch for "turn X off everywhere" rather than editing 15+ platform rows in
 the `hermes tools` UI.
+
+Removal is per tool, so a listed toolset also takes its tools out of any
+enabled toolset that shares them: `search` (just `web_search`) strips
+`web_search` from an enabled `web`. `hermes tools list` and `hermes doctor`
+flag an enabled toolset that loses tools this way, and enabling a toolset in
+`hermes tools` (checklist, `hermes tools enable`, Desktop or dashboard) clears
+every entry here that the enabled toolsets fully cover.
 
 Leaving the list empty, or omitting the key, is a no-op.
 
@@ -6804,7 +6815,7 @@ The delegation provider uses the same credential resolution as CLI/gateway start
 
 **Precedence:** `delegation.base_url` in config → `delegation.provider` in config → parent provider (inherited). `delegation.model` in config → parent model (inherited). Setting just `model` without `provider` changes only the model name while keeping the parent's credentials (useful for switching models within the same provider like OpenRouter).
 
-**One-shot runs:** a finite `hermes chat -q` / `--oneshot` session has no later turn to consume delegated results and no later session to learn for, so it runs a smaller footprint: the skills prompt asks for domain skills only rather than process skills (`skill_manage` stays available, so the run can still author skills), and `oneshot_max_children` caps the total subagents the run may spawn (default `2`, `0` = unlimited). Past the cap `delegate_task` returns a tool error telling the agent to finish inline.
+**One-shot runs:** a finite `hermes chat -q` / `--oneshot` session has no later turn to consume delegated results and no later session to learn for, so it runs a smaller footprint: the skills prompt asks for domain skills only rather than process skills (`skill_manage` stays available, so the run can still author skills), and `oneshot_max_children` caps the total subagents the run may spawn (default `2`, `0` = unlimited). Past the cap `delegate_task` returns a tool error telling the agent to finish inline. Nobody can answer or steer a one-shot either, so it also runs without the `clarify` tool, without the system prompt's mid-turn steering note, and with a `delegate_task` schema that omits the live-control parameters (`action` list/steer/stop, `subagent_id`, `message`): its children are joined inside the call, so there is never a running child to control.
 
 **Width and depth:** `max_concurrent_children` caps how many subagents run in parallel per batch (default `3`, floor of 1, no ceiling). Can also be set via the `DELEGATION_MAX_CONCURRENT_CHILDREN` env var. When the model submits a `tasks` array longer than the cap, `delegate_task` returns a tool error explaining the limit rather than silently truncating. `max_spawn_depth` controls the delegation tree depth (clamped to 1-3). At the default `1`, delegation is flat: children cannot spawn grandchildren, and passing `role="orchestrator"` silently degrades to `leaf`. Raise to `2` so orchestrator children can spawn leaf grandchildren; `3` for three-level trees. The agent opts into orchestration per call via `role="orchestrator"`; `orchestrator_enabled: false` forces every child back to leaf regardless. Cost scales multiplicatively — at `max_spawn_depth: 3` with `max_concurrent_children: 3`, the tree can reach 3×3×3 = 27 concurrent leaf agents. See [Subagent Delegation → Depth Limit and Nested Orchestration](features/delegation.md#depth-limit-and-nested-orchestration) for usage patterns.
 
@@ -6887,6 +6898,27 @@ onboarding:
 - `profile_build` — controls the offer on the first message ever, in the TUI, the desktop app and messaging direct messages (never in a group chat). `"ask"` (default) offers to build a user profile; the offer is **opt-in and consent-gated** — the agent asks before any lookup, never reads connected accounts silently, and saves confirmed facts to user memory. `"off"` stops only the offer; the agent still gives a plain intro. The offer fires at most once per profile.
 - `seen` — internal state. Hermes latches each shown hint here so it never fires again; the first-message offer is also recorded here once shown. Don't hand-edit it — wipe the whole `onboarding` section if you want to re-see all hints.
 - `run` — whether the desktop app opens its first-run onboarding chat on the next launch. Unset means only on a fresh install (no sessions and no profiles yet). Hermes writes `true` when onboarding starts and `false` when it is finished or skipped. It always lives in the default profile's `config.yaml`, whichever profile the app runs. Set `false` to never show it; managed installs can pin it in the managed config.
+
+## Webapp
+
+The gateway can serve the [Desktop workspace in a browser](./desktop.md#use-the-desktop-workspace-from-a-browser) on its own listener. It is off until you turn it on.
+
+```yaml
+webapp:
+  enabled: false     # true: the gateway serves the Webapp
+  host: 127.0.0.1    # 127.0.0.1, ::1 or localhost; or 0.0.0.0 / :: for other machines (dashboard sign-in required)
+  port: 9120         # fixed, so the browser's address stays the same across gateway restarts
+  public_url: ""     # the https:// address a reverse proxy or tunnel serves the Webapp at (sign-in required)
+```
+
+- `enabled` — the gateway reads it at start; restart the gateway after changing it (`hermes gateway restart`).
+- `host` — `127.0.0.1`, `::1` or `localhost` keeps the Webapp on this machine. `0.0.0.0` or `::` makes it reachable from other machines and requires a [dashboard sign-in provider](./features/web-dashboard.md#authentication-gated-mode); without one the gateway serves native clients only and `hermes webapp --status` says why. Restart the gateway after adding the provider. Any other value, another loopback address such as `127.0.0.2` included, keeps the Webapp off.
+- `port` — when the port is taken, the gateway likewise serves native clients only and `hermes webapp --status` reports why. It also replaces the Webapp's browser sign-in, since another program may have received it, so open tabs need `hermes webapp` again once the port is free.
+- `public_url` — set it when a reverse proxy or tunnel you run serves the Webapp at its own address (forwarding to `host:port`). It turns on dashboard sign-in even on a loopback `host`, it is the one outside hostname the Webapp accepts requests for, and sign-in callbacks are built on it. Without a sign-in provider the gateway serves native clients only, as for `0.0.0.0`. It must be an `http://` or `https://` address with no credentials, query or fragment; anything else keeps the Webapp off. `dashboard.public_url` is for `hermes dashboard` and never applies to the Webapp.
+
+Sign-in turns on when `host` is `0.0.0.0` or `::`, or when `public_url` is set, whatever the host. `hermes webapp` then opens the Webapp's address (`public_url` when set, where sign-in returns) for you to sign in with your dashboard account: its one-use links only open a Webapp that needs no sign-in. Native clients (the CLI, TUI and Desktop app) never sign in: the gateway's listener for them never asks for it, whatever the config says.
+
+The Webapp settings are read from the config of the gateway that serves the profile: the default profile's config for named profiles it serves, a standalone profile's own config otherwise.
 
 ## Dashboard
 
@@ -8137,14 +8169,14 @@ live session. After the root fix in PR #122825 is installed, use
 `hermes sessions repair-prompts` to find rows that were already degraded.
 
 The scan is conservative: it only proposes a repair when the stored prompt is
-missing the `## Skill Safety` guidance **and** the persisted `tools[]` pin
+missing the `skill_manage` guidance line **and** the persisted `tools[]` pin
 contains `skill_manage` (which always emits that guidance). Rows with no
 readable pin, or with a `memory`-only pin (which is also a legitimate
 `toolsets: [memory]` setup), are reported as **unverifiable** and are not
 changed by this scan; clear them explicitly by `SESSION_ID` if needed. A
 memory-only row also becomes repairable on its own: once the session is resumed, its
 `tools[]` pin re-pins the full tool surface, after which a scan sees
-`skill_manage` without the Skill Safety guidance and clears it.
+`skill_manage` without that guidance line and clears it.
 
 ```bash
 # Report verified candidates and unverifiable rows; writes nothing
@@ -8579,6 +8611,20 @@ deleted by a *later* pass after a further full retention window. Messaging
 platform sessions (Telegram, Discord, …), TUI/desktop sessions, pinned
 sessions, and sessions with a live turn or compression in progress are
 never closed by this sweep.
+
+**Local sessions nobody closed.** A CLI, TUI or Desktop session whose last
+viewer disappeared without closing it (a killed terminal, a dropped connection,
+or a gateway stop or restart while it was open) is ended by the gateway
+`sessions.orphan_end_grace_s` seconds later (default `300`; `0` never ends it),
+`end_reason: ws_orphan_reap` (or `startup_orphan_reap` after a restart, no
+sooner than 6 hours after its last activity, since an idle classic CLI only
+reconnects when you next use it). While `orphan_end_grace_s` is unset, the
+legacy `dashboard.ws_orphan_reap_grace_s: 0` turns this off, and
+`dashboard.startup_orphan_sweep: false` turns off the after-restart end. A turn
+still running keeps running, and the session ends once it settles; one paused on
+an interrupted turn stays open until you Discard it. A viewer that reconnects
+within the grace keeps the session open. Ending is non-destructive: the session
+stays resumable, and its next message reopens it on the same id.
 
 ### Oversized-Transcript Guards
 
@@ -16241,6 +16287,8 @@ working but are **deprecated** in favor of the consent flow:
 
 A gate is open when *either* the capability is granted *or* the legacy key is
 set — existing configs keep working unchanged.
+`llm.side_question` has no legacy key: it is open only when declared and
+granted through the consent flow.
 
 :::warning Not a sandbox
 Capabilities are a **consent and audit layer**, not isolation. Plugins run as
@@ -16500,8 +16548,9 @@ plugins:
 
 Plugins do not change. They receive the same `ctx` and register tools, hooks, slash commands, skills and
 provider objects (image/video generation, web search, browser, TTS/STT, memory, context engines,
-model-provider profiles) exactly as before; Hermes registers matching entries on its side that call into
-the host. Dashboard plugin APIs are served by the host too. Bundled plugins keep running in-process.
+secret sources, `@` context references, model-provider profiles) exactly as before; Hermes registers
+matching entries on its side that call into the host, and values cross as the types the provider base
+class declares (a secret source's `fetch()` gets a `Path` and returns a `FetchResult`). Dashboard plugin APIs are served by the host too. Bundled plugins keep running in-process.
 In-process dashboard API handlers share the gateway's event loop, so they must not block it (see
 [Don't block the event loop](extending-the-dashboard.md#dont-block-the-event-loop)).
 
@@ -19105,7 +19154,7 @@ delegate_task(
 
 **Cost warning:** With `max_spawn_depth: 3` and `max_concurrent_children: 3`, the tree can reach 3×3×3 = 27 concurrent leaf agents. Each extra level multiplies spend — raise `max_spawn_depth` intentionally.
 
-**One-shot runs are capped separately.** `hermes chat -q` / `--oneshot` sessions may spawn at most `delegation.oneshot_max_children` subagents in total (default `2`, `0` = unlimited). A one-shot run has no later turn to receive results, and in benchmark trajectories most of its spawns were "independently review my own work" rather than parallel work — each such child re-pays a cold system prompt and re-reads the repo. Interactive and gateway sessions are unaffected.
+**One-shot runs are capped separately.** `hermes chat -q` / `--oneshot` sessions may spawn at most `delegation.oneshot_max_children` subagents in total (default `2`, `0` = unlimited). A one-shot run has no later turn to receive results, and in benchmark trajectories most of its spawns were "independently review my own work" rather than parallel work — each such child re-pays a cold system prompt and re-reads the repo. Interactive and gateway sessions are unaffected. Because a one-shot joins its children inside the `delegate_task` call, its schema leaves out the live-control parameters (`action` list/steer/stop, `subagent_id`, `message`).
 
 ## Finite chat runs
 
@@ -22125,7 +22174,7 @@ Payload fields below are the exact event-specific fields supplied by each call s
 | `transform_terminal_output` | Transform | After bounded foreground process capture, before final output limiting; first string replaces output. | `command`, `output`, `returncode`, `task_id`, `env_type` | Command/output may contain credentials. |
 | `pre_transcription` | Transform | Fired by the STT dispatcher after provider resolution and before any backend (built-in, command-type, or plugin-registered) is invoked; dict results are applied in registration order, last-writer-wins per field (`prompt`, `language`, `model`; `file_path` is read-only). | `file_path`, `provider`, `model`, `language`, `prompt`, `source` | The final prompt is uploaded to the configured STT provider with the audio — keep secrets out of hook returns. |
 | `pre_llm_call` | Directive/control | Once per turn before the loop; all valid string/`{"context": ...}` returns are joined and injected into the user message. | `session_id`, `task_id`, `turn_id`, `user_message`, `conversation_history`, `is_first_turn`, `model`, `platform`, `parent_session_id`, `sender_id` | Full user message and conversation history. |
-| `post_llm_call` | Observer | Successful, non-interrupted turn finalization; return ignored. | `session_id`, `task_id`, `turn_id`, `user_message`, `assistant_response`, `conversation_history`, `model`, `platform` | Full prompt, response, and history. |
+| `post_llm_call` | Observer | Successful, non-interrupted turn finalization; return ignored. | `session_id`, `task_id`, `turn_id`, `user_message`, `assistant_response`, `conversation_history`, `model`, `platform`, `side_question_token` | Full prompt, response, and history. |
 | `transform_llm_output` | Transform | Before `post_llm_call` and final delivery; first non-empty string replaces the response. | `response_text`, `session_id`, `model`, `platform` | Full final assistant text. |
 | `pre_verify` | Directive/control | At the bounded edited-code verify gate; first valid continue/block-stop directive keeps the turn going. | `session_id`, `platform`, `model`, `coding`, `attempt`, `final_response`, `changed_paths` | Draft response and changed paths. |
 | `pre_api_request` | Observer | Per provider attempt, immediately before the request; return ignored. | `task_id`, `turn_id`, `api_request_id`, `session_id`, `user_message`, `conversation_history`, `platform`, `model`, `provider`, `base_url`, `api_mode`, `api_call_count`, `retry_count`, `request_messages`, `message_count`, `tool_count`, `approx_input_tokens`, `request_char_count`, `max_tokens`, `started_at`, `middleware_trace`, `request` | High sensitivity: legacy `user_message`, `conversation_history`, and `request_messages` are intentionally raw; prefer sanitized `request`. |
@@ -22449,6 +22498,7 @@ def my_callback(session_id: str, user_message: str, assistant_response: str,
 | `conversation_history` | `list` | Copy of the full message list after the turn completed |
 | `model` | `str` | The model identifier |
 | `platform` | `str` | Where the session is running |
+| `side_question_token` | `str \| None` | One-use token for [`ctx.side_question`](../../developer-guide/plugin-llm-access.md#asking-the-sessions-own-agent-ctxside_question), shared by every plugin of the session's profile; `None` unless a loaded plugin holds the `llm.side_question` capability, and always `None` for cron runs and subagent turns |
 
 **Fires:** In `agent/turn_finalizer.py` (`finalize_turn()`, called by `run_conversation()` in `agent/conversation_loop.py`), after the tool loop exits with a final response. Guarded by `if final_response and not interrupted` — so it does **not** fire when the user interrupts mid-turn or the agent hits the iteration limit without producing a response.
 
@@ -23447,7 +23497,10 @@ def my_callback(
 When CLI streaming is enabled, an append-only transform is printed after the
 streamed body. A transform that replaces the response is printed in full after
 the streamed body, labeled as a post-stream transformation, so replacement
-content is never silently lost.
+content is never silently lost. In the TUI, the desktop app and messaging chats
+that edit a streamed message in place, the streamed reply is replaced by the
+rewrite when the turn completes. The hook runs on the finished text, so the
+unrewritten reply is visible while it streams.
 
 ```python
 import os, re
@@ -23462,6 +23515,34 @@ def register(ctx):
 ```
 
 The hook is guarded on a non-empty, non-interrupted response — it will not fire on stop-button interrupts or empty turns. Exceptions are logged as warnings and do not break agent execution.
+
+#### Holding the reply until it is rewritten (`hold_stream=True`) {#hold-stream}
+
+The hook runs on the finished reply, so with streaming on the user watches the unrewritten text arrive and then sees it replaced. A plugin that must see the reply before the user does (redaction, policy filters) declares it when it registers:
+
+```python
+def register(ctx):
+    ctx.register_hook("transform_llm_output", redact, hold_stream=True)
+```
+
+While a plugin loaded in a profile holds the stream, that profile's sessions show the reply only as the rewritten final:
+
+| Surface | While the reply is held | When the turn ends |
+|---|---|---|
+| Messaging (Telegram, Discord, Slack, Matrix, …) | The platform's typing indicator; no draft, edit or native stream message | The rewrite is sent once as a normal message (a long one splits like any reply) |
+| Slack over Relay | Typing indicator; no `chat.*Stream` message | The rewrite, sent once |
+| TUI, desktop app, classic CLI, ACP editors | The usual busy/thinking indicator; no reply text | The rewrite, shown once |
+| API server (`/v1/chat/completions`, `/v1/responses`, streaming) | The response stream is open with no text | The rewrite is the response's only text |
+
+What else is held:
+
+- **Commentary** (model text sent between tool calls, `display.interim_assistant_messages`) never passes through `transform_llm_output`, so a held turn drops it. It stays in the model's context but is stored hidden, so resuming or reopening the session (TUI, desktop app, dashboard, classic CLI) does not show it either. The same goes for every other model text the user never got: an answer Hermes sent back for another try (late language-server errors, verify-on-stop), a reply cut by the output limit before its continuation, a call to an unknown tool.
+- **Every way a turn ends passes through the hook.** A reply cut by the output limit on every continuation, an iteration-budget summary, a provider or compression error, an interrupt: whatever text the turn ends with reaches the user only after `transform_llm_output` saw it, and model text is stored as the rewrite.
+- **A failing hook withholds the reply.** If no hook rewrote the reply and one raised or timed out, the user gets a short "reply withheld" notice, never the original.
+- **The hook set is fixed for the turn.** A held turn runs the `transform_llm_output` hooks that were loaded when it started, even if plugins are re-discovered mid-turn.
+- **Tool progress and reasoning** are not the reply and keep their own settings (`display.tool_progress`, `display.show_reasoning`). Turn them off as well if model output the plugin never saw must not reach the user.
+
+`hold_stream` applies to `transform_llm_output` only; on any other hook it is ignored with a warning. Plugins that register `transform_llm_output` without it keep normal streaming.
 
 ### API-request observer hooks
 
@@ -23481,7 +23562,7 @@ Fires for a failed provider attempt with status/retry timing, an `error` object,
 
 #### `pre_auxiliary_call` / `post_auxiliary_call`
 
-Auxiliary LLM calls — session titling, context compression, MoA advisors and the aggregator, vision, approval classification, memory and other side tasks — run outside the main tool-calling loop and do **not** fire `pre_api_request` / `post_api_request` (those stay turn-scoped, so a trace-per-turn plugin never sees side traffic by accident). Subscribe to `pre_auxiliary_call` / `post_auxiliary_call` instead: they fire once per physical provider attempt (retries and fallbacks included) with the same payload shape plus `aux_task` (the task name, e.g. `title_generation`, `compression`, `moa_aggregator`, `vision`). `session_id` / `task_id` / `turn_id` are the parent turn's when the call runs under one, empty otherwise; `api_request_id` (`aux-…`) is shared by every attempt of one logical call and `retry_count` distinguishes them. Both are observer-only and fail-open: a raising or timed-out callback is logged and the auxiliary task proceeds. `post_auxiliary_call` carries `error` / `error_type` when the attempt raised and `streaming: True` (with `usage`/`response` `None`) when the response is handed back as a stream.
+Auxiliary LLM calls — session titling, context compression, MoA advisors and the aggregator, vision, approval classification, memory and other side tasks — run outside the main tool-calling loop and do **not** fire `pre_api_request` / `post_api_request` (those stay turn-scoped, so a trace-per-turn plugin never sees side traffic by accident). Subscribe to `pre_auxiliary_call` / `post_auxiliary_call` instead: they fire once per physical provider attempt (retries and fallbacks included) with the same payload shape plus `aux_task` (the task name, e.g. `title_generation`, `compression`, `moa_aggregator`, `vision`, `plugin_side_question` for a plugin's [`ctx.side_question`](../../developer-guide/plugin-llm-access.md#asking-the-sessions-own-agent-ctxside_question), which also carries the asking plugin's `plugin_id`). `session_id` / `task_id` / `turn_id` are the parent turn's when the call runs under one, empty otherwise; `api_request_id` (`aux-…`) is shared by every attempt of one logical call and `retry_count` distinguishes them. Both are observer-only and fail-open: a raising or timed-out callback is logged and the auxiliary task proceeds. `post_auxiliary_call` carries `error` / `error_type` when the attempt raised and `streaming: True` (with `usage`/`response` `None`) when the response is handed back as a stream.
 
 ### `on_skill_lifecycle`
 
@@ -46115,7 +46196,9 @@ A smaller auxiliary compression model can lower the live compression trigger wit
 changing the selected tail policy. In `lean` mode the selection budget remains based
 on the **main model's context window**: 2.5%, clamped to 10K–25K tokens, and never more
 than 20% of that window (the 10K floor alone is 61% of a 16K local window, so without the cap a
-small model's "protected" tail was the whole request and compaction reclaimed nothing). For example,
+small model's "protected" tail was the whole request and compaction reclaimed nothing), nor more than
+half of a compression trigger above the 2K minimum summary budget (a `threshold_tokens` of 12K on a 1M window would otherwise keep a 25K tail, so
+every pass stayed over the trigger and refused as "would grow"). For example,
 a 1M main model with a 512K auxiliary model retains a 25K
 selection budget even when feasibility lowers its trigger from 850K to 512K. Explicit `legacy` mode instead
 recomputes `threshold_tokens × target_ratio` (102,400 tokens at 512K × 0.20).
@@ -46335,7 +46418,10 @@ summarized, and its older images are retired so compaction can still make room.
 A skill's instructions are not kept verbatim forever, but the model is always told when they are
 gone. Every `skill_view` result that a pass stubs or summarizes away (whatever its size) carries
 `[SKILL_PRUNED: content lost in compression; reload with skill_view(name='…')]`, and the summary
-lists each such skill under `## Pruned Skills`. Skills loaded inline by `/skill-name`, bundles,
+lists each such skill under `## Pruned Skills`. Whenever a marker survives anywhere in the compacted
+transcript, the handoff summary ends with a `## Skill Safety Rule` telling the model to reload the
+skill before relying on it; fresh sessions never carry that rule in their system prompt, since no
+marker can exist before the first compaction. Skills loaded inline by `/skill-name`, bundles,
 stacked invocations and gateway channel auto-load get the same marker when their turn is
 summarized, and the summary quotes that turn as typed (`/skill-name do X`) rather than the skill
 body. A reload after the boundary returns the full skill again. Skills preloaded with `-s` or
@@ -50519,6 +50605,7 @@ The install also ships `hermes-agent`, a minimal runner that sends one query and
 | `hermes import-agent` | Import an OpenClaw, Claude Code, Codex CLI or Cursor setup (from the [`agent-importers`](../user-guide/import-from-other-agents.md) plugin). |
 | `hermes dashboard` | Launch the web dashboard for managing config, API keys, and sessions. |
 | `hermes serve` | Start the Hermes backend server (headless; powers the desktop app and remote backends). |
+| `hermes webapp` | Open the Desktop workspace in a browser, served by the gateway. |
 | `hermes desktop` (alias `gui`) | Build and launch the native Electron desktop app. |
 | `hermes profile` | Manage profiles — multiple isolated Hermes instances. |
 | `hermes completion` | Print shell completion scripts (bash/zsh/fish). |
@@ -52333,6 +52420,55 @@ hermes dashboard --port 8080 --no-open
 # From a profile alias — routes to the machine dashboard with the
 # profile preselected in the sidebar switcher (attach if running)
 worker dashboard
+```
+
+## `hermes webapp`
+
+```bash
+hermes webapp [options]
+```
+
+Open the Hermes Desktop workspace in a normal browser. The gateway serves it on its own listener when
+`webapp.enabled` is `true` in the config ([Configuration → Webapp](../user-guide/configuration.md#webapp)).
+This command builds the Webapp bundle when it is out of date, starts the gateway if it is not running,
+and opens a one-use sign-in link. Chats run on that gateway, the same one the CLI, Desktop and messaging
+use. See [Desktop App → Use the Desktop workspace from a browser](../user-guide/desktop.md#use-the-desktop-workspace-from-a-browser).
+
+The link is valid for 60 seconds and works once; the browser exchanges it for the sign-in it keeps in
+that tab. Only your own OS user can get a link: the gateway answers this command over its private
+control socket. On Linux the gateway checks that the browser's connection belongs to your OS user; on
+Windows it checks nothing, and the link travels only in the browser launcher's command line, which other
+standard users cannot read. On macOS, the BSDs and WSL neither holds, so the command prints the link
+for you to open and never passes it to a browser launcher. Until it is
+used it signs a browser in as you, so keep it private.
+
+For a named profile served by the default gateway (`hermes -p work webapp`), the Webapp opens on that
+profile.
+
+Behind the dashboard sign-in gate (`webapp.host: 0.0.0.0` or `::`, or `webapp.public_url` set), the
+command opens the Webapp's address instead of a one-use link, where sign-in returns: with
+`webapp.public_url` set, that URL; on the LAN, the address Web Access Start registered Nous sign-in
+for (`webapp/sign-in-registration.json`), while it is still this machine's LAN address and the
+Webapp's port; otherwise the loopback address, which serves a password provider or sign-in set up by
+hand for it. You sign in there with your dashboard account. When the gateway cannot
+serve the Webapp, the command says why; the gateway reads its Webapp settings when it starts, so run
+`hermes gateway restart` after fixing the cause. A Webapp bundle that is not built yet is the
+exception: this command builds it, and the running gateway serves it at once.
+
+| Option | Description |
+|--------|-------------|
+| `--no-open` | Print the one-use link (or, behind the sign-in gate, the address) instead of opening a browser |
+| `--skip-build` | Use the existing `apps/desktop/dist-webapp` as is |
+| `--force-build` | Rebuild the bundle even when its build receipt is current |
+| `--build-only` | Build the bundle and stop |
+| `--status` | Show whether the running gateway serves the Webapp, and at which address |
+| `--sign-out` | Sign out every browser: tabs a link signed in need a new link, and behind the sign-in gate every login must sign in again; the account tokens those logins held stop working on the Webapp too. Native apps that signed in on their own stay signed in. Their connections close and the command reports how many. Waits for a gateway that is still starting; with none running, replaces the stored credential |
+
+```bash
+# Turn it on once, then open it
+hermes config set webapp.enabled true
+hermes gateway restart
+hermes webapp
 ```
 
 ## `hermes profile`
@@ -57660,6 +57796,121 @@ above.
 
 ---
 
+<!-- source: website/docs/developer-guide/browser-vault-plugin.md -->
+# Browser Vault Plugins
+
+# Browser Vault Plugins
+
+A plugin can add a password manager (KeePass, a team vault, a hardware-backed store) as a login
+source for the `browser_vault` tool, when it comes from a verified source: the manager's vendor
+through the plugin catalog, or Nous (see [Who can register a backend](#who-can-register-a-backend)). The agent then lists and fills that manager's logins the same way
+it does for the built-in Hermes vault, 1Password and Bitwarden: it sees handles and metadata, never a password.
+
+Browser login backends are separate from [secret sources](./secret-source-plugin.md). A `SecretSource`
+registration does not make a password manager available to `browser_vault`.
+
+## Registering a backend
+
+An **in-process** plugin subclasses `agent.vault_backends.base.LoginBackend` and registers one instance:
+
+```python
+from agent.vault_backends.base import LoginBackend
+from agent.vault_store import VaultItemMeta
+
+
+class KeePassBackend(LoginBackend):
+    name = "keepass"            # lowercase identifier; also the config key
+    prefix = "keepass:"         # must be exactly "<name>:"
+    display_name = "KeePass"
+
+    def list_items(self) -> list[VaultItemMeta]:
+        ...  # metadata only: ids "keepass:<opaque>", exact HTTPS origins, identifier
+
+    def get_meta(self, handle: str) -> VaultItemMeta | None:
+        ...
+
+    def resolve_password(self, handle: str) -> str:
+        ...  # called once per fill, after the page origin matched the item
+
+
+def register(ctx):
+    ctx.register_login_backend(KeePassBackend())
+```
+
+The backend stays off until the user turns it on for the profile:
+
+```yaml
+vault:
+  keepass:
+    enabled: true   # exactly true; installed code is never enabled automatically
+```
+
+Construct the backend without fetching credentials or reading profile state, and read the active
+profile's configuration lazily. Registration is profile-scoped and removed when the plugin unloads.
+
+## Who can register a backend
+
+Password-manager integrations come only from verified sources. `ctx.register_login_backend` is
+accepted from:
+
+- a plugin bundled with Hermes, or
+- a plugin installed from the [Hermes plugin catalog](./plugins/catalog-submission.md) at
+  `tier: verified` (published by the password-manager vendor itself) or `tier: official`
+  (maintained by Nous), at the catalog's reviewed pin.
+
+Every other plugin is refused at registration with a log line naming this rule: a plugin dropped
+into `~/.hermes/plugins/` by hand, a Git URL install, a community-tier catalog entry, a catalog
+install moved off its pin with `--ref`, one installed with `--allow-removed`, a project plugin and
+a pip entry-point plugin. Provenance is read from Hermes's own install record
+(`plugins/.install-metadata.json`, written by the installer), never from a file inside the plugin, so
+a repository that ships its own `.hermes-catalog.json` gains nothing. No config key relaxes the rule.
+
+If you build a password manager and want it in Hermes, submit the plugin to the catalog from your
+own repository and ask for `verified` tier (catalog admission rule 18). Integrations for managers
+whose vendor has not published one come from Nous as `official` entries.
+
+## Isolation rules
+
+Hermes wraps every plugin backend in a core-owned adapter before the vault tool sees it. These rules
+hold however the plugin implements its class:
+
+| Rule | What it means for your backend |
+|---|---|
+| **Own namespace only** | Your handles are `<name>:…`. Hermes decides ownership from the registered name, so it never calls your `owns()` and never passes you a `vault_…` (Hermes vault), `op:…`, `bw:…` or another plugin's handle. Items your `list_items()` returns with an id outside your namespace are dropped, and a `get_meta()` answer whose id is not the requested handle is ignored. |
+| **Handle in, value out** | `list_items()` gets no arguments; `get_meta()`, `resolve_password()`, `resolve_otp()` and `resolve_secret()` get your handle and nothing else. You never receive the page, the CDP/browser session, the task, other vault entries, or decrypted values from any other backend. |
+| **No master-password prompt** | Hermes' unlock prompt is reserved for built-in managers. A backend with `needs_unlock = True` is refused at registration, and a plugin backend is never offered the `unlock` action, so the user is never asked to type a master password into a dialog a plugin labelled. Authenticate through your manager's own agent, session or OS keychain. |
+| **Reserved namespaces** | The names `local`, `onepassword`, `bitwarden`, `vault`, `op` and `bw`, and any prefix inside a built-in prefix (`vault_x:`), are refused. So is a name another plugin already holds in the profile: no backend, built-in or plugin, can be replaced or shadowed. `name` and `prefix` must be plain string attributes, not properties, and the class may not override `__getattribute__` or `__class__`: Hermes judges the registration without running your code. |
+| **Off by default** | Only `vault.<name>.enabled: true` turns a backend on. |
+| **In-process only** | `ctx.register_login_backend` is refused under `plugins.isolation: host`, because `fill_context()` is a server-local context manager. |
+| **Same fill path** | Plugin items (passwords and automatic one-time codes) go through the same exact-origin pre-check, in-page origin re-assertion, supervisor CDP secret evaluation (never argv) and payment confirmation as built-in items. |
+| **Secrets stay out of the conversation** | Values you return are registered with the browser-result redaction boundary before they reach the page. Any exception your backend raises is replaced by a fixed message (`The <name> login backend failed.`) before it can reach a tool result, a log line or an exception chain, so a secret in your error text cannot reach the model. A value of the wrong type is refused the same way. Hermes copies what you return (metadata fields, passwords, codes) into its own plain objects inside that same guard, so an error raised while a field is read gets the fixed message too. |
+
+An in-process plugin is ordinary Python running inside Hermes, so these rules are an API contract,
+not a sandbox. They guarantee that Hermes never hands your backend another backend's data; they do not
+stop arbitrary code in the same process from reading files. The provenance rule above decides which
+plugins Hermes offers this seam to; it is not a sandbox either.
+
+## Fill context
+
+`fill_context()` defaults to a no-op. A backend may return its own context manager to lock fills and
+freeze credential-reference/origin configuration for the whole operation, so a reload cannot pair old
+metadata with a newly configured secret. Hermes enters it only for fills of your own handles (a
+password fill, and an automatic one-time code for `browser_vault action=enter_code`, both through the
+in-page write), and only after the page origin matched your item's `get_meta()`: a page on another
+origin never opens your context. Inside the context Hermes calls `get_meta()` again and refuses the
+fill unless the frozen item still binds that page origin, so the origins checked and the secret
+resolved come from one snapshot. It calls `fill_context()` with no arguments and exits it with
+`(None, None, None)`, so you never see the core's exception. Release on exit even when the fill
+failed. A fill lock does not serialize unrelated browser navigation.
+
+## Writing errors
+
+Raise exceptions with fixed diagnostics. Hermes discards your exception text, but your own logs may
+still record it, so never put credential values or secret-manager response bodies in it. Never expose
+a model-facing tool that returns a password: it would bypass every rule above.
+
+---
+
 <!-- source: website/docs/developer-guide/chronos-managed-cron-contract.md -->
 # Chronos Managed-Cron Contract
 
@@ -62265,7 +62516,7 @@ handler does; `client-local (cli_only)` commands are terminal/UI features of a c
 | `/debug` | control | HermesCLI._handle_debug_command | slash.exec | slash.exec | slash.exec | uploads logs to a public paste |
 | `/deny` | control | messaging-only: unknown command | slash.exec | slash.exec | slash.exec | messaging-only |
 | `/diff` | read | HermesCLI._handle_diff_command | slash.exec | slash.exec | slash.exec |  |
-| `/discard` | refused | messaging-only: unknown command | slash.exec: refused | slash.exec: refused | prompt.resolve_unknown | messaging-only |
+| `/discard` | refused | HermesCLI._handle_discard_command | slash.exec: refused | slash.exec: refused | prompt.resolve_unknown |  |
 | `/egress` | control | HermesCLI._cmd_egress | slash.exec | slash.exec | slash.exec |  |
 | `/export` | refused | HermesCLI._handle_export_command | slash.exec: refused | action: export | slash.exec: refused | client-local (cli_only) |
 | `/fast` | control | HermesCLI._handle_fast_command | config.get, config.set | unavailable: advanced | slash.exec | per-session setting (gateway handler) |
@@ -62395,7 +62646,21 @@ The server issues `session:operator` only at these existing trusted boundaries:
 - Native interactive bootstrap ticket redemption (not worker-adoption tickets).
 - The dashboard WebSocket upgrade gate, including authenticated dashboard login tickets,
   the process-lifetime internal credential for server-spawned PTY clients, and the verified
-  legacy session token when that authentication path is enabled.
+  legacy session token when that authentication path is enabled. With `webapp.enabled`, that
+  session token is the browser-hosted Desktop's credential: the gateway keeps it in its home so
+  Webapp tabs survive a restart, hands it out only through a one-use link minted for a same-user
+  control-socket peer, and replaces it on `hermes webapp --sign-out` and whenever the Webapp's
+  listener fails to start, since its port then belongs to someone else. Behind the sign-in gate a
+  Webapp login is bound to that token by the `hermes_webapp_signin_<gateway>` cookie (HMAC-SHA256 of
+  `webapp-sign-in` keyed with the token), so replacing it ends those logins too; sign-out closes
+  every socket the token or a bound login opened, Bot Desktop viewers included. The Webapp's listener
+  names every sign-in cookie it sets that way (`hermes_session_at_<gateway>` and the rest; `<gateway>`
+  comes from a digest of the gateway home), so two gateways' Webapps on one hostname keep their own
+  logins, whatever their sign-in providers, and leave the standalone dashboard's cookies alone. The provider tokens
+  such a login keeps in its cookies never work there on their own: the Webapp's listener accepts a
+  bearer token or a socket's `?token=`, and renews a refresh token, only when it gave that token to a
+  native app's RFC 8252 sign-in (digests kept in `webapp/native-sign-in-tokens.json` in the gateway home until they
+  expire), so native apps stay signed in across a sign-out and a restart.
 - The HTTP mutation gate, after a verified dashboard Session, native HTTP owner grant,
   or permitted legacy session token has been accepted.
 
@@ -62408,8 +62673,12 @@ restriction rather than treating every accepted dashboard credential as an opera
 
 Cross-subject local submissions carry a private, server-written profile/session/principal
 binding for queued execution and recovery. It is not exposed in model requests or public
-session snapshots. This change does not expose the gateway listener remotely or implement
-OpenAI API-to-local session affinity; those remain separate integration paths.
+session snapshots. This change does not implement OpenAI API-to-local session affinity. The gateway
+listener stays on loopback unless `webapp.host` binds a wildcard address. The Webapp's listener engages
+the dashboard sign-in gate on a wildcard bind or when `webapp.public_url` is set, on any bind, and
+one-use launch links are then off. `dashboard.public_url` never applies to the Webapp's listener; the
+gateway's private listener for native clients reads it as main does, so hosted sign-in on that
+listener keeps working.
 
 ## Deliberately limited compatibility
 
@@ -67041,6 +67310,95 @@ don't have to:
   loop on `complete()` for every gateway message without thinking
   about token spend.
 
+## Asking the session's own agent (`ctx.side_question`)
+
+`ctx.llm` runs a fresh call that knows only what the plugin sends it.
+`ctx.side_question` asks the session's *own* agent instead: the same
+model, the same system prompt (memory included) and the whole
+conversation so far, plus one question from the plugin. It replays
+the request the turn just sent, so the provider's prompt cache is
+still warm and the call is mostly cache reads.
+
+Reach for it when the answer depends on the conversation itself:
+suggesting the user's next prompt, labelling what the turn did,
+deciding whether the session needs a follow-up. For anything that
+doesn't need the session, use `ctx.llm`: it is cheaper and has no
+lease rules.
+
+```python
+import threading
+
+
+def register(ctx):
+    def on_post_llm_call(**kwargs):
+        token = kwargs.get("side_question_token")
+        if token is None:  # no consented plugin loaded, or not a user turn
+            return
+        # post_llm_call is time-bounded: never wait for the model inside the hook.
+        threading.Thread(target=_suggest, args=(token,), daemon=True).start()
+
+    def _suggest(token):
+        answer = ctx.side_question(
+            token, "Suggest the user's most likely next prompt in one short line.")
+        if answer:
+            ctx.state.set("next_prompt", answer)
+
+    ctx.register_hook("post_llm_call", on_post_llm_call)
+```
+
+The plugin must declare the capability in `plugin.yaml` and the user
+must grant it (the consent screen shows: "Ask your agent a short
+question after each turn. It sees the whole session, including
+memory, and spends your main model's tokens."):
+
+```yaml
+capabilities:
+  - llm.side_question
+```
+
+### Lease rules
+
+* `post_llm_call` receives `side_question_token` (a string) when at
+  least one loaded plugin holds the capability, else `None`. Cron runs
+  and delegated subagent turns always get `None`: nobody is waiting on
+  them, so a side question would only spend tokens.
+* **One attempt per turn, shared by every plugin.** Every plugin's
+  hook gets the same token; the first `ctx.side_question` call spends
+  it, whether it succeeds or not. A plugin without the capability gets
+  `None` back and does not spend it.
+* The token expires after **60 seconds**, and as soon as the session
+  starts its next turn.
+* The token belongs to the profile whose turn issued it; a plugin
+  context of another profile gets `None` and does not spend it.
+* `prompt` is a non-empty string of at most **4096 characters**.
+* `timeout` defaults to **15 seconds** and is capped at 60. It covers
+  the whole call, including setting up the request.
+
+### What you get back
+
+The text of the agent's reply, or `None`. `None` means the call was
+refused or failed: a Mixture-of-Agents runtime, an agent-as-provider
+runtime (ACP, external-process providers, the Codex app-server), a
+session whose model changed since the turn (a voice-chat turn routed to
+`auxiliary.voice_chat` switches back right after it), a request that
+carries provider-executed (server-side) tools, a timeout, a provider
+error, or an empty reply. There are no retries
+and no fallback model.
+
+The call never runs a tool (tool calls in the reply are dropped) and
+never writes to the transcript. Its tokens are billed to the session
+whose turn issued the token (even if the session id has since rotated)
+and recorded in its usage as `plugin_side_question:<plugin id>`, apart
+from `/btw`'s `side_question`. You can't pick the
+model, tools, system prompt or output length: changing any of them
+would miss the warm cache. Ask for brevity in the prompt.
+
+Observability plugins see the call as an auxiliary call:
+`pre_auxiliary_call` / `post_auxiliary_call` fire with
+`aux_task="plugin_side_question"` and `plugin_id` set to the asking
+plugin, and the turn-scoped `pre_api_request` /
+`post_api_request` do not fire for it.
+
 ## Where this fits in the plugin surface
 
 Existing `ctx.*` methods extend an existing Hermes subsystem:
@@ -67476,7 +67834,9 @@ def register(ctx):
 
 Known capability ids: `tools.override`, `llm.provider_override`,
 `llm.model_override`, `llm.agent_id_override`, `llm.profile_override`,
-`llm.task_override` (see `hermes_cli/plugin_capabilities.py` for the
+`llm.task_override`, `llm.side_question` (ask the session's own agent after
+a turn, see [Plugin LLM Access](../plugin-llm-access.md#asking-the-sessions-own-agent-ctxside_question)),
+`gateway.platform_actions` (see `hermes_cli/plugin_capabilities.py` for the
 canonical registry). Unknown ids are ignored. The older per-capability
 config keys (`plugins.entries.<id>.allow_tool_override`, …) still work but
 are deprecated — declare capabilities instead so users get a single,
@@ -68435,7 +68795,9 @@ legacy `pip_dependencies` and `python_dependencies` lists from `plugin.yaml` or
 Consent, workspace membership, and currency checks use the same declaration.
 PM prepares their dependencies together with core requirements before enabling
 the plugin. The generated workspace does not rewrite the plugin directory or
-the shipped lockfile. Dependency conflicts refuse admission and preserve the
+the shipped lockfile, and it is solved only for the installing interpreter's
+platform: a dependency that ships no wheels for another platform does not
+block the plugin. Dependency conflicts refuse admission and preserve the
 previous selection. PM does not automatically disable other plugins.
 
 Dependencies installed manually with pip are not durable PM declarations.
@@ -68575,6 +68937,17 @@ def register(ctx):
     ctx.register_hook("on_session_start", on_new_session)
     ctx.register_hook("on_session_end", on_session_end)
 ```
+
+### Rewrite the reply before the user sees it
+
+A `transform_llm_output` hook rewrites the finished reply, which the user has usually watched stream already. When your plugin must see the reply first (it redacts, filters or blocks content), pass `hold_stream=True`:
+
+```python
+def register(ctx):
+    ctx.register_hook("transform_llm_output", redact, hold_stream=True)
+```
+
+Every session in the profile that loads the plugin then stops streaming its replies: the user sees the typing or thinking indicator, and then only your rewritten final, on the surfaces listed in the reference. Commentary between tool calls is dropped for those turns, and if your hook raises or times out the user gets a short "reply withheld" notice instead of the original. Leave the flag off for cosmetic transforms (footers, styling) so replies keep streaming. Details per surface: [Holding the reply until it is rewritten](../../user-guide/features/hooks.md#hold-stream).
 
 ### Hook reference
 
@@ -70017,6 +70390,17 @@ the gallery. There is no separate listing to maintain.
    <pinned sha>`). A binary a user's own machine fetches at setup time is allowed
    only from the upstream tool's official source, pinned by checksum, and
    disclosed (rule 13) — never bundled and never from an unofficial mirror.
+18. **Password managers come from their vendor.** A plugin that registers a
+   `browser_vault` login backend (`ctx.register_login_backend`) is listed only at
+   `tier: verified`, submitted from the password-manager vendor's own repository
+   by that vendor, or at `tier: official` when Nous maintains it. Community-tier,
+   fork and third-party listings of a login backend are declined. Hermes enforces
+   the same rule when the plugin loads: a login backend is accepted only from a
+   plugin bundled with Hermes or installed from this catalog at `verified` or
+   `official` tier and at the reviewed pin, as recorded in Hermes's own install
+   record (never a file inside the plugin). Local-directory, Git URL, `--ref`,
+   `--allow-removed`, project and pip installs are refused, and no setting
+   relaxes it.
 <!-- admission-rules:end -->
 
 ## Updating your entry
@@ -81975,7 +82359,10 @@ together. It seeds resolution from the existing lock. Compatible transitive
 versions can change, but declared constraints and exact pins remain binding.
 Each candidate gets a fresh workspace with explicit source, lock seed, and
 prepared environment inputs. The generated workspace and extended lock remain
-outside shipped source. Repair copies the recorded workspace and lock, including
+outside shipped source. The workspace is solved only for the platform and
+architecture of the interpreter it installs into, so a plugin dependency with no
+wheels for another platform (onnxruntime or torch on Android) does not block it;
+the shipped lock keeps its full platform coverage. Repair copies the recorded workspace and lock, including
 plugin build inputs, rather than resolving against edited live manifests.
 
 Plugin enablement and staged code updates are submitted as data to the isolated
@@ -82398,14 +82785,20 @@ launchers, and invokes native packaging. Maintainers can read
 ## Network retries
 
 PM retries transient HTTP failures during tool downloads, artifact hashing and
-version lookups. Each probe or transfer gets at most four attempts. Backoff
-waits are 1, 2 and 4 seconds. A `Retry-After` header can extend a wait, up to
-30 seconds. Each retry reports its cause, delay and next attempt in the log.
+version lookups. Probes and non-resumable transfers get at most four attempts.
+Their backoff waits are 1, 2 and 4 seconds. A `Retry-After` header can extend
+these waits up to 30 seconds. Resumable transfers renew their retry budget
+when they save new progress; four failures without new progress stop retries.
+With a pinned mirror available, waits above 30 seconds switch to that mirror.
+The last source honors `Retry-After` up to five minutes and stops for longer waits.
+Each retry logs its cause, delay and consecutive failures without progress.
 
 Retryable HTTP statuses are 408, 429, 500, 502, 503 and 504. Connection resets,
 timeouts, temporary DNS failures and interrupted response bodies also retry.
-Ranged downloads retain completed bytes. Servers without range support require
-a fresh stream. Pause interrupts backoff and preserves the partial download.
+Ranged downloads checkpoint every five seconds and after each attempt. A failed
+periodic checkpoint logs a warning and retries later; the final checkpoint is required.
+Servers without range support require a fresh stream. Pause interrupts backoff
+and preserves the partial download.
 
 PM does not retry bad hashes, certificate failures, local filesystem errors or
 other permanent failures. A successful probe followed by a range GET 403 or 404
@@ -82867,6 +83260,129 @@ hermes desktop
 ```
 
 That uses your current config, keys, sessions, and skills.
+
+## Use the Desktop workspace from a browser
+
+The gateway can serve this workspace to a normal browser: sessions, profiles, Capabilities, Messaging,
+Artifacts, scheduled jobs, the host file tree, Git review, previews and the terminal rail. This is
+**not the Web Dashboard**. Turn it on once, then open it with `hermes webapp`:
+
+```bash
+hermes config set webapp.enabled true
+hermes gateway restart
+hermes webapp
+```
+
+The gateway then serves the Webapp at `http://127.0.0.1:9120` (see [Configuration → Webapp](./configuration.md#webapp)
+for the host and port). `hermes webapp` builds the bundle when it is out of date, starts the gateway if
+it is not running, and opens a one-use sign-in link. Chats run on that gateway, the same process that
+serves the CLI, the native Desktop and messaging, so every surface sees one conversation with one queue.
+
+**Signing in.** The link works once, within 60 seconds. The browser exchanges it for a sign-in that it
+keeps in that tab, so reloading keeps you signed in, and so does a gateway restart. A fresh tab or a
+bare URL shows instructions instead of access: run `hermes webapp` again for a new link. **New
+Window**, profile windows and session pop-outs hand the sign-in over with their own one-use link. On
+Linux the gateway checks that the browser's connection belongs to your OS user; on Windows the link
+travels only in the browser launcher's command line, which other standard users cannot read. On macOS,
+the BSDs and WSL (where the Windows browser reaches the gateway through WSL's relay) neither holds, so
+the command prints the one-use link for you to open instead of opening a browser; until it is used it
+signs a browser in as you, so keep it private. `hermes webapp --sign-out` signs out every
+tab at once: their open connections close, Bot Desktop viewers included, and each shows the sign-in
+instructions. Behind the sign-in gate (below) it also signs out every browser that signed in with a
+dashboard account; each must sign in again. The account tokens such a login keeps in its cookies work
+on the Webapp only as that login (the gateway refuses them as a bearer token, on a connection's URL and
+on its token refresh), so they end with it. A native Hermes app that signed in to the gateway on its own stays signed in.
+
+For a named profile, `hermes -p work webapp` opens the Webapp on `work`. Profiles the default gateway
+serves share its Webapp; a standalone profile's own gateway serves its own when its config turns it on.
+
+**From another machine.** Set `webapp.host` to `0.0.0.0`; the gateway then requires the
+[dashboard sign-in gate](./features/web-dashboard.md#authentication-gated-mode) (username and password
+for a trusted LAN or VPN, OAuth/OIDC for anything internet-facing). Behind a reverse proxy or tunnel
+you run, keep the loopback host and set `webapp.public_url` to the address it serves instead; that
+requires the same sign-in. `hermes webapp` then opens the Webapp's address, where you sign in with
+your dashboard account: `webapp.public_url` when set; on the LAN, the address **Web Access → Start**
+registered Nous sign-in for, while it is still this machine's address and the Webapp's port; else the
+loopback address (a password provider, or sign-in you set up by hand for that address). One-use
+links serve only a Webapp that needs no sign-in. HTTPS is strongly recommended remotely and browsers
+require it for some microphone and clipboard features.
+
+:::warning Treat Webapp access like access to Hermes on the host
+A signed-in Webapp user can run arbitrary commands as the OS account running Hermes, run agent tools,
+use host files and Git, and reach that account's environment and credentials. Do not expose it without
+a sign-in provider. Prefer an SSH tunnel, Tailscale or another trusted VPN.
+:::
+
+`hermes webapp --status` shows whether the gateway serves the Webapp. When it cannot (the port is
+taken, sign-in is required and no sign-in provider is set up, or the Webapp's browser sign-in file
+`webapp/session-token` in the Hermes home cannot be read or written), the gateway still serves native
+clients and the status says why. The gateway reads these settings when it starts, so restart it after
+fixing the cause (`hermes gateway restart`). When the port was taken, the gateway also replaces the
+Webapp's sign-in, so open tabs need `hermes webapp` again. When the Webapp's bundle has not been built
+yet, the status says so instead: `hermes webapp` builds it, and the running gateway serves it without a
+restart.
+
+Browser-selected files and pasted or dropped images are staged under the active profile before they
+enter the normal attachment flow, with a **16 MiB** limit per file. Host files download through the
+browser's download manager, and supported audio and video play inline using the server's file-access
+rules. **Save Image** for
+cross-origin URLs needs CORS, with a **25 MiB** limit and a **30-second** deadline. Website links open
+in a separate tab; explicit URL previews use a sandboxed iframe that cannot open popups, so use **Open
+in browser** for sites that refuse embedding. Native-only features stay in Electron: global shortcuts,
+always-on-top overlays, OS-window inspection, external-terminal launch and the updater.
+
+Chats written before the gateway owned sessions show their history but cannot be continued from the
+browser until they are adopted: run `hermes sessions adopt` once on the host (`hermes -p <profile>
+sessions adopt` for another profile), or open them once in the native Desktop, TUI or CLI.
+
+### Open it from your phone or another computer
+
+In the native app, **Settings → Web Access** turns the Webapp on for other devices, behind sign-in with
+your Nous account (Providers → Accounts). It appears only in the native app on its local connection,
+and only that app can change it: a browser signed in over the network cannot.
+
+- **This network:** devices on the same Wi-Fi open `http://<this computer's address>:<port>`, where the
+  port is `webapp.port` (9120 unless you set another). This is plain HTTP: the connection is not
+  encrypted, so others on the network could read it. Use it only on a network you trust.
+- **My own URL:** an HTTPS address you already run (Tailscale Serve, a tunnel or a reverse proxy) that
+  forwards to `http://127.0.0.1:<port>`. It is saved as `webapp.public_url`. Never forward that port
+  from your router directly.
+
+**Start** builds the Webapp if it is missing or out of date (the same build `hermes webapp` runs, which
+can take a few minutes the first time), registers its sign-in address with your Nous account when that
+address changed, saves the `webapp:` settings and restarts the gateway, which reads them when it
+starts. While a chat is running the gateway refuses to restart: the pane shows **Restart needed**, the
+settings apply on the next restart, and **Restart gateway** restarts it once the chat ends. **Stop**
+turns the Webapp off the same way. A Webapp you turned on for this computer only
+(`webapp.enabled: true` without Web Access) shows as served on this computer.
+
+Web Access changes only the `webapp:` settings and keeps your `webapp.port`. It leaves
+`dashboard.public_url` alone, so a standalone dashboard you publish separately keeps its own address.
+Its Nous sign-in uses a sign-in client of its own, which the first Start registers with your Nous
+account and keeps in the gateway's home (`webapp/sign-in-registration.json`). Start never reads or
+writes `HERMES_DASHBOARD_OAUTH_CLIENT_ID` in `.env`, so turning Web Access on never changes the
+standalone dashboard's Nous sign-in. A standalone profile with its own gateway needs its own
+`webapp.port` to serve a Webapp beside the default gateway's. `hermes update` rebuilds the Webapp
+whenever a profile has it turned on.
+If that build fails, the gateway reports the Webapp unavailable, and the page says so, until
+`hermes webapp` rebuilds it.
+
+### Terminal in the Webapp
+
+The terminal rail opens the host's interactive shell, running as a child of the gateway, in your home
+folder unless `terminal.cwd` names another. Dropping files onto it uploads them to the host (**16 MiB**
+each) and types their paths. Refreshing the page or losing the connection detaches the terminal
+without ending its shell; the saved terminal tab reattaches to that shell and its profile. Hiding a
+terminal is not closing it; closing its tab ends the shell. A second browser tab attaching to the same
+terminal takes over the connection.
+
+Detached shells are kept for **15 minutes** while the gateway runs, up to **16 host terminals**
+including detached ones. A gateway restart or update ends them. Reconnecting replays up to **1 MiB** of
+recent output; full-screen programs may need their own redraw command.
+
+The bundle's npm dependencies install into `.build/webapp-workspace` in the checkout, separately from
+the native Desktop, and reinstall only when the lockfile changes. With lazy installs disabled, a plain
+`hermes webapp` does not install them; `--build-only` or `--force-build` does.
 
 ## What's in the app
 
@@ -86187,7 +86703,8 @@ Sites that ask for a code after the password are handled the same way:
   link a site shows when you enable 2FA; 1Password and Bitwarden items that
   hold a TOTP seed count too): Hermes generates the current code and enters
   it. Nobody is asked. Add the key in **Settings → Passwords & Logins → Add**
-  or `hermes vault add`; the item shows a *2FA auto* badge.
+  or `hermes vault add`; the item shows a *2FA auto* badge. Like the
+  password, the code is only generated for a page on the login's saved site.
 - **Code sent to your phone or email**: a small prompt appears in your
   surface ("Verification code for github.com"), you type the code, Hermes
   enters it into the page. The code never enters the conversation either.
@@ -86227,12 +86744,62 @@ cannot spend. Address fills need no confirmation.
 - **Desktop → Settings → Passwords & Logins**: everything saved, the detected
   password managers with Unlock/Lock, Add, Remove.
 - **CLI**: `hermes vault list`, `hermes vault add`, `hermes vault rm <handle>`,
-  `hermes vault sources`.
+  `hermes vault sources`, `hermes vault key`.
 
-Items live encrypted under `~/.hermes/vault/` (Fernet key + vault file, both
-`0600`), scoped to the profile. Labels, site origins and login identifiers are
-visible metadata; passwords and card values never leave the vault except into
-the page.
+Items live encrypted under `~/.hermes/vault/`, scoped to the profile. Labels,
+site origins and login identifiers are visible metadata; passwords and card
+values never leave the vault except into the page.
+
+## Where the vault key is kept
+
+By default the encryption key sits in `~/.hermes/vault/vault.key` (`0600`),
+next to the encrypted `vault.json.enc`. You can keep it in your operating
+system's keychain instead (macOS Keychain, Windows Credential Manager, the
+Secret Service / KWallet on Linux):
+
+```bash
+hermes vault key                          # where the key is now, and whether a keychain is reachable
+hermes vault key migrate --to keychain    # move it (installs the small `keychain` feature if needed)
+hermes vault key migrate --to file        # move it back
+```
+
+The move writes the key to the keychain, checks that the keychain copy decrypts
+your vault, and only then deletes `vault.key`, so an interrupted move leaves a
+working vault and running the command again finishes it. It also sets
+`vault.key_storage`, which decides where a **new** vault's key goes:
+
+```yaml
+vault:
+  key_storage: file        # default; or: keychain
+```
+
+With `keychain` and no reachable keychain (a headless Linux server, an SSH
+session without a desktop keyring), a new vault's key goes to `vault.key` as
+before, with a warning in the log. Each profile gets its own keychain entry,
+named in `~/.hermes/vault/vault.keyref` (which holds no secret). A profile
+made with `hermes profile create --clone-all` gets an entry of its own while it
+is being created, so the original moving its key back to a file later cannot
+leave the copy without a key; if the keychain cannot be reached at that moment,
+the clone is refused with a message instead of sharing the original's entry. A
+renamed profile switches to an entry of its own the first time it opens its
+vault, and never deletes the entry it came from.
+
+What changes in keychain mode:
+
+- **Backups and copies hold the vault without its key.** `hermes backup`, a
+  synced or copied `~/.hermes`, or a disk image no longer carries everything
+  needed to open the vault. Before moving a profile to another machine, run
+  `hermes vault key migrate --to file`.
+- **The keychain may ask.** macOS can ask whether Hermes may use the entry
+  (for example after an update replaces Hermes' Python), and a locked Linux
+  keyring asks to be unlocked. Cron jobs that run while you are logged out
+  cannot read the key, so their local logins fail with a clear error.
+- **A lost entry means lost items.** If the keychain entry is deleted, the
+  vault cannot be opened and Hermes says so instead of creating a new key over
+  it. Restore the entry from a keychain backup, or delete `vault.json.enc` to
+  start over.
+
+That is why keychain storage is opt-in rather than the default.
 
 ## Headless sessions
 
@@ -86265,6 +86832,30 @@ site, that site (and any script it runs) has it, exactly as when you type it
 yourself. On a cloud browser backend the vendor's browser sees the page like any
 other. The origin binding is the guard against filling on the wrong site, not
 against a compromised right one.
+
+### Who can get at the vault
+
+| Who | `vault.key` file (default) | Keychain storage |
+|---|---|---|
+| Other users on this computer (not administrators) | Blocked: both files are `0600` | Blocked |
+| Someone with a backup, sync copy or image of `~/.hermes` | Can decrypt: key and vault travel together | Gets ciphertext only |
+| Someone with the powered-off disk and no full-disk encryption | Can decrypt | Needs whatever protects that keychain (on macOS and Windows, your login password; a Linux keyring left unencrypted protects nothing) |
+| A program running as you, or a plugin running inside Hermes | Can decrypt | Can still ask the keychain, or call the vault code directly |
+| An administrator / root, or malware with your privileges | Can decrypt | Can decrypt |
+
+Password-manager session tokens (1Password, Bitwarden) stay in Hermes' memory
+only, are dropped after 30 idle minutes or on Lock, and are handed only to the
+single `op`/`bw` command that needs them, never to Hermes' own environment, the
+terminal tool or any other child process. They are kept out of reach of a plain
+import, which stops casual access by other code in the process, but not a
+plugin determined to read Hermes' memory.
+
+Plugins are the boundary that matters: a third-party plugin that runs inside
+the Hermes process can do anything Hermes can, including filling a saved login.
+If you save logins and install plugins you have not reviewed, run them out of
+process with [`plugins.isolation: host`](plugins.md#running-plugins-out-of-process-pluginsisolation).
+A plugin host still runs as your user and can read files you can read, so for
+a hard boundary give it a sandbox with `plugins.host.launcher`.
 
 ---
 
