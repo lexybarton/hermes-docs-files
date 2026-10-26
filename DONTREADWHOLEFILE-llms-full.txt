@@ -1163,6 +1163,21 @@ set `maintenance.commit-graph.enabled`, `gc.writeCommitGraph` and `fetch.writeCo
 downloads every one of their trees. Leave those settings alone, and leave `gc.auto` at its
 default so git's own automatic gc can still fold packs.
 
+Hermes keeps the commit-graph current itself, because without one every version lookup walks the
+whole history: each `hermes update` (after the new code is in place) and each `hermes -w` launch
+update a missing or day-old graph in the background, at most once every 6 hours, with
+`git commit-graph write --reachable --split --no-changed-paths`, which reads commits only and never
+downloads a tree. The update does not wait for it, and a write still running after 10 minutes is
+stopped (asked to exit first, so git removes its own lock). A failed or stopped write is logged to
+`logs/agent.log`. A checkout that is a linked worktree or submodule refreshes the graph of the
+repository it shares objects with. A repo with `core.commitGraph=false` in its own, your global or
+the system git config is left without a graph. A
+`commit-graph.lock` or `multi-pack-index.lock` that a killed git left behind is removed by the same
+stale-lock sweep as `index.lock` once it is 10 minutes old and no git process of any form (`git`,
+`git-commit-graph`, `git.exe`, ...) is running; when Hermes cannot list running processes, no lock is
+removed. In a repo you
+launch `hermes -w` from, only those object-store locks are swept, never `index.lock` or `HEAD.lock`.
+
 Each `hermes update` also spends at most 60 seconds cleaning those packs up, picking up where the
 previous update stopped. It deletes packs whose every object is also stored in another pack, then
 merges the smallest remaining packs while there are more than 50. Nothing stored locally is ever
@@ -3994,7 +4009,9 @@ backend, cron) and every child it launches gets `TMPDIR`, `TMP` and `TEMP` point
 RAM-backed system temp dir. The system prompt names this directory as the scratch
 directory. Hermes only sets these when they are not already set — a `TMPDIR` exported
 by you or by the OS (macOS `/var/folders`, Windows `%TEMP%`) is left alone. Entries are
-pruned at startup (at most once per hour) once they have been **idle for 24 hours**: an entry
+pruned by a background process started right after startup (at most once per hour; startup
+never waits for it, and the pass still finishes when the command exits at once) once they have
+been **idle for 24 hours**: an entry
 stays as long as anything anywhere inside it was written in the last day, and goes a day after
 the last write. Hardlinked files do not count as writes (a `git clone --local` shares pack files
 with its source repo, whose activity would otherwise keep the clone forever). Before an idle entry is deleted, Hermes also stops any process still running
@@ -4002,8 +4019,10 @@ with its working directory inside that entry (or inside a scratch path that no l
 such as a headless browser left behind by a test run) and drops any `git worktree`
 registration that pointed into it. A process Hermes itself started and still tracks (a
 background `terminal` process, the gateway, a CLI session, or anything they launched that is
-still their child) is never stopped: an idle entry one of them is working inside is kept
-instead. Each entry is re-checked right before it is deleted, so
+still their child) is never stopped, and neither is the shell that started the Hermes command
+(or its parents), even after that command exited: an idle entry one of them is working inside
+is kept instead. A pass that cannot inspect processes stops nothing and deletes no entry a
+process may be working in. Each entry is re-checked right before it is deleted, so
 one written to while the prune was stopping processes is kept. Every removal, stopped
 process and kept entry is recorded in `~/.hermes/logs/scratch-prune.log`. An entry holding
 files your user may not read or delete (typically root-owned output of a Docker container that
@@ -26390,6 +26409,22 @@ Without ffmpeg, Edge TTS, MiniMax TTS, NeuTTS, KittenTTS, and Piper audio are se
 :::tip
 If you want voice bubbles without installing ffmpeg, switch to the OpenAI, ElevenLabs, or Mistral provider.
 :::
+
+### ElevenLabs: agent-selected voices
+
+With `tts.provider: elevenlabs` and `ELEVENLABS_API_KEY` set, the agent can pick a different voice for each `text_to_speech` call, for example one voice per character in a script. The ElevenLabs version of `text_to_speech` has two extra fields that other providers never see (they keep the configured voice):
+
+- `voice_id` picks the voice for this call. Leaving it out uses `tts.elevenlabs.voice_id`; the config is never rewritten.
+- `find_voices` searches for voices instead of speaking. It returns 20 voices per page by default (up to 100), with `next_page` for the following page:
+  - `source: library` (default) searches the public Voice Library: thousands of community voices, most-used first. Library voices work directly by `voice_id` without saving them first; ElevenLabs only allows them over the API on paid plans, and a few carry a higher credit rate (shown as `credit_rate`).
+  - `source: account` lists the voices on your account: premade ones plus anything you saved, cloned or designed.
+  - Filters: free-text `query`, `gender`, `age`, `accent`, `language` (ISO code like `en`), and for the library `use_case` (e.g. `characters_animation`) and `sort` (`usage_character_count_1y`, `trending`, `cloned_by_count`, `created_date`).
+
+The library search matches words in voice names and descriptions literally. "orc" finds orc voices, but "dwarf" finds none, so the agent is told to fall back to describing the sound ("gravelly old" with `age: old` and `use_case: characters_animation`).
+
+The ElevenLabs API key needs the **Text to Speech** permission to speak and **Voices: Read** to search.
+
+The agent can't listen to voices. It chooses from each voice's labels and description, and every result carries a `preview_url` you can open to hear the voice before committing to it.
 
 ### xAI Custom Voices (voice cloning)
 
@@ -65601,7 +65636,7 @@ Full definition in `providers/base.py`. The most useful ones:
 | `fallback_models` | `tuple[str, ...]` | Curated list shown when live catalog fetch fails — in the `/model` picker AND the first-time `hermes setup` / `hermes model` API-key flow, which resolve the catalog the same way (`fetch_models()` merged curated-first with `fallback_models`; `fallback_models` alone when the fetch returns `None` or raises) |
 | `supports_vision` | bool | Declares the provider's API accepts image content inside **tool-result** messages (a provider-wide wire capability). Per-model user-image routing comes from `model_capabilities` / models.dev, not from this flag |
 | `model_capabilities` | `dict[str, dict[str, Any]]` | Per-model capability declarations in the `model_overrides` schema — see [Declaring model capabilities](#declaring-model-capabilities) |
-| `default_headers` | `dict[str, str]` | Sent on every request (e.g. Copilot's `Editor-Version`); also forwarded by the default `fetch_models()` catalog request |
+| `default_headers` | `dict[str, str]` | Sent on every request (e.g. Copilot's `Editor-Version`); also forwarded by the default `fetch_models()` catalog request. A value that is costly to compute at import (a User-Agent carrying the release) can be deferred with `providers.base.LazyHeaders({"User-Agent": lambda: hermes_user_agent("MyAgent")})`, a `dict` whose callable values run on first read (`hermes_user_agent` is in `hermes_cli.version_info`) |
 | `fixed_temperature` | Any | `None` = use caller's value; `OMIT_TEMPERATURE` sentinel = don't send temperature at all (Kimi) |
 | `default_max_tokens` | `int \| None` | Provider-level max_tokens cap (Nvidia: 16384) |
 | `unsupported_response_formats` | `tuple` | `response_format` types the API rejects outright; auxiliary requests omit them instead of paying a guaranteed 400 (DeepSeek: `("json_schema",)`) |
