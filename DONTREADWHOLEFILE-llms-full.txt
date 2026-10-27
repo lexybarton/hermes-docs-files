@@ -9444,6 +9444,9 @@ worktrees:
   archive_max_file_mb: 50      # untracked files above this are not archived; their tree is kept
   archive_retention_days: 30   # 0 keeps archives forever
   max_total_gb: 0              # optional budget for idle trees; oldest are archived + removed first
+  install_state_retention_days: 14  # dependency state of a missing checkout outside .worktrees/ and
+                               # the data root, unused this long, is reclaimed; 0 keeps it forever.
+                               # Read from the root profile's config: its profiles share installs/
 ```
 
 There is no limit on how many trees may exist: hundreds of parallel subagents
@@ -54188,7 +54191,7 @@ Three dashboard-auth providers ship in the box. For a remote Hermes Desktop conn
 | `HERMES_DASHBOARD_BASIC_AUTH_USERNAME` | Username for the bundled username/password dashboard-auth provider (`plugins/dashboard_auth/basic`). Activates the provider when set together with a password. Overrides `dashboard.basic_auth.username`. |
 | `HERMES_DASHBOARD_BASIC_AUTH_PASSWORD` | Plaintext password for the basic provider (hashed in-memory at load). Wins over a config `password_hash` so you can rotate via env. Overrides `dashboard.basic_auth.password`. |
 | `HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH` | scrypt password hash for the basic provider (preferred — no plaintext at rest). Compute with `python -c "from plugins.dashboard_auth.basic import hash_password; print(hash_password('PW'))"`. Overrides `dashboard.basic_auth.password_hash`. |
-| `HERMES_DASHBOARD_BASIC_AUTH_SECRET` | HMAC key (32+ bytes, base64/hex/raw) signing the basic provider's stateless session tokens. Set explicitly so sessions survive restarts / span multiple workers; blank → random per-process (you'll be logged out on every restart). Overrides `dashboard.basic_auth.secret`. |
+| `HERMES_DASHBOARD_BASIC_AUTH_SECRET` | HMAC key (32+ bytes, base64/hex/raw) signing the basic provider's stateless session tokens. Set explicitly so sessions survive restarts / span multiple workers; blank → random per-process (you'll be logged out on every restart). A value that still holds unexpanded shell text such as `$(openssl rand -base64 32)` is ignored with an error and a random per-process key is used instead. Overrides `dashboard.basic_auth.secret`. |
 | `HERMES_DASHBOARD_BASIC_AUTH_TTL_SECONDS` | Access-token lifetime for the basic provider (default 12h). Overrides `dashboard.basic_auth.session_ttl_seconds`. |
 | `HERMES_DASHBOARD_OAUTH_CLIENT_ID` | OAuth client id (`agent:{instance_id}`) for the gated/public dashboard, activating the Nous (`plugins/dashboard_auth/nous`) provider. Overrides `dashboard.oauth.client_id`. Provision it with `hermes dashboard register`. |
 | `HERMES_DASHBOARD_SESSION_TOKEN` | Per-process session token for the dashboard's sensitive `/api` routes, minted by the launcher that spawns `hermes dashboard` (Desktop shell, link-style integrations). A value injected by the parent process is kept as-is: a `HERMES_DASHBOARD_SESSION_TOKEN` line in `~/.hermes/.env` does not replace it. Unset, the server mints a fresh token per start. |
@@ -58584,14 +58587,25 @@ already reaches it.
 |---|---|
 | `read_config_doc(path)` | Parsed user layer (raises like `open` + `fast_safe_load`) |
 | `read_config_doc_readonly(path)` | Signature-cached read; never mutate the result |
-| `config_version(path)` | Cache signature (the file's stat tuple) |
+| `config_version(path)` | Change signature (the file's stat tuple) |
+| `config_cache_version(path)` (`config_cache_version_or_none`) | Signature for a cache of the parse: the stat tuple plus a content digest while the later of mtime and ctime is younger than `utils.RACY_MTIME_WINDOW_NS` (`utils.file_cache_version` on the file backend) |
 | `config_exists(path)` | Whether the layer exists |
 | `probe_config_readable(path)` | Raise `OSError` while the layer cannot be read (no parse) |
 | `write_config_document(path, doc)` / `write_config_key(path, key, value)` | Writes; callers normally use `atomic_config_write` / `atomic_config_replace` |
 
 Only `<home>/config.yaml` is a user layer. Any other file passed to these helpers (an import
-source, a fixture) is read and written where it is. Caches keyed on `config_version` miss
-whenever the backend's layer changes. The managed scope (`/etc/hermes`) stays an overlay on top
+source, a fixture) is read and written where it is. A cache of a parse keys on
+`config_cache_version`, not `config_version`: on kernels without multigrain timestamps a same-size
+in-place rewrite in the tick of a read keeps mtime, ctime, size and inode, so the stat tuple alone
+pins the older parse for the life of the process (a rotated `api_key` is the usual casualty).
+Any other file a cache derives from (`auth.json`, pairing lists, `.env`, token files, the managed
+overlay) keys on `utils.file_cache_version(path)`; a signature stored and compared much later (a
+change detector whose false positive reconnects something, a parse-failure record) passes
+`always_digest=True`, because the racy digest turns empty once the file settles (the skills
+manifest, hook-consent, free-tier and onboarding stamps do). "Recent" is judged on ctime as well as
+mtime, because `cp -p` or `rsync --inplace -t` restore an older mtime after writing. A worker bound to
+a frozen config snapshot never hashes a `config.yaml`: its key stays stat-only there, so the content
+check never makes such a worker open the profile file. The managed scope (`/etc/hermes`) stays an overlay on top
 of whatever user layer the backend returns.
 
 ## Lints
@@ -83057,7 +83071,7 @@ hermes pm install chromium
 | `pm doctor` | Check installed tool identities, files, and digests against the lock. |
 | `pm repair` | Rebuild the recorded Python dependency set in a new generation, validate it, then select it. Does not update pins, features, or plugin configuration. |
 | `pm status` | Print the latest sync/update receipt as JSON, or report that no receipt exists. |
-| `pm gc` | Remove unreferenced tool-store entries, eligible download partials, unused lease-managed Python generations, and the `installs/INSTALL_KEY/` state of deleted checkouts (a worktree removed from a `.worktrees/` dir that still exists, or a clone under the data root; checkouts this process cannot see, such as a host install viewed from a container sharing the data root, are kept, as is any state whose install lock or generation lease is still held). The worktree pruner that runs at startup reclaims those orphaned state dirs too. |
+| `pm gc` | Remove unreferenced tool-store entries, eligible download partials, unused lease-managed Python generations, and the `installs/INSTALL_KEY/` state of deleted checkouts (a worktree removed from a `.worktrees/` dir that still exists, or a clone under the data root; a missing checkout anywhere else, such as a host install viewed from a container sharing the data root, is kept until its state has gone unused, with no sync and no launch, for `worktrees.install_state_retention_days` (default 14, 0 = forever); state whose install lock or generation lease is still held is always kept). The worktree pruner that runs at startup reclaims those orphaned state dirs too. |
 
 `pm env` excludes inherited process variables, including credentials. Its
 output can still reveal local installation paths; review it before sharing.
@@ -83937,6 +83951,12 @@ Manage providers, models, tools, and credentials from a real UI instead of editi
 
 First-run onboarding has been redesigned on a unified overlay design system, and you can pick **Choose provider later** to skip provider setup and get into the app first.
 
+#### Where your display preferences live
+
+Display preferences (theme and light/dark mode, session-list density and sidebar layout, status-bar readouts, transcript and tool display, sounds, keybinds, saved layouts, model-picker favourites, and which tips, tours and first-run onboarding you already saw or skipped) are stored once per computer, in `ui-preferences.json` in the root Hermes home (`~/.hermes/ui-preferences.json` by default; with a custom `HERMES_HOME`, the root of that home, never a profile folder). The desktop app on that computer and every browser that opens the [Webapp](#use-the-desktop-workspace-from-a-browser) it serves read and write the same file. A change in one reaches the others: the desktop app's windows get it within a couple of seconds and Webapp tabs when they regain focus or within about ten seconds. Theme, mode, density and the other settings an open window already follows across windows repaint at once; the rest apply the next time a window or tab loads. This includes another device, a private window, and another address for the same Webapp (`127.0.0.1`, the LAN address, `webapp.public_url`).
+
+The file belongs to the computer, not to a gateway connection or a profile. A desktop app connected to a remote gateway, or to several gateways, keeps its own computer's preferences. Settings that are already per profile, such as the theme picked for one profile, stay per profile inside the file. Credentials, sign-ins, permission grants, drafts and per-window state (open tabs, pane layout, scroll position, zoom) are never written to it and stay in each window or browser. The first time an app or browser meets the file (or finds none), it copies in the settings it has that the file lacks, and adopts the values already there; it never overwrites them, and nothing it has is removed just because the file lacks it. A default an app or browser filled in for itself (for example read-aloud carried over from `voice.auto_tts`) is never copied in, so it cannot replace a setting you chose elsewhere. If the file is ever damaged, it is kept beside the new one as `ui-preferences.json.corrupt-<timestamp>`, and every open window and tab copies its settings back into the new file. If the file exists but cannot be read (for example, its permissions changed), changes wait in each window and are saved once it is readable again.
+
 #### Per-profile settings: the "Applies to" scope
 
 When you have two or more [profiles](./profiles.md), the config-backed settings pages — **Model, Workspace, Safety, Memory & Context, Voice, Chat, Advanced, and Tools & Keys** — plus **Providers → Custom Endpoints** and the **Messaging** overlay show a shared **Applies to** chip row at the top. It selects which profile your edits target:
@@ -84157,17 +84177,19 @@ Set a username and password, then start the backend bound to a reachable address
 cat >> ~/.hermes/.env <<'EOF'
 HERMES_DASHBOARD_BASIC_AUTH_USERNAME=admin
 HERMES_DASHBOARD_BASIC_AUTH_PASSWORD=choose-a-strong-password
+EOF
 # Recommended: a stable signing secret so sessions survive restarts.
 # Without it a random key is generated per boot and you'll be logged out
-# on every restart.
-HERMES_DASHBOARD_BASIC_AUTH_SECRET=$(openssl rand -base64 32)
-EOF
+# on every restart. This runs openssl, so the secret is unique to you.
+echo "HERMES_DASHBOARD_BASIC_AUTH_SECRET=$(openssl rand -base64 32)" >> ~/.hermes/.env
 chmod 600 ~/.hermes/.env
 
 # 2. Run the backend bound to a reachable address. The non-loopback bind
 #    engages the auth gate; the username/password provider handles login.
 hermes serve --host 0.0.0.0 --port 9119
 ```
+
+An earlier version of this recipe wrote the secret line inside the quoted heredoc, which stores the text `$(openssl rand -base64 32)` instead of a random value. If `grep BASIC_AUTH_SECRET ~/.hermes/.env` shows that text, replace the line with a freshly generated secret and restart the backend.
 
 Keep that `hermes serve` process running for as long as you want the desktop app to be able to connect — if it stops, the app can no longer reach the backend. Run it under `systemd`, `tmux`, or your process manager of choice so it survives logout and reboots.
 
@@ -84236,6 +84258,14 @@ SHA-pinned) plus an import allowlist — not isolation. A plugin whose
 `register()` throws is rolled back and shown as **Failed** with the error on its
 row; **⌘K → Reload desktop plugins** re-reads every installed `plugin.js`,
 including one an installer replaced in place.
+
+The [Webapp](#use-the-desktop-workspace-from-a-browser) loads the desktop plugins installed on the
+host that serves it, from the `desktop-plugins` folder of that host's Hermes root, whichever profile
+the tab is on. A new or removed plugin folder shows up within seconds; an edited `plugin.js` loads on
+**⌘K → Reload desktop plugins**, since a browser cannot watch the host's files. The desktop half of
+an agent+desktop package appears once native Desktop on that host has copied it into the folder.
+Install and remove desktop plugins from native Desktop or in the folder itself; a plugin's folder
+access (`ctx.files`) is not available in a browser.
 
 **Capabilities → Plugins** is the one place for everything that extends
 Hermes: **one row per plugin**, with two switch columns.
@@ -93070,15 +93100,18 @@ The recipe below uses the username/password path because it's the quickest to st
 cat >> ~/.hermes/.env <<'EOF'
 HERMES_DASHBOARD_BASIC_AUTH_USERNAME=admin
 HERMES_DASHBOARD_BASIC_AUTH_PASSWORD=choose-a-strong-password
-# Recommended: a stable signing secret so sessions survive restarts.
-HERMES_DASHBOARD_BASIC_AUTH_SECRET=$(openssl rand -base64 32)
 EOF
+# Recommended: a stable signing secret so sessions survive restarts.
+# This runs openssl, so the secret is unique to you.
+echo "HERMES_DASHBOARD_BASIC_AUTH_SECRET=$(openssl rand -base64 32)" >> ~/.hermes/.env
 chmod 600 ~/.hermes/.env
 
 # 2. Run the dashboard bound to a reachable address. The non-loopback bind
 #    engages the auth gate; the username/password provider handles login.
 hermes dashboard --no-open --host 0.0.0.0 --port 9119
 ```
+
+An earlier version of this recipe wrote the secret line inside the quoted heredoc, which stores the text `$(openssl rand -base64 32)` instead of a random value. If `grep BASIC_AUTH_SECRET ~/.hermes/.env` shows that text, replace the line with a freshly generated secret and restart the dashboard.
 
 Prefer no plaintext at rest? Use `HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH` with a scrypt hash instead — see [Username/password provider](#usernamepassword-provider-no-oauth-idp) for the full surface.
 
