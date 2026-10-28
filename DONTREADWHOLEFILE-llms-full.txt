@@ -20759,11 +20759,16 @@ ledger also pauses reclaim. Once that bound interpreter is itself dead, nothing 
 still be running the attempt, so the crash sweep reclaims it like any dead worker:
 the run closes as crashed and the card returns to `ready` (or `review`) under the
 normal crash budget, which can re-execute effects the lost attempt already had.
-Resolve an unknown admission explicitly using `prompt.resolve_unknown` with its
-admission ID and execution generation. This acknowledges uncertainty; it does
-**not** authorize another Kanban attempt. Inspect the effects, then explicitly
-complete or block the card; unblock a blocked card only when a new attempt is
-intended. Confirmed timeouts and provider rate-limit results retain their ordinary
+A run that never bound an interpreter is released the same way once its owner has
+settled the admission (a lost card attempt's admission settles `interrupted`):
+when every worker pid recorded for the run is dead, or, with none recorded, once
+its claim has expired, the run closes as crashed (reclaimed if its claim had already
+lapsed) and the card returns to `ready`
+under the same crash budget. Resolving an unknown admission explicitly
+(`prompt.resolve_unknown` with its admission ID and execution generation) settles
+it the same way, so it can lead to another attempt. To avoid that, inspect the
+effects and complete or block the card first; unblock a blocked card only when a
+new attempt is intended. Confirmed timeouts and provider rate-limit results retain their ordinary
 retry/failure-accounting behavior.
 
 A task is a logical unit of work; a **run** is one attempt to execute it. When the dispatcher claims a ready task it creates a row in `task_runs` and points `tasks.current_run_id` at it. When that attempt ends — completed, blocked, crashed, timed out, spawn-failed, reclaimed — the run row closes with an `outcome` and the task's pointer clears. A task that's been attempted three times has three `task_runs` rows.
@@ -30307,6 +30312,26 @@ The buttons disable themselves once a choice is made so duplicate clicks don't d
 ### Prompt layout
 
 Interactive prompts (command approvals, `clarify` questions, and slash-command confirmations) share one layout: the **plain message** carries the full payload — the command and why it was flagged plus the approval deadline, or the question and reply hint — the **embed card** underneath is a header only, and the buttons sit below the card. Everything you need to decide is in the plain text, so the prompt reads correctly on clients that hide or detach embeds, and nothing is shown twice on clients that render them.
+
+`approvals.discord_prompt_timeout` controls Discord's interactive button views for
+command approvals, clarification questions, update prompts, and slash-command
+confirmations. It defaults to 300 seconds, with a minimum of 30 seconds and the same
+platform-safe upper bound as `approvals.timeout`.
+
+`approvals.timeout` separately controls how long a command waits for approval. To
+allow one hour for both the command and its Discord buttons, set both in the owning
+profile's `config.yaml`:
+
+```yaml
+approvals:
+  timeout: 3600
+  discord_prompt_timeout: 3600
+```
+
+Each command-approval card answers its own request. Its controls retire when that
+request is answered, cancelled, or expires, even if the Discord view timeout is
+longer. A shorter Discord timeout retires the buttons without extending or ending
+the underlying approval wait.
 
 ## Home Channel
 
@@ -60774,10 +60799,16 @@ native Desktop; messages the guest posts to `parent` arrive with
 reach the guest, and `onLoad` fires when the guest document has loaded (the
 shell announces that with one `{type: 'hermes-guest-loaded'}` message from the
 same window, so filter guest messages by type). Post
-to `parent`, not `top`: the shell sits between them.
+to `parent`, not `top`: the shell sits between them. Changing `sandbox` after
+mount gives the Webapp a fresh frame (a new `ref.current`, the guest restarts
+with the new tokens, `onLoad` fires again), so read `ref.current` when you need
+the frame rather than keeping the first one. A direct frame on native Desktop
+keeps the element and its current document, and the new tokens apply from its
+next navigation.
 
 *Teardown:* it is a plain React element — unmounting your pane/page removes the
-frame and its realm; nothing is registered app-side.
+frame and its realm; nothing is registered app-side for it (the Webapp routes
+guest shells through one shared listener that holds frames only weakly).
 
 Migration for **rss-reader** (#115972): replace the stubbed `/preview` → 501 →
 `host.openWorkspace('rss-browser')` → empty `RssBrowserFrame` → `ctx.os.openExternal`
