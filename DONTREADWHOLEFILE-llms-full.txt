@@ -6458,6 +6458,36 @@ group_sessions_per_user: true  # true = per-user isolation in groups/channels, f
 
 For the behavior details and examples, see [Sessions](./sessions.md) and the [Discord guide](./messaging/discord.md).
 
+## Native Hosted-Room Discussion Limits
+
+Native server-hosted rooms share these Discussion ceilings across all members
+within each discussion. They apply to all native hosted rooms owned by the service,
+not Desktop renderer-driven or mirrored rooms.
+
+```yaml
+hosted_rooms:
+  discussion:
+    max_rounds: 3      # Default maximum scheduling rounds per discussion
+    max_messages: 10   # Default total visible bot replies across all members
+```
+
+Both keys are optional; omitted keys retain the backward-compatible defaults of
+3 rounds and 10 replies. Values must be positive integers: `0`, negative values,
+`null`, booleans, strings (including quoted numbers or `"unlimited"`), and floats
+are not accepted. An invalid value is ignored with a warning in the gateway log and
+the defaults apply, so a typo never takes group chat offline. For example, set
+`max_rounds: 6` and `max_messages: 30` for a larger, still bounded discussion budget
+(a 5-member room then gets past the 10-reply stop).
+
+Set these keys in the `config.yaml` of the Hermes home that holds the room store
+(the root home beside `shared-state.db`), not in an individual room member's profile
+configuration. They apply to rooms served by the gateway and by the Desktop/TUI
+backend alike. Each server process reads them once at startup: restart every
+process sharing that room store after changing them.
+
+These are ceilings, not targets or a guarantee of task completion. Discussions
+can settle early, and Stop and approval gates remain in effect.
+
 ## Unauthorized DM Behavior
 
 Control what Hermes does when an unknown user sends a direct message:
@@ -53748,6 +53778,9 @@ Hermes reads environment variables from the process environment and, for user-ma
 | `HERMES_LOCAL_STT_COMMAND` | Optional local speech-to-text command template. Supports `{input_path}`, `{output_dir}`, `{language}`, and `{model}` placeholders |
 | `HERMES_LOCAL_STT_LANGUAGE` | Default language hint for STT. Used by the `local` (faster-whisper) provider, `HERMES_LOCAL_STT_COMMAND`, the local `whisper` CLI fallback (default: `en`), Groq, and xAI when no per-provider `language` is set in `config.yaml` |
 | `HERMES_HOME` | Select the configuration and user-data home. A literal `~` or `$VAR` in the value is expanded (fish does not expand `~` inside `VAR=~/…`), so it never resolves relative to the current directory. Defaults to `~/.hermes` on POSIX and `%LOCALAPPDATA%\hermes` on Windows; the official Docker image uses `/opt/data`. Profile/runtime context can select a more specific home. |
+| `HERMES_CONFIG_BACKEND` | Select where the profile's `config.yaml` user layer is read and written. `file` (the default) is the local `config.yaml`; `remote` is [Remote Config](../user-guide/remote-config.md). Any other value, or a remote backend that cannot serve config, stops Hermes at startup with an error instead of falling back to defaults. An explicitly empty value in a `.env` resets a stale shell value to `file`. Read from the launch environment, the launch home's `.env` and the managed `.env`, never from `config.yaml`. See [Config backend](../developer-guide/config-backend.md). |
+| `HERMES_CONFIG_REMOTE_URL` | Base URL of the [Remote Config](../user-guide/remote-config.md) plane (default `https://config-config.nousresearch.com`; `https://` only, plain `http://` only to loopback, no user info). An env var because it is needed before any config can be read: it says where config comes from. |
+| `HERMES_CONFIG_INSTANCE_ID` | This agent's id in the [Remote Config](../user-guide/remote-config.md) plane; required with `HERMES_CONFIG_BACKEND=remote`. An env var because the plane needs it to serve the first config read. |
 | `HERMES_DISABLE_WINDOWS_UTF8` | **Windows only.** Set to `1` to disable the UTF-8 stdio shim (`configure_windows_stdio()`) and fall back to the console's locale code page. Useful for bisecting encoding bugs; rarely the right setting in normal operation |
 | `HERMES_KANBAN_HOME` | Override the shared Hermes root that anchors the kanban board (db + workspaces + worker logs). Falls back to `get_default_hermes_root()` (the parent of any active profile). Useful for tests and unusual deployments |
 | `HERMES_KANBAN_BOARD` | Pin the active kanban board for this process. Takes precedence over `~/.hermes/kanban/current`; the dispatcher injects this into worker subprocess env so workers physically cannot see tasks on other boards. Defaults to `default`. Slug validation: lowercase alphanumerics + hyphens + underscores, 1-64 chars |
@@ -58575,11 +58608,9 @@ It measures turn admission at the notification boundary, not model token savings
 # Config Backend Seam
 
 Every read, stat, existence check and write of a profile's user `config.yaml` goes through
-`hermes_cli/config_backend.py`. `get_config_backend()` returns the backend for every home; today
-that is `FileBackend`, the local `config.yaml` with exactly the primitives Hermes used before the
-seam (stat signature, `fast_safe_load`, the ruamel round-trip writers). A backend that does not
-store the layer as a local file implements the same `ConfigBackend` protocol, and every caller
-already reaches it.
+`hermes_cli/config_backend.py`. The backend is chosen once per process from
+`HERMES_CONFIG_BACKEND`, never from a config value: `file` is the default, and `remote` is
+[Remote Config](../user-guide/remote-config.md) (`plugins/config_backends/remote/`).
 
 ## Helpers
 
@@ -58587,17 +58618,20 @@ already reaches it.
 |---|---|
 | `read_config_doc(path)` | Parsed user layer (raises like `open` + `fast_safe_load`) |
 | `read_config_doc_readonly(path)` | Signature-cached read; never mutate the result |
-| `config_version(path)` | Change signature (the file's stat tuple) |
-| `config_cache_version(path)` (`config_cache_version_or_none`) | Signature for a cache of the parse: the stat tuple plus a content digest while the later of mtime and ctime is younger than `utils.RACY_MTIME_WINDOW_NS` (`utils.file_cache_version` on the file backend) |
-| `config_exists(path)` | Whether the layer exists |
-| `probe_config_readable(path)` | Raise `OSError` while the layer cannot be read (no parse) |
+| `config_version(path)` | Change signature (the file's stat tuple, or the remote version) |
+| `config_cache_version(path)` (`config_cache_version_or_none`) | Signature for a cache of the parse: the stat tuple plus a content digest while the later of mtime and ctime is younger than `utils.RACY_MTIME_WINDOW_NS` (`utils.file_cache_version` on the file backend); the remote version on the remote backend |
+| `config_exists(path)` | Whether the layer exists (a remote layer always does) |
+| `config_version_or_none(path)` / `version_token(version)` | The version, or None when absent; a number that changes with it (TUI/session `mtime`) |
+| `probe_config_readable(path)` | Raise `OSError` while the layer cannot be read (no parse); a remote backend raises `ConfigBackendUnavailable` while the plane cannot serve it |
 | `write_config_document(path, doc)` / `write_config_key(path, key, value)` | Writes; callers normally use `atomic_config_write` / `atomic_config_replace` |
+| `supports_file_tooling()` / `require_file_tooling(what)` | Gate for tools that copy, edit or back up the file itself (`config edit`, backup/restore, profile clone) |
 
 Only `<home>/config.yaml` is a user layer. Any other file passed to these helpers (an import
-source, a fixture) is read and written where it is. A cache of a parse keys on
-`config_cache_version`, not `config_version`: on kernels without multigrain timestamps a same-size
-in-place rewrite in the tick of a read keeps mtime, ctime, size and inode, so the stat tuple alone
-pins the older parse for the life of the process (a rotated `api_key` is the usual casualty).
+source, a fixture) is read and written where it is, whichever backend is selected. A cache of a
+parse keys on `config_cache_version`, not `config_version`: on kernels without multigrain
+timestamps a same-size in-place rewrite in the tick of a read keeps mtime, ctime, size and inode,
+so the stat tuple alone pins the older parse for the life of the process (a rotated `api_key` is
+the usual casualty).
 Any other file a cache derives from (`auth.json`, pairing lists, `.env`, token files, the managed
 overlay) keys on `utils.file_cache_version(path)`; a signature stored and compared much later (a
 change detector whose false positive reconnects something, a parse-failure record) passes
@@ -58605,16 +58639,23 @@ change detector whose false positive reconnects something, a parse-failure recor
 manifest, hook-consent, free-tier and onboarding stamps do). "Recent" is judged on ctime as well as
 mtime, because `cp -p` or `rsync --inplace -t` restore an older mtime after writing. A worker bound to
 a frozen config snapshot never hashes a `config.yaml`: its key stays stat-only there, so the content
-check never makes such a worker open the profile file. The managed scope (`/etc/hermes`) stays an overlay on top
-of whatever user layer the backend returns.
+check never makes such a worker open the profile file. Caches keyed on `config_cache_version` miss
+when a remote poll installs a new layer, exactly as they do after a local file edit. With the file
+backend, the managed scope (`/etc/hermes`) stays an overlay on top of the user layer. The remote
+backend ignores the managed `config.yaml`: config and locks come only from Remote Config, and
+`hermes doctor` flags the file if it exists. The managed `.env` still applies in both modes.
+
+Related keys that must change together (a model switch's `model.*` keys, the TUI `/focus`
+toggle) go through `write_config_keys(path, {key: value, ...})`. A remote backend sends them
+as one CAS write, so a lock on any of them refuses all of them.
 
 ## Lints
 
 - `scripts/check_config_yaml_writers.py` rejects a direct YAML dump of a config path.
 - `scripts/check_config_yaml_readers.py` rejects a direct `open` / `read_text` / `stat` /
   `exists` / YAML load of a config path. A true false positive (another product's config
-  file, or a tool that copies or edits the local file itself: `config edit`, backups, profile
-  clone) carries `# config-reader: ok — <why>` on the line.
+  file, or file tooling already gated on `supports_file_tooling()`) carries
+  `# config-reader: ok — <why>` on the line.
 
 ---
 
@@ -58931,6 +58972,13 @@ def clone_for_agent(self):
 ```
 
 `on_session_reset()` is called on `/new` or `/reset` to clear per-session state without a full shutdown.
+
+Manual `/compress` on every surface (classic CLI, TUI, Desktop, messaging, ACP) calls your
+engine's `compress()` with `force=True` and the optional focus topic, never the built-in
+compressor. Once the compacted history is committed, the engine receives
+`on_session_start(session_id, boundary_reason="compression", old_session_id=...)` (the same id
+twice for in-place compaction). A session with no live agent may get a fresh engine instance
+for that compression, which then also receives `on_session_end()`.
 
 ## Configuration
 
@@ -60716,6 +60764,17 @@ attribute is fully privileged. `loading="lazy"` and
 `referrerPolicy="no-referrer"` are not props. The opaque origin IS the
 containment: guest content cannot reach the app, its storage, or the preload
 bridge.
+
+*Webapp (browser tab):* the page's Content-Security-Policy would also bind a
+`data:` document, so a `data:text/html` src is rendered through the gateway's
+guest shell (`/assets/webapp-guest.html`, its own policy, same opaque origin
+and sandbox tokens) instead of being navigated to directly. Scripts run as on
+native Desktop; messages the guest posts to `parent` arrive with
+`event.source === ref.current.contentWindow`, messages posted to that window
+reach the guest, and `onLoad` fires when the guest document has loaded (the
+shell announces that with one `{type: 'hermes-guest-loaded'}` message from the
+same window, so filter guest messages by type). Post
+to `parent`, not `top`: the shell sits between them.
 
 *Teardown:* it is a plain React element — unmounting your pane/page removes the
 frame and its realm; nothing is registered app-side.
@@ -92835,6 +92894,8 @@ In your IDP, register a **public** application/client with the authorization-cod
 
 #### What it verifies
 
+Every account that can sign in acts as you, the machine owner. With a self-hosted login provider, restrict the app to your own account in the provider (for example Okta app assignment, Microsoft Entra "Assignment required", or a Google Workspace app limited to you); otherwise anyone your provider admits gets full access, as before.
+
 The provider verifies the OpenID Connect **ID token** (RS256/ES256) against the discovered `jwks_uri`, with the `iss` and `aud` claims pinned to your configured `issuer` and `client_id`. The time claims (`exp`/`nbf`/`iat`) are verified with a 60-second clock-skew leeway (RFC 7519 §4.1.4-4.1.6), so a dashboard host whose clock lags the IDP's doesn't fail login; tune it with `dashboard.oauth.self_hosted.id_token_leeway` in `config.yaml` (any value below `60` tightens it, `0` restores strict verification, and an invalid value fails closed to `0`). Standard OIDC claims map onto the dashboard session:
 
 | Session field | Claim(s) |
@@ -102614,6 +102675,130 @@ The short version:
 - [Using SOUL with Hermes](../guides/use-soul-with-hermes.md) — authoring personalities
 - [Personality & SOUL](./features/personality.md) — how SOUL fits into the agent
 - [Skills catalog](../reference/skills-catalog.md) — skills you can bundle
+
+---
+
+<!-- source: website/docs/user-guide/remote-config.md -->
+# Remote Config
+
+# Remote Config
+
+**Remote config mode** replaces `config.yaml` with the config plane: each
+profile's config is the document the plane resolves for this agent instance
+and that profile. The plane layers it from global, tenant, group, owner, and
+agent settings, with the profile's own settings last. Administrators can lock
+keys at an upper level, and the agent cannot change a locked key.
+
+Remote config is for fleet deployments, for example Hermes Cloud. A single
+machine with one user should keep `config.yaml`.
+
+## Turning it on
+
+Set the following in the environment, in `~/.hermes/.env`, or in the managed
+`/etc/hermes/.env` (which wins over the other two). A value in `config.yaml`
+cannot select the backend, because the backend is what serves config.
+
+| Variable | Meaning |
+|---|---|
+| `HERMES_CONFIG_BACKEND=remote` | Use the config plane instead of `config.yaml` (default `file`). |
+| `HERMES_CONFIG_INSTANCE_ID` | This agent's id in the plane. Hermes Cloud sets it; on-prem the operator sets it when registering the agent. Required. |
+| `HERMES_CONFIG_REMOTE_URL` | The plane's base URL (default `https://config-config.nousresearch.com`). |
+
+The agent authenticates as itself:
+
+- **Hermes Cloud**: the Nous access token in the profile's `auth.json`.
+- **On-prem**: an OAuth2 client-credentials token from your identity provider,
+  configured in `.env` with `GATEWAY_RELAY_IDP_TOKEN_URL`,
+  `GATEWAY_RELAY_IDP_CLIENT_ID`, `GATEWAY_RELAY_IDP_CLIENT_SECRET`, and
+  optionally `GATEWAY_RELAY_IDP_SCOPE`.
+
+These values, and the `HERMES_CONFIG_*` variables above, must come from
+`auth.json`, a `.env` file (the profile's, the project `.env` a Hermes command
+loads, or the managed one), or the process environment. If a `secrets:` source
+(1Password, Bitwarden, a command) supplies any of them, Hermes refuses to
+start. The same holds for `HERMES_PORTAL_BASE_URL`, `NOUS_PORTAL_BASE_URL` and
+`HERMES_SHARED_AUTH_DIR` (they decide where the Cloud token is read and sent).
+A multi-profile process (gateway, dashboard) that serves a profile whose
+`secrets:` source supplies one of these names refuses to serve that profile.
+
+A Hermes process started for another profile (a `hermes -p <name>` worker, a
+profile's cron or bot child) keeps the `HERMES_CONFIG_*` deployment of the
+process that started it, so it reads that profile's config from the plane too.
+It does not inherit the plane credential: on-prem, put the
+`GATEWAY_RELAY_IDP_*` values where every profile reads them (the managed
+`/etc/hermes/.env`) or in each profile's `.env`. Without one, the process
+exits with an error rather than read a local file.
+
+## What changes
+
+- **Startup fetches config and fails closed.** Every Hermes process (gateway,
+  dashboard, CLI, terminal children) fetches its profile's config when it
+  loads `.env`. If the plane cannot be reached after about 30 seconds of
+  retries, or refuses the agent, the process exits with an error. It never
+  falls back to a local file or to defaults.
+- **No local config file.** `config.yaml` is neither read nor written, and
+  there is no local cache. A running process keeps the config it last fetched
+  in memory. If the plane becomes unreachable while Hermes runs, the process
+  keeps its in-memory config and retries on the next poll.
+- **Changes arrive by polling.** Each process checks for changes every 5
+  minutes. A change made in the plane reaches a running agent within one
+  interval.
+- **Writes go to the profile's own level.** `hermes config set`, `/model`,
+  the dashboard, and every other config writer send only the keys that changed,
+  guarded against concurrent edits. If another process changed the profile
+  meanwhile, Hermes re-reads it and applies only its own change on top, never
+  undoing the other one. Removing a key removes it from the profile level only:
+  if an upper level also sets it, that value still applies, and Hermes warns
+  you.
+- **Locked keys are refused.** `hermes config set` (and any setting changed
+  in the TUI or desktop app, including the prompt, reasoning display and
+  details-mode settings) on a locked key reports which level locks it and
+  changes nothing. When a whole document is saved, locked keys are left
+  out, and Hermes prints a note listing them.
+- **Secrets stay out of the plane.** A secret-shaped key such as `api_key`
+  accepts only a `${VAR}` reference, never the secret itself. Put the value in
+  `.env` or a secret source and set the reference:
+
+  ```bash
+  hermes config set model.api_key '${OPENROUTER_API_KEY}'
+  ```
+
+- **`secrets:` comes from the plane** like any other key, so administrators can
+  manage and lock secret-source settings centrally.
+- **Schema migrations run in memory.** A document written by an older Hermes is
+  migrated when it is read, and the result is not written back. A later write
+  from a newer Hermes keeps the profile's stored schema version unless that
+  data is already current, so every later reader still migrates it. These
+  in-memory migrations change only the config document: steps that also
+  tidy local files (removing a retired section from `SOUL.md`, clearing old
+  values from `.env`) do not run in remote mode. For the
+  same reason, setting a value that one of those migrations rewrites (for
+  example `compression.threshold_tokens: 256000`, an old default, on a profile
+  stored at an older schema) is refused with a message naming the key: it would
+  be saved and then never read back.
+- **Unknown keys** in the fetched document are ignored with a warning, for
+  example a key added by a newer Hermes.
+
+## Managed scope
+
+`/etc/hermes/config.yaml` (see [Managed Scope](./managed-scope.md)) is
+**ignored** in remote mode: config and locks come only from the plane. Hermes
+warns at startup, and `hermes doctor` flags the file. The managed
+`/etc/hermes/.env` still applies.
+
+## Commands that work on the config file
+
+These commands copy or edit `config.yaml` and are refused in remote mode:
+
+- `hermes config edit` (use `hermes config set` instead)
+- profile clone, profile rename (the plane keeps a profile's settings under its
+  name), and profile distribution install
+- `hermes backup`, `hermes import`, and snapshot restore
+- `hermes gateway --config <file>`
+
+`hermes doctor` reports the backend instead of the file: the plane URL, the
+profile, the profile level's version, the number of locks, and when the config
+was last fetched.
 
 ---
 
