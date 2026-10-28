@@ -39,6 +39,7 @@ Repo: https://github.com/NousResearch/hermes-agent
 - [Connecting Desktop to Many Hermes Instances](https://hermes-agent.nousresearch.com/docs/user-guide/multi-connection-desktop)
 - [Running Many Gateways at Once](https://hermes-agent.nousresearch.com/docs/user-guide/multi-profile-gateways)
 - [Profile Distributions: Share a Whole Agent](https://hermes-agent.nousresearch.com/docs/user-guide/profile-distributions)
+- [Remote Config](https://hermes-agent.nousresearch.com/docs/user-guide/remote-config): Serve each profile's config from the config plane instead of config.yaml
 - [Secrets](https://hermes-agent.nousresearch.com/docs/user-guide/secrets)
 - [Bitwarden Secrets Manager](https://hermes-agent.nousresearch.com/docs/user-guide/secrets/bitwarden)
 - [Command Helper Secret Source](https://hermes-agent.nousresearch.com/docs/user-guide/secrets/command)
@@ -222,7 +223,7 @@ Repo: https://github.com/NousResearch/hermes-agent
 - [CLI Internals](https://hermes-agent.nousresearch.com/docs/developer-guide/cli-internals): How hermes_cli is shaped: slash dispatch, config loaders, the skin engine, the transactional update pipeline, and process-identity rules
 - [Codebase Ownership Map](https://hermes-agent.nousresearch.com/docs/developer-guide/codebase-ownership): Which directories belong to which subsystem, and where the right docs entry point lives for each
 - [Background completion backlogs](https://hermes-agent.nousresearch.com/docs/developer-guide/completion-backlog-delivery)
-- [Config Backend Seam](https://hermes-agent.nousresearch.com/docs/developer-guide/config-backend): Where a profile's user config.yaml is read and written: the ConfigBackend seam, its file backend, and the CI lints that keep every caller on it
+- [Config Backend Seam](https://hermes-agent.nousresearch.com/docs/developer-guide/config-backend): Where a profile's user config.yaml is read and written: the ConfigBackend seam, the file and remote backends, and the CI lints that keep every caller on it
 - [Context Engine Plugins](https://hermes-agent.nousresearch.com/docs/developer-guide/context-engine-plugin): How to build a context engine plugin that replaces the built-in ContextCompressor
 - [Cron Internals](https://hermes-agent.nousresearch.com/docs/developer-guide/cron-internals): How Hermes stores, schedules, edits, pauses, skill-loads, and delivers cron jobs
 - [Delegation Provider Plugins](https://hermes-agent.nousresearch.com/docs/developer-guide/delegation-provider-plugin)

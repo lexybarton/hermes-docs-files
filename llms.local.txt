@@ -39,6 +39,7 @@ Repo: https://github.com/NousResearch/hermes-agent
 - [Connecting Desktop to Many Hermes Instances](./user-guide/multi-connection-desktop.md)
 - [Running Many Gateways at Once](./user-guide/multi-profile-gateways.md)
 - [Profile Distributions: Share a Whole Agent](./user-guide/profile-distributions.md)
+- [Remote Config](./user-guide/remote-config.md): Serve each profile's config from the config plane instead of config.yaml
 - [Secrets](./user-guide/secrets.md)
 - [Bitwarden Secrets Manager](./user-guide/secrets/bitwarden.md)
 - [Command Helper Secret Source](./user-guide/secrets/command.md)
@@ -222,7 +223,7 @@ Repo: https://github.com/NousResearch/hermes-agent
 - [CLI Internals](./developer-guide/cli-internals.md): How hermes_cli is shaped: slash dispatch, config loaders, the skin engine, the transactional update pipeline, and process-identity rules
 - [Codebase Ownership Map](./developer-guide/codebase-ownership.md): Which directories belong to which subsystem, and where the right docs entry point lives for each
 - [Background completion backlogs](./developer-guide/completion-backlog-delivery.md)
-- [Config Backend Seam](./developer-guide/config-backend.md): Where a profile's user config.yaml is read and written: the ConfigBackend seam, its file backend, and the CI lints that keep every caller on it
+- [Config Backend Seam](./developer-guide/config-backend.md): Where a profile's user config.yaml is read and written: the ConfigBackend seam, the file and remote backends, and the CI lints that keep every caller on it
 - [Context Engine Plugins](./developer-guide/context-engine-plugin.md): How to build a context engine plugin that replaces the built-in ContextCompressor
 - [Cron Internals](./developer-guide/cron-internals.md): How Hermes stores, schedules, edits, pauses, skill-loads, and delivers cron jobs
 - [Delegation Provider Plugins](./developer-guide/delegation-provider-plugin.md)
