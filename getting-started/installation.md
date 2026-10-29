@@ -1,5 +1,10 @@
 # Installation
 
+<head>
+  <title>Install Hermes Agent: Official Guide | Nous Research</title>
+  <meta property="og:title" content="Install Hermes Agent: Official Guide | Nous Research" />
+</head>
+
 # Installation
 
 Get Hermes Agent up and running in under two minutes!
