@@ -4145,6 +4145,8 @@ Runs commands inside a Docker container with security hardening (all capabilitie
 
 Earlier builds gave each Desktop folder its own sandbox even with mounting off. Those directories (`*_ws_*` under `TERMINAL_SANDBOX_DIR/docker`, default `sandboxes/docker` in the profile's Hermes home) are kept but no longer used by the terminal or the file panel: copy anything you still need into the profile sandbox's `workspace` or `home`.
 
+In a named profile, its gateway chats, Desktop sessions, cron jobs and Kanban workers all use the profile's one sandbox (`profile_<name>-*` under `TERMINAL_SANDBOX_DIR/docker`). Earlier builds kept a gateway launched as that profile (`hermes -p <name> gateway`) and its cron and Kanban work in a separate `default` sandbox under the profile's home. That directory is kept but no longer used: copy anything you still need from it the same way.
+
 Terminal, file, and `execute_code` calls use `docker exec` in the selected container. Installed packages, files in `/workspace`, and **background processes** carry over between calls and Hermes processes using that container. Closing a TUI session, running `/quit`, or starting a new `hermes` invocation does not itself remove it; the next process can reuse it through its labels. See **Container lifecycle** below for the exact teardown rules.
 
 **Per-session isolation mode (`container_persistent: false`).** Setting `container_persistent: false` on the Docker backend switches to one container **per session**: every chat (desktop app session, gateway conversation, TUI session) gets its own fresh sandbox, created on its first terminal/file call and removed when the session closes or goes idle past `lifetime_seconds`. Nothing carries over between sessions — no filesystem state, no mounts, no background processes. With `docker_mount_cwd_to_workspace: true`, only the workspace **attached to that session** is mounted at `/workspace`; a fresh session with no attached directory gets an empty workspace instead of inheriting the previous session's mount. `delegate_task` subagents still share their parent session's container. Use this mode when the sandbox is a security boundary between conversations; keep the default `true` when you want the long-lived shared container described above.
@@ -10910,7 +10912,7 @@ These categories are always denied, even when `HERMES_WRITE_SAFE_ROOT` is unset:
 | Category | Examples |
 |----------|----------|
 | OS credential stores | `~/.ssh/` (keys, `authorized_keys`), `~/.aws/`, `~/.kube/`, `/etc/sudoers`, `~/.netrc` |
-| Hermes secret stores | `.env`, `.anthropic_oauth.json`, `auth/google_oauth.json`, Bitwarden cache (`cache/bws_cache.json`, `cache/bws_cache.enc.json`), `vault/`, `browser-profile/`, `mcp-tokens/`, `pairing/` under HERMES_HOME (active profile and global root). Control files (`auth.json`, `config.yaml`, `webhook_subscriptions.json`) are read-denied but stay writable. |
+| Hermes secret stores | `.env`, `.anthropic_oauth.json`, `auth/google_oauth.json`, Bitwarden and 1Password caches (`bws_cache.json`, `bws_cache.enc.json`, `op_cache.json`), the Photon sidecar token (`photon-sidecar.json`), `vault/`, `browser-profile/`, `mcp-tokens/`, `pairing/` under HERMES_HOME (active profile and global root). Control files (`auth.json`, `config.yaml`, `webhook_subscriptions.json`) are read-denied but stay writable. |
 | Windows NT/device-namespace paths | `\??\...`, `\\.\...`, `\\?\UNC\...`, `\\?\GLOBALROOT...` — rejected for both reads and writes on every platform. On Windows, merely *resolving* such a path (e.g. `\??\UNC\host\share`) triggers outbound SMB authentication and can leak the user's NTLM hash; the prefixes also bypass normal path normalization. Ordinary extended-length local paths (`\\?\C:\...`) and plain UNC shares (`\\server\share`) are unaffected. |
 
 Project-local `.env`, `.env.local`, `.env.production` and `.envrc` files are **read-denied** anywhere on disk (the file tools refuse to read them) but remain writable: the agent can create or edit them for you, it just cannot read the values back.
@@ -97852,7 +97854,7 @@ Common issues:
 - **Cron and standalone sends need the gateway running.** Out-of-process
   senders (cron jobs, `hermes send`, the dashboard) reuse the sidecar the
   gateway spawned — they read its port/token from
-  `<hermes-home>/runtime/photon-sidecar.json`, written once the sidecar
+  `<hermes-home>/photon-sidecar.json`, written once the sidecar
   passes its health check and removed when it stops. If a standalone send
   reports the gateway appears to be down, start (or restart) the gateway
   first.
@@ -103391,8 +103393,8 @@ secrets:
 | `project_id` | `""` | UUID of the project to sync from. |
 | `server_url` | `""` | Bitwarden region or self-hosted endpoint. Empty = `bws` default (US Cloud, `https://vault.bitwarden.com`). Set to `https://vault.bitwarden.eu` for EU Cloud, or your own URL for self-hosted. Plumbed into the `bws` subprocess as `BWS_SERVER_URL`. |
 | `cache_ttl_seconds` | `300` | How long an in-process or disk fetch result is reused. Set to `0` to disable fresh-cache reuse. |
-| `encrypted_cache.enabled` | `false` | Store the last successful fetch in an AES-GCM encrypted cache at `~/.hermes/cache/bws_cache.enc.json`. |
-| `encrypted_cache.max_stale_seconds` | `0` | When encrypted caching is enabled, allow that cache to be used only after network/timeout failures, up to this age. Authentication failures never use stale secrets. A successful encrypted write removes the legacy plaintext `cache/bws_cache.json`. |
+| `encrypted_cache.enabled` | `false` | Store the last successful fetch in an AES-GCM encrypted cache at `~/.hermes/bws_cache.enc.json`. |
+| `encrypted_cache.max_stale_seconds` | `0` | When encrypted caching is enabled, allow that cache to be used only after network/timeout failures, up to this age. Authentication failures never use stale secrets. A successful encrypted write removes the plaintext `bws_cache.json`. |
 | `override_existing` | `true` | When true, Bitwarden values overwrite anything already in env (so rotation in the web app actually takes effect). Flip to `false` if you want `.env` / shell exports to win locally. |
 | `auto_install` | `true` | Requests the PM-pinned `bws` package when no binary exists. PM's lazy-install policy also applies. |
 
@@ -103635,7 +103637,7 @@ Startup warnings now include a `→` remediation line telling you exactly which 
 
 ## Caching
 
-Successful, complete pulls are cached in-process and on disk under `<hermes_home>/cache/op_cache.json` (written atomically, mode `0600`), so back-to-back short-lived `hermes` invocations don't re-shell `op` for every reference. The cache:
+Successful, complete pulls are cached in-process and on disk at `<hermes_home>/op_cache.json` (written atomically, mode `0600`), so back-to-back short-lived `hermes` invocations don't re-shell `op` for every reference. The cache:
 
 - stores only resolved secret **values** — never the service-account token or any raw auth material (auth is fingerprinted into the cache key);
 - is invalidated when the token, account, `OP_SESSION_*` variables, or the set of references change;
