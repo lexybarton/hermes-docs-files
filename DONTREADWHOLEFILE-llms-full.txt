@@ -5142,6 +5142,7 @@ Hermes has separate timeout layers for streaming, plus a stale detector for non-
 |---------|---------|----------------|--------------|
 | Socket read timeout | 120s | Auto-raised to 1800s | `HERMES_STREAM_READ_TIMEOUT` |
 | Stale stream detection | 180s | Raised to a 900s ceiling (`agent.local_stream_stale_timeout`) | `HERMES_STREAM_STALE_TIMEOUT` |
+| Stream max lifetime (opt-in) | Off (`0`) | Same | `agent.stream_max_lifetime` |
 | Stale non-stream detection | 90s | Auto-disabled when left implicit | `providers.<id>.stale_timeout_seconds` or `HERMES_API_CALL_STALE_TIMEOUT` |
 | Responses first-event watchdog | 120s | Raised to the 900s ceiling (`agent.local_stream_stale_timeout`) | `HERMES_CODEX_TTFB_TIMEOUT_SECONDS` |
 | API call (non-streaming) | 1800s | Unchanged | `providers.<id>.request_timeout_seconds` / `timeout_seconds` or `HERMES_API_TIMEOUT` |
@@ -5152,6 +5153,8 @@ The **socket read timeout** controls how long httpx waits for the next chunk of 
 The **stale stream detection** kills connections that receive SSE keep-alive pings but no actual content. For local providers (which don't send keep-alive pings during prefill) the default is raised to a finite 900-second ceiling instead of the 180s base — configurable via `agent.local_stream_stale_timeout` or the `HERMES_LOCAL_STREAM_STALE_TIMEOUT` env var.
 
 The **Responses first-event watchdog** (Codex / `codex_responses` transport, including custom providers declared with the Responses transport) aborts and reconnects a request that accepts the connection but emits no stream event within 120 seconds. A local server prefilling a large context legitimately stays silent longer than that, so on local endpoints the implicit default is raised to the same ceiling as the stale stream detector (`agent.local_stream_stale_timeout` / `HERMES_LOCAL_STREAM_STALE_TIMEOUT`, 900s). An explicit `HERMES_CODEX_TTFB_TIMEOUT_SECONDS` is always used as-is (`0` disables the watchdog).
+
+The **stream max lifetime** is an opt-in cap on the total wall-clock time of one streaming response. The stale detector resets on every chunk, so a stream that keeps sending data but never finishes (a gateway trickling chunks, a runaway generation) is never cut. Set `agent.stream_max_lifetime` (seconds) to cut such a stream; the connection is killed the same way a stale kill is, and the retry or partial-response continuation takes over. It never fires before the effective stale-stream timeout, and a cut attempt does not count toward the stale-stream circuit breaker (`HERMES_STREAM_STALE_GIVEUP`), since the provider was responding. The cap covers Chat Completions and Anthropic Messages streams only; Codex/Responses streams (`codex_responses`, including custom providers declared with the Responses transport) and Bedrock streams are not capped. Leave it at `0` (the default) if you run long reasoning turns that legitimately stream for a long time.
 
 The **stale non-stream detection** kills non-streaming calls that produce no response for too long. By default Hermes disables this on local endpoints to avoid false positives during long prefills. If you explicitly set `providers.<id>.stale_timeout_seconds`, `providers.<id>.models.<model>.stale_timeout_seconds`, or `HERMES_API_CALL_STALE_TIMEOUT`, that explicit value is honored even on local endpoints.
 
@@ -22434,7 +22437,7 @@ def register(ctx):
     ctx.register_hook("post_llm_call", my_sync_callback)
     ctx.register_hook("on_session_start", my_init_callback)
     ctx.register_hook("on_session_end", my_cleanup_callback)
-    # Kanban board lifecycle (dependency-wait blocking may fire inside its transaction):
+    # Kanban board lifecycle (each fires after its board write commits):
     ctx.register_hook("kanban_task_claimed", my_claim_callback)     # dispatcher process
     ctx.register_hook("kanban_task_completed", my_done_callback)    # worker process
     ctx.register_hook("kanban_task_blocked", my_blocked_callback)   # worker process
@@ -22504,7 +22507,7 @@ Payload fields below are the exact event-specific fields supplied by each call s
 | `transform_tool_result` | Transform | After `post_tool_call`, before conversation append; first string replaces the result. | `tool_name`, `args`, `result`, `task_id`, `session_id`, `tool_call_id`, `turn_id`, `api_request_id`, `duration_ms`, `status`, `error_type`, `error_message` | Exposes the full model-bound result and arguments. |
 | `transform_terminal_output` | Transform | After bounded foreground process capture, before final output limiting; first string replaces output. | `command`, `output`, `returncode`, `task_id`, `env_type` | Command/output may contain credentials. |
 | `pre_transcription` | Transform | Fired by the STT dispatcher after provider resolution and before any backend (built-in, command-type, or plugin-registered) is invoked; dict results are applied in registration order, last-writer-wins per field (`prompt`, `language`, `model`; `file_path` is read-only). | `file_path`, `provider`, `model`, `language`, `prompt`, `source` | The final prompt is uploaded to the configured STT provider with the audio — keep secrets out of hook returns. |
-| `pre_llm_call` | Directive/control | Once per turn before the loop; all valid string/`{"context": ...}` returns are joined and injected into the user message. | `session_id`, `task_id`, `turn_id`, `user_message`, `conversation_history`, `is_first_turn`, `model`, `platform`, `parent_session_id`, `sender_id` | Full user message and conversation history. |
+| `pre_llm_call` | Directive/control | Once per turn before the loop; all valid string/`{"context": ...}` returns are joined and injected into the user message; the first valid `{"action": "block", "message": ...}` ends the turn before any inference request. | `session_id`, `task_id`, `turn_id`, `user_message`, `conversation_history`, `is_first_turn`, `model`, `platform`, `parent_session_id`, `sender_id` | Full user message and conversation history. |
 | `post_llm_call` | Observer | Successful, non-interrupted turn finalization; return ignored. | `session_id`, `task_id`, `turn_id`, `user_message`, `assistant_response`, `conversation_history`, `model`, `platform`, `side_question_token` | Full prompt, response, and history. |
 | `transform_llm_output` | Transform | Before `post_llm_call` and final delivery; first non-empty string replaces the response. | `response_text`, `session_id`, `model`, `platform` | Full final assistant text. |
 | `pre_verify` | Directive/control | At the bounded edited-code verify gate; first valid continue/block-stop directive keeps the turn going. | `session_id`, `platform`, `model`, `coding`, `attempt`, `final_response`, `changed_paths` | Draft response and changed paths. |
@@ -22539,7 +22542,7 @@ Payload fields below are the exact event-specific fields supplied by each call s
 | `on_room_member_activity` | Observer | While a hosted Group Chat member turn runs on the Bot Mode gateway, once per runtime event the member session emits (tool start/complete, approval request, message/reasoning deltas, errors); queued per consumer off the token path; return ignored. | `room_id`, `thread_id`, `member_id`, `turn_id`, `task_id`, `execution_generation`, `kind`, `seq`, `payload` | `payload` is the client-safe session event body: tool args and results, redacted approval commands, streamed member text. |
 | `kanban_task_claimed` | Observer | After claim commit, in dispatcher process before worker spawn; return ignored. | `task_id`, `profile_name`, `board`, `assignee`, `run_id` | Board/task/profile/assignee identifiers. |
 | `kanban_task_completed` | Observer | After completion and cleanup, usually in worker process; return ignored. | `task_id`, `profile_name`, `board`, `assignee`, `run_id`, `summary` | Summary may contain project/user content. |
-| `kanban_task_blocked` | Observer | After a blocked transition; the dependency-wait path fires before its transaction exits. Return ignored. | `task_id`, `profile_name`, `board`, `assignee`, `run_id`, `reason` | Reason may contain project/user content. |
+| `kanban_task_blocked` | Observer | After a blocked transition commits, dependency waits included. Return ignored. | `task_id`, `profile_name`, `board`, `assignee`, `run_id`, `reason` | Reason may contain project/user content. |
 | `on_kanban_worker_spawned` | Observer | After `spawn_fn` returns and the worker PID is persisted; runs inside the dispatch lock, keep callbacks fast. Return ignored. | `task_id`, `profile_name`, `board`, `assignee`, `run_id`, `worker_pid`, `workspace_path` | `workspace_path` is a filesystem path and may reveal project layout or usernames. |
 | `on_kanban_worker_exited` | Observer | Tick-derived: after `detect_crashed_workers` reclaims a dead-PID task and the reclaim commits. Return ignored. | `task_id`, `profile_name`, `board`, `assignee`, `run_id`, `worker_pid`, `exit_kind`, `exit_code`, `outcome`, `retry_status` | Identifiers and exit metadata only. |
 | `on_kanban_worker_stale_claim` | Observer | After a TTL-expired claim is reclaimed; live-PID extensions don't fire. Return ignored. | `task_id`, `profile_name`, `board`, `assignee`, `run_id`, `worker_pid`, `heartbeat_stale`, `retry_status` | Identifiers and claim metadata only. |
@@ -22749,6 +22752,12 @@ def my_callback(session_id: str, user_message: str, conversation_history: list,
 **Fires:** In `agent/turn_context.py` (turn preparation for `run_conversation()` in `agent/conversation_loop.py`), after context compression but before the main `while` loop. Fires once per `run_conversation()` call (i.e. once per user turn), not once per API call within the tool loop.
 
 **Return value:** If the callback returns a dict with a `"context"` key, or a plain non-empty string, the text is appended to the current turn's user message. Return `None` for no injection.
+
+A `{"action": "block", "message": "..."}` return vetoes the turn **before any inference request**: the message is shown to the user in place of a model reply and saved as the assistant reply (so the transcript keeps a normal `user → assistant` pair and `--resume` works), the turn makes zero model calls, and the result carries `turn_exit_reason: "blocked_by_plugin_pre_llm_call"`. The first block wins; a block without a message is ignored.
+
+The blocked prompt is stored as `[Message withheld: a pre_llm_call policy hook blocked it.]`. That placeholder is what later turns replay and what compaction summaries, `session_search`, external memory providers and the background memory review read, so the prompt never reaches a model in this turn or a later one. What the user typed is kept only as display metadata, so the CLI `--resume` recap, the TUI, the desktop app and the dashboard still show it. The hook runs before turn-start compaction, and a blocked turn skips compaction, titling and external-memory prefetch/sync.
+
+A block applies only when a callback returns it. A callback that raises, or runs past `plugins.hook_callback_timeout` (30 s by default), is logged and skipped, and the turn goes ahead. A policy hook should therefore catch its own errors and return a block when it can't decide. Model metadata lookups (such as a `/models` context-length probe on a fresh session) can still run before the hook; they carry no message content.
 
 ```python
 # Inject context
@@ -23911,7 +23920,7 @@ Fires after completion and cleanup, usually in the worker process. Its `summary`
 
 #### `kanban_task_blocked`
 
-Fires after a normal blocked transition. The dependency-wait path invokes it before that write transaction exits. Its `reason` can contain project or user content.
+Fires after a blocked transition commits, dependency waits included, so the callback can read and write the board. Its `reason` can contain project or user content.
 
 All three kanban hooks are observer-only and carry `task_id`, `profile_name`, `board`, `assignee`, and `run_id`; completed adds `summary`, and blocked adds `reason`.
 
@@ -24013,6 +24022,10 @@ profile's `HERMES_HOME`. `tool_name` and `tool_input` are `null` for non-tool ev
 
 // Inject context for pre_llm_call:
 {"context": "Today is Friday, 2026-04-17"}
+
+// Block the turn before any inference request (pre_llm_call); both shapes accepted:
+{"action": "block", "message": "Blocked by policy: prompt contains a customer ID"}
+{"decision": "block", "reason": "Blocked by policy: prompt contains a customer ID"}
 
 // Keep the agent going at the verify gate (pre_verify); both shapes accepted:
 {"action": "continue", "message": "Run the formatter, then finish."}
@@ -27569,7 +27582,7 @@ Sessions persist across messages until they reset. The agent remembers your conv
 
 ### Persistent `/model` Overrides
 
-A `/model` switch in a gateway chat applies to that session and now **survives gateway restarts**: the model/provider choice is persisted to the session store and rehydrated on first use after a restart (credentials are re-resolved at load time and never written to disk). `/new` (or `/reset`) clears the override, and `/model <name> --global` writes it through to `config.yaml` instead. `/model <name> --once` applies for a single turn only.
+A `/model` switch in a gateway chat applies to that session and now **survives gateway restarts**: the model/provider choice is persisted to the session store and rehydrated on first use after a restart (credentials are re-resolved at load time and never written to disk). `/model reset` clears the override and keeps the conversation, `/new` (or `/reset`) clears it with a fresh conversation, and `/model <name> --global` writes it through to `config.yaml` instead. `/model <name> --once` applies for a single turn only.
 
 ### Delivery Reliability
 
@@ -53124,7 +53137,7 @@ Type `/` in the CLI to open the autocomplete menu. Built-in commands are case-in
 | Command | Description |
 |---------|-------------|
 | `/config` | Show current configuration |
-| `/model [model-name]` | Show or change the current model. Supports: `/model claude-sonnet-4`, `/model provider:model` (switch providers), `/model custom:model` (custom endpoint), `/model custom:name:model` (named custom provider), `/model custom` (auto-detect from endpoint), OpenRouter account presets (`/model @preset/<slug>` or `/model <model>@preset/<slug>` — presets are account-scoped, so they skip the public model-listing check), and user-defined aliases (`/model fav`, `/model grok` — see [Custom model aliases](#custom-model-aliases)). Flags: `--global` persists the change to config.yaml; `--session` forces session-only; `--once` applies to the next turn only; `--refresh` re-fetches the provider's model list; `--provider <name>` switches backend (session-only unless `--global`); `--reasoning <level>` sets the reasoning effort (`none`, `minimal` … `ultra`) in the same step and with the same scope as the pick. A plain `/model <name>` is session-only unless `model.persist_switch_by_default: true` is set — except when no `model.default`/`model.provider` is configured yet, in which case the first pick persists so the profile gets a real default. The same rule governs the desktop composer picker. **Interactive picker:** running `/model` with no arguments opens the provider→model picker; on the model list you can **type to fuzzy-filter** the models (e.g. type `grok` to narrow to matching models), Backspace to trim the filter, Esc to clear it (or close the picker). Selection always resolves to one concrete model — the filter only narrows the list, it never guesses. After the model, a third step offers the reasoning effort for that model (or **Keep current effort**); it is skipped when the catalog says the route has no reasoning control. **Note:** `/model` can only switch between already-configured providers. To add a new provider, exit the session and run `hermes model` from your terminal. **Cost note:** switching models mid-conversation resets the prompt cache — the cache key includes the model, so your next turn re-reads the entire conversation at full input price instead of the ~75%-discounted cached rate. Expected and unavoidable, but worth knowing on long sessions. |
+| `/model [model-name]` | Show or change the current model. Supports: `/model claude-sonnet-4`, `/model provider:model` (switch providers), `/model custom:model` (custom endpoint), `/model custom:name:model` (named custom provider), `/model custom` (auto-detect from endpoint), OpenRouter account presets (`/model @preset/<slug>` or `/model <model>@preset/<slug>` — presets are account-scoped, so they skip the public model-listing check), and user-defined aliases (`/model fav`, `/model grok` — see [Custom model aliases](#custom-model-aliases)). Flags: `--global` persists the change to config.yaml; `--session` forces session-only; `--once` applies to the next turn only; `--refresh` re-fetches the provider's model list; `--provider <name>` switches backend (session-only unless `--global`); `--reasoning <level>` sets the reasoning effort (`none`, `minimal` … `ultra`) in the same step and with the same scope as the pick. `/model reset` (no flags) drops this session's pick and goes back to `config.yaml`'s model without losing the conversation. A plain `/model <name>` is session-only unless `model.persist_switch_by_default: true` is set — except when no `model.default`/`model.provider` is configured yet, in which case the first pick persists so the profile gets a real default. The same rule governs the desktop composer picker. **Interactive picker:** running `/model` with no arguments opens the provider→model picker; on the model list you can **type to fuzzy-filter** the models (e.g. type `grok` to narrow to matching models), Backspace to trim the filter, Esc to clear it (or close the picker). Selection always resolves to one concrete model — the filter only narrows the list, it never guesses. After the model, a third step offers the reasoning effort for that model (or **Keep current effort**); it is skipped when the catalog says the route has no reasoning control. **Note:** `/model` can only switch between already-configured providers. To add a new provider, exit the session and run `hermes model` from your terminal. **Cost note:** switching models mid-conversation resets the prompt cache — the cache key includes the model, so your next turn re-reads the entire conversation at full input price instead of the ~75%-discounted cached rate. Expected and unavoidable, but worth knowing on long sessions. |
 | `/codex-runtime [auto\|codex_app_server\|on\|off]` | Toggle the optional [Codex app-server runtime](../user-guide/features/codex-app-server-runtime) for OpenAI/Codex models and named custom providers that are also defined in `~/.codex/config.toml`. `auto` (default) uses Hermes' standard chat completions; `codex_app_server` hands eligible turns to a `codex app-server` subprocess for native shell, apply_patch, ChatGPT subscription auth, and migrated Codex plugins. Effective on next session. |
 | `/personality` | Set a predefined personality. `/personality none` (or `default` / `neutral`) clears the overlay and returns to base behavior. |
 | `/verbose` | Cycle tool progress display: off → new → all → verbose. Can be [enabled for messaging](#notes) via config. |
@@ -53296,7 +53309,7 @@ The messaging gateway supports the following built-in commands inside Telegram, 
 | `/stop` | Kill all running background processes and interrupt the running agent. |
 | `/discard` | Drop a turn Hermes lost in a restart so this chat's queued messages run again. The lost turn is not re-run (only you know whether to send it again); it is recorded as interrupted. Hermes offers this when it pauses a conversation on a lost turn. On Slack use `/hermes discard`. |
 | `/pause [reason \| off]` | Global emergency stop, the in-chat form of [`hermes pause`](./cli-commands.md): puts new cron, kanban and gateway work on hold until `/pause off`. In-flight work finishes normally, and slash commands keep working while paused, so a messaging-only operator can always lift it. |
-| `/model [provider:model]` | Show or change the model. Supports provider switches (`/model zai:glm-5`), custom endpoints (`/model custom:model`), named custom providers (`/model custom:local:qwen`), auto-detect (`/model custom`), OpenRouter account presets (`/model @preset/<slug>` — account-scoped, skips the public model-listing check), and user-defined aliases (`/model fav`, `/model grok` — see [Custom model aliases](#custom-model-aliases)). Use `--global` to persist the change to config.yaml; a successful `--global` pick (typed or picker) also drops this chat's session-only override, so config.yaml alone decides the model after a gateway restart (a chat with a `channel_overrides` model keeps the override, since the channel setting would otherwise outrank config.yaml; the CLI/TUI deliberately keep their per-session pin so resume restores the model that chat used). **Note:** `/model` can only switch between already-configured providers. To add a new provider or set up API keys, use `hermes model` from your terminal (outside the chat session). **Cost note:** a mid-session model switch resets the prompt cache (the cache key includes the model), so the next message re-reads the whole conversation at full input price. |
+| `/model [provider:model]` | Show or change the model. Supports provider switches (`/model zai:glm-5`), custom endpoints (`/model custom:model`), named custom providers (`/model custom:local:qwen`), auto-detect (`/model custom`), OpenRouter account presets (`/model @preset/<slug>` — account-scoped, skips the public model-listing check), and user-defined aliases (`/model fav`, `/model grok` — see [Custom model aliases](#custom-model-aliases)). `/model reset` clears this chat's session override (memory, the persisted copy, and any pending `--once` restore) so `channel_overrides` / config.yaml decide the model again, keeping the conversation. Use `--global` to persist the change to config.yaml; a successful `--global` pick (typed or picker) also drops this chat's session-only override, so config.yaml alone decides the model after a gateway restart (a chat with a `channel_overrides` model keeps the override, since the channel setting would otherwise outrank config.yaml; the CLI/TUI deliberately keep their per-session pin so resume restores the model that chat used). **Note:** `/model` can only switch between already-configured providers. To add a new provider or set up API keys, use `hermes model` from your terminal (outside the chat session). **Cost note:** a mid-session model switch resets the prompt cache (the cache key includes the model), so the next message re-reads the whole conversation at full input price. |
 | `/codex-runtime [auto\|codex_app_server\|on\|off]` | Toggle the optional [Codex app-server runtime](../user-guide/features/codex-app-server-runtime). Persists to `model.openai_runtime` in config.yaml and evicts the cached agent so the next message picks up the new runtime. Effective on next session. |
 | `/personality [name]` | Set a personality overlay for the session. `/personality none` (or `default` / `neutral`) clears it. |
 | `/fast [normal\|fast\|auto\|cold\|status]` | Fast mode — OpenAI Priority Processing / Anthropic Fast Mode. `auto`/`cold` open a bounded fast window per turn / per session. |
@@ -67237,7 +67250,7 @@ behavior-affecting hooks:
 
 | Hook | Return behavior |
 | --- | --- |
-| `pre_llm_call` | May return a string or `{"context": "..."}` to inject ephemeral context into the current user message. |
+| `pre_llm_call` | May return a string or `{"context": "..."}` to inject ephemeral context into the current user message, or `{"action": "block", "message": "..."}` to end the turn before any inference request (the message becomes the reply and the prompt is stored as a withheld placeholder; see [Event Hooks](../user-guide/features/hooks.md)). A callback that raises or times out is skipped, so it never blocks. |
 | `pre_tool_call` | May return `{"action": "block", "message": "..."}` to block a tool before execution, or `{"action": "modify", "args": {...}}` to transform the tool's input arguments. |
 | `transform_tool_result` | May return a replacement tool result string after `post_tool_call`. |
 | `transform_llm_output` | May return a replacement final assistant text string. |
@@ -69709,7 +69722,7 @@ Each hook is documented in full on the **[Event Hooks reference](../../user-guid
 | `kanban_task_completed` | A kanban task completes (worker process) | `task_id, board, assignee, run_id, profile_name, summary: str \| None` | ignored |
 | `kanban_task_blocked` | A kanban task is blocked (worker process) | `task_id, board, assignee, run_id, profile_name, reason: str \| None` | ignored |
 
-Most hooks are fire-and-forget observers — their return values are ignored. The exceptions are `pre_llm_call`, which can inject context into the conversation, and `pre_tool_call`, which can return a block/approve directive.
+Most hooks are fire-and-forget observers — their return values are ignored. The exceptions are `pre_llm_call`, which can inject context into the conversation or block the turn before it reaches the model, and `pre_tool_call`, which can return a block/approve directive.
 
 All callbacks should accept `**kwargs` for forward compatibility. If a hook callback crashes, it's logged and skipped. Other hooks and the agent continue normally.
 
@@ -69719,7 +69732,7 @@ The **API request hooks** are observers for the raw provider request, one level 
 
 ### `pre_llm_call` context injection
 
-This is the only hook whose return value matters. When a `pre_llm_call` callback returns a dict with a `"context"` key (or a plain string), Hermes injects that text into the **current turn's user message**. This is the mechanism for memory plugins, RAG integrations, guardrails, and any plugin that needs to provide the model with additional context.
+When a `pre_llm_call` callback returns a dict with a `"context"` key (or a plain string), Hermes injects that text into the **current turn's user message**. This is the mechanism for memory plugins, RAG integrations, guardrails, and any plugin that needs to provide the model with additional context.
 
 #### Return format
 
@@ -69730,11 +69743,20 @@ return {"context": "Recalled memories:\n- User prefers dark mode\n- Last project
 # Plain string (equivalent to the dict form above)
 return "Recalled memories:\n- User prefers dark mode"
 
+# Block the turn before it reaches the model (DLP / policy plugins)
+return {"action": "block", "message": "Blocked by policy: prompt contains a customer ID."}
+
 # Return None or don't return → no injection (observer-only)
 return None
 ```
 
 Any non-None, non-empty return with a `"context"` key (or a plain non-empty string) is collected and appended to the user message for the current turn.
+
+A `{"action": "block", "message": "..."}` return vetoes the turn **before any inference request**: the message is shown to the user in place of a model reply and saved as the assistant reply (so the transcript keeps a normal `user → assistant` pair and `--resume` works), the turn makes zero model calls, and the result carries `turn_exit_reason: "blocked_by_plugin_pre_llm_call"`. The first block wins; a block without a message is ignored.
+
+The blocked prompt is stored as `[Message withheld: a pre_llm_call policy hook blocked it.]`. That placeholder is what later turns replay and what compaction summaries, `session_search`, external memory providers and the background memory review read, so the prompt never reaches a model in this turn or a later one. What the user typed is kept only as display metadata, so the CLI `--resume` recap, the TUI, the desktop app and the dashboard still show it. The hook runs before turn-start compaction, and a blocked turn skips compaction, titling and external-memory prefetch/sync.
+
+A block applies only when a callback returns it. A callback that raises, or runs past `plugins.hook_callback_timeout` (30 s by default), is logged and skipped, and the turn goes ahead. A policy hook should therefore catch its own errors and return a block when it can't decide. Model metadata lookups (such as a `/models` context-length probe on a fresh session) can still run before the hook; they carry no message content.
 
 #### Oversized-context spill
 
