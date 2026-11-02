@@ -5724,6 +5724,19 @@ agent:
 
 Hermes sends it as the top-level Responses `text: {verbosity: ...}` field only on Responses-family routes; it is never sent on `chat_completions`, Anthropic or xAI requests, and an empty or unknown value sends nothing. Structured-output (`text.format`) set through `request_overrides` is passed through unchanged.
 
+### OpenAI Daybreak (`daybreak`)
+
+[Daybreak](https://help.openai.com/en/articles/20001258-openai-daybreak-trusted-access-for-cyber-overview) is OpenAI's Trusted Access for Cyber program: approved accounts get fewer refusals for authorized security work on supported models. On the ChatGPT/Codex subscription (`openai-codex`), Hermes can request it:
+
+```yaml
+agent:
+  daybreak: false   # true = request Daybreak Blue on models your account is approved for
+```
+
+In Desktop, open a model's options in the model menu: the **Daybreak** switch appears next to **Fast**, only on models your signed-in account's Codex catalog lists for Daybreak. Accounts without Daybreak never see it. The switch is profile-wide, like Codex's own toggle, and applies from the next turn.
+
+Every request checks the catalog again, so `access_programs.cyber: daybreak_blue` is sent only when the switch is on **and** that request's account and model are listed. Switching to an unlisted model, rotating to an account without access, or an unreadable catalog sends standard requests. It is not sent on API-key routes or the opt-in `codex_app_server` runtime, and only your own chat turns use it (Desktop, the TUI and the CLI). Messaging-platform chats, hosted rooms, A2A peers, third-party `--source tool` integrations, editor (ACP) clients, cron jobs and subagents use standard safeguards: OpenAI allows Daybreak no third-party or downstream access, and those chats can be other people. The setting grants no access: approval comes from OpenAI.
+
 :::note Adaptive-thinking models (Claude 4.6+, Fable/Mythos-class) over OpenRouter
 These models use *adaptive* thinking and don't accept the usual `reasoning.effort`
 field — OpenRouter ignores it for them. Hermes transparently routes your
@@ -31558,6 +31571,15 @@ slack:
   # Opt-in; default off. Env: SLACK_THREAD_REQUIRE_MENTION.
   thread_require_mention: false
 
+  # Let a bare silence marker stand on unaddressed replies in a channel
+  # thread the bot follows. Without it, when a human in that thread talks
+  # to someone else without @mentioning them and the model answers with
+  # only [SILENT], Hermes posts the "model returned only a silence marker"
+  # notice instead. DMs (1:1 and group), @mentions of the bot, and flat
+  # (reply_in_thread: false) channels are unaffected.
+  # Opt-in; default off. Env: SLACK_THREAD_FOLLOWUP_SILENCE.
+  thread_followup_silence: false
+
   # Per-channel force-mention override — the opposite direction of
   # free_response_channels. Channels listed here ALWAYS require an
   # explicit @mention, even when require_mention is false globally.
@@ -31585,7 +31607,7 @@ Set this to `true` when the bot follows busy threads (via thread auto-engagement
 :::
 
 :::note Silence markers on messages not addressed to the bot
-When the bot answers a human message with only a [silence token](index.md#intentional-silence-tokens), Hermes normally posts a short notice instead so a question never goes unanswered. On Slack the token is allowed to stand when the message opened by @mentioning someone else, or was an unmentioned top-level message in a `free_response_channels` channel that starts its own thread (the default `reply_in_thread: true`). A 1:1 DM, a mention of the bot, a command, a reaction trigger, or a plain follow-up in a conversation the bot is part of (a thread, or a `reply_in_thread: false` channel) still gets the notice.
+When the bot answers a human message with only a [silence token](index.md#intentional-silence-tokens), Hermes normally posts a short notice instead so a question never goes unanswered. On Slack the token is allowed to stand when the message opened by @mentioning someone else, or was an unmentioned top-level message in a `free_response_channels` channel that starts its own thread (the default `reply_in_thread: true`). A 1:1 DM, a mention of the bot, a command, a reaction trigger, or a plain follow-up in a conversation the bot is part of (a thread, or a `reply_in_thread: false` channel) still gets the notice. Set `thread_followup_silence: true` to let the token stand on unaddressed replies in a channel thread too, for threads where people often talk to each other without @mentioning; DMs (1:1 and group), mentions of the bot, and flat channels keep the notice.
 :::
 
 :::info
@@ -54429,6 +54451,7 @@ These are set automatically by the Docker terminal backend when `proxy.enabled: 
 | `SLACK_ALLOW_ALL_USERS` | Allow any Slack user to trigger the bot (dev only). |
 | `SLACK_ALLOW_BOTS` | Accept messages from other Slack bots: `none` (default), `mentions`, or `all`. The bot always ignores its own messages. |
 | `SLACK_THREAD_REQUIRE_MENTION` | Require an explicit @mention for Slack thread replies while preserving top-level free-response channels |
+| `SLACK_THREAD_FOLLOWUP_SILENCE` | Let a bare silence marker stand on unaddressed Slack channel-thread replies instead of posting the unexpected-silence notice (default `false`) |
 | `SLACK_HOME_CHANNEL` | Default Slack channel for cron delivery |
 | `SLACK_HOME_CHANNEL_NAME` | Display name for the Slack home channel |
 | `GOOGLE_CHAT_PROJECT_ID` | GCP project hosting the Pub/Sub topic (falls back to `GOOGLE_CLOUD_PROJECT`) |
@@ -54644,7 +54667,7 @@ Three dashboard-auth providers ship in the box. For a remote Hermes Desktop conn
 | `HERMES_DESKTOP_IGNORE_EXISTING` | Set to `1` to make Desktop skip the installed runtime (`~/.hermes/hermes-agent`, or `%LOCALAPPDATA%\hermes\hermes-agent` on Windows) during backend resolution, so no local backend starts and Desktop shows the connect-or-install choice. The bundled runtime, `HERMES_DESKTOP_HERMES_ROOT`, an unpackaged source checkout, and `HERMES_DESKTOP_HERMES` still win. A runtime installed during this launch is used. Equivalent to `hermes desktop --ignore-existing`. |
 | `HERMES_DESKTOP_CWD` | Initial project directory for Desktop chat sessions. Set by `hermes desktop --cwd`. |
 | `HERMES_DESKTOP_PYTHON` | Absolute path to a Python interpreter for the backend, checked before Electron auto-resolves one for the source checkout. Used by worktree dev helpers (see [TUI & Desktop from Worktrees](../developer-guide/worktree-ui-dev.md)) to reuse a shared venv. |
-| `HERMES_DESKTOP_DEV_SERVER` | Vite dev-server URL the Electron shell loads instead of the packaged bundle (e.g. `http://127.0.0.1:5174`). Set automatically by `npm run dev`; only relevant when hacking on the app. |
+| `HERMES_DESKTOP_DEV_SERVER` | Vite dev-server URL the Electron shell loads instead of the packaged bundle (e.g. `http://127.0.0.1:5174`). Set automatically by `npm run dev`; only relevant when hacking on the app. A backend that inherits it also trusts that renderer's origin for CORS and WebSocket upgrades. |
 | `HERMES_DESKTOP_CDP_PORT` | Overrides the Chrome DevTools Protocol port the renderer exposes on `127.0.0.1` for DOM/CSS inspection tooling (default `9222`). Dev-server runs (`npm run dev`, `hgui`) open it automatically; a packaged app never does, and no value here changes that. Set to `off` to disable it on a dev run. Anything that can reach the port can execute code in the renderer. |
 | `HERMES_DESKTOP_NVIDIA_SWIFTSHADER` | (Desktop on Linux, NVIDIA only) Override for the EGL fallback that routes rendering through SwiftShader on driver series with a broken EGL probe (`580.x`, #40077): `1` forces the fallback on — the recovery hatch if a future series reintroduces the crash but is not yet in the closed list; `0` opts out and uses the native GPU path at your own risk. Force-on does not apply where another gate already disabled the GPU (remote display, WSLg, `HERMES_DESKTOP_DISABLE_GPU=0`). |
 | `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY` | (Desktop side) The in-app update check (`Help → Check for Updates…` and the passive update banner) reaches `api.github.com` through the proxy these standard variables name, with `NO_PROXY` exemptions honoured — the same convention `curl`, `npm` and `git` follow. Unset, the check connects directly. |
@@ -72577,24 +72600,24 @@ as a no-op compatibility alias for existing installation commands.
 > `HERMES_NEMO_RELAY_ATIF_*` settings. Those legacy variables no longer
 > configure Relay exporters themselves.
 
-On supported platforms, Hermes requires NeMo Relay 0.10 for managed provider
+On supported platforms, Hermes requires NeMo Relay 0.11 for managed provider
 and tool calls.
 
 ## Runtime Dependency and Data Boundary
 
 Hermes installs the platform-specific `nemo-relay` native wheel from the
-bounded `>=0.10,<0.11` dependency range. The published package is built from
+bounded `>=0.11,<0.12` dependency range. The published package is built from
 the [NVIDIA NeMo Relay repository](https://github.com/NVIDIA/NeMo-Relay).
 Unsupported platforms use the explicit no-op runtime described above rather
 than downloading a different implementation.
 
-Relay 0.10 requires observability configuration `version = 4`. Custom Python
+Relay 0.10 introduced observability configuration `version = 4`. Custom Python
 LLM execution intercepts receive `(name, request, context, next_call)`; the
 context exposes the selected request codec and, for non-streaming execution,
 the response codec. Native plugins must be rebuilt for Relay 0.10's ABI v7 and
 set their `compat.relay` lower bound to `0.10.0`. Workers that register LLM
 execution intercepts must update their callbacks and regenerate their protocol
-bindings. See Relay's [0.10 migration guide](https://docs.nvidia.com/nemo/relay/reference/migration-guides)
+bindings. See Relay's [0.10 migration guide](https://github.com/NVIDIA/NeMo-Relay/blob/0.10.0/docs/reference/migration-guides.mdx)
 for the complete upgrade checklist.
 
 Relay 0.10 also starts OpenTelemetry export on its own when an active Relay
@@ -72604,6 +72627,11 @@ configuration meets a nonblank `OTEL_EXPORTER_OTLP_ENDPOINT` (or a per-signal
 `hermes migrate relay` set `[components.config.opentelemetry] enabled = false`
 to keep the 0.9 behavior; add the same section to a hand-written file, or set
 `OTEL_SDK_DISABLED=true`, unless you want that export.
+
+Relay 0.11 keeps the configuration version and Python intercept callback shape.
+If you configure Relay plugins or exporters, review the [0.11 migration guide](https://github.com/NVIDIA/NeMo-Relay/blob/0.11.0/docs/reference/migration-guides.mdx)
+before upgrading. Automatic OTLP trace, log, and metric exporters require HTTPS
+for remote destinations unless their host is explicitly allowlisted.
 
 When Relay managed execution is active, the provider request and response pass
 through that native module in the Hermes process so configured interceptors can
@@ -93778,13 +93806,35 @@ Instead of the in-app setting, you can point the desktop at a backend with an en
 
 ## CORS
 
-The web server restricts CORS to localhost origins only:
+The web server grants CORS, and accepts browser WebSocket upgrades, only for its own origin: a
+loopback origin (`localhost`, `127.0.0.1`, `[::1]`) on the port the server is bound to. That is
+`http://127.0.0.1:9119` for a default `hermes dashboard`, the `--port` you chose, or the ephemeral
+port a Desktop backend binds. The packaged desktop app loads from `file://` and is not affected.
 
-- `http://localhost:9119` / `http://127.0.0.1:9119` (production)
-- `http://localhost:3000` / `http://127.0.0.1:3000`
-- `http://localhost:5173` / `http://127.0.0.1:5173` (Vite dev server)
+A backend spawned by a desktop dev build also trusts that build's own renderer (the loopback
+`HERMES_DESKTOP_DEV_SERVER` it inherits, such as an [`hgui` slot](../../developer-guide/worktree-ui-dev.md#hgui--desktop-app-from-the-worktree)
+on `5174+N`). No fixed dev-server port is trusted: pages served from any other local port, including
+Vite apps on `5173` or `5174`, get no CORS headers and their WebSocket upgrades are refused, so they
+cannot read the session token or open the terminal.
 
-If you run the server on a custom port, that origin is added automatically.
+Reached through a port forward (`ssh -L 8000:localhost:9119`, `docker -p 8080:9119`), the
+dashboard's own page still opens its WebSocket upgrades: an Origin that names exactly the host and
+port the upgrade was sent to is that page.
+
+A reverse proxy on another loopback port that rewrites `Host` to the backend's address (nginx on
+`https://localhost:8443` in front of `127.0.0.1:9119`) needs its address in `dashboard.public_url`
+(`webapp.public_url` for the Webapp). That exact origin (scheme, host and port) is then trusted
+too; other loopback ports still are not. The same rules apply on a `0.0.0.0` or `::` bind: sign-in
+cookies are `SameSite=Lax`, and browsers send them from a page on another port of the same host.
+
+A desktop dev build passes the variable to the backends it starts over SSH, and replaces a backend
+it started earlier for a different renderer URL. The sockets Desktop opens to a gateway on the same
+machine are one-use, ticketed native dials that carry no Origin, so a dev build can use a local
+gateway that is already running without restarting it, and it does not pass the variable to a
+gateway it starts (that gateway outlives the dev session). Only a connection that presents the dev
+renderer's Origin to a backend Desktop did not start (for example a remote backend you start
+yourself and reach directly) needs that backend started with `HERMES_DESKTOP_DEV_SERVER` set to the
+build's renderer URL.
 
 ## Development
 
@@ -93800,7 +93850,7 @@ npm install
 npm run dev
 ```
 
-The Vite dev server at `http://localhost:5173` proxies `/api` requests to the FastAPI backend at `http://127.0.0.1:9119`.
+The Vite dev server at `http://localhost:5173` proxies `/api` requests, WebSockets included, to the FastAPI backend at `http://127.0.0.1:9119` (set `HERMES_DASHBOARD_URL` to use another backend). It reads the session token from the backend server-side. It forwards WebSocket upgrades with their `Host` and `Origin` unchanged, so the page's Origin names the host and port it dialled and the backend admits it as same-origin without trusting port `5173`. This holds when `HERMES_DASHBOARD_URL` points at a port forward to the backend (for example `http://127.0.0.1:8000` through `ssh -L 8000:localhost:9119`). Vite's own CORS is turned off, so other local pages cannot read the token from the dev server either.
 
 The frontend is built with React 19, TypeScript, Tailwind CSS v4, and shadcn/ui-style components. Production builds output to `hermes_cli/web_dist/` which the FastAPI server serves as a static SPA.
 
