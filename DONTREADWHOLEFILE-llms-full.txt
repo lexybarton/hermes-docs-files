@@ -12951,6 +12951,12 @@ The review surface works in the interactive CLI and on messaging platforms
 in the pending JSON file). Memory writes have the same gate under
 `memory.write_approval` — see [Controlling memory writes](./memory.md#controlling-memory-writes-write_approval).
 
+To stop the agent from changing one *specific* skill at all, lock it:
+`hermes curator lock <skill>` (or the lock switch in Desktop). A locked skill stays
+readable and auto-loadable, but `skill_manage`, `write_file`, `patch` and `terminal`
+all refuse to change it, in every kind of session; your own edits still work. See
+[Locking a skill](./curator.md#locking-a-skill).
+
 > The separate `skills.guard_agent_created` setting is a content scanner
 > (dangerous-pattern heuristics), not an approval gate — the two are
 > independent. See [Guard on agent-created skill writes](../configuration.md#guard-on-agent-created-skill-writes).
@@ -13416,7 +13422,7 @@ A run has two phases:
 By default the curator only **prunes** — the deterministic inactivity pass marks skills stale and archives long-unused ones. The opinionated LLM **consolidation** pass (umbrella-building, merging overlapping skills) is off by default because it costs aux-model tokens on every run and makes broad structural changes to your library. Turn it on with `curator.consolidate: true`, or run it once on demand with `hermes curator run --consolidate`.
 :::
 
-Pinned skills are off-limits to both the curator's auto-transitions and the agent's own `skill_manage` tool. See [Pinning a skill](#pinning-a-skill) below.
+Pinned skills are skipped by the curator's auto-transitions, and the agent's `skill_manage` tool refuses to **delete** them; edits and patches still go through. To stop the agent from changing a skill at all, lock it instead. See [Pinning a skill](#pinning-a-skill) and [Locking a skill](#locking-a-skill) below.
 
 ## Configuration
 
@@ -13481,6 +13487,8 @@ hermes curator pause          # stop runs until resumed
 hermes curator resume
 hermes curator pin <skill>    # never auto-transition this skill
 hermes curator unpin <skill>
+hermes curator lock <skill>   # the agent may not change it
+hermes curator unlock <skill>
 hermes curator adopt <skill>    # hand an unmanaged skill to the curator
 hermes curator adopt --all-unmanaged   # hand over every unmanaged skill
 hermes curator list-unmanaged   # itemize skills with no provenance marker
@@ -13682,9 +13690,10 @@ Skills that ARE agent-created follow the full lifecycle:
 - Pinned skills bypass all auto-transitions
 - Archives are recoverable via `hermes curator restore <name>`
 
-If you want to protect a specific skill from ever being touched — for example a
-hand-authored skill you rely on — use `hermes curator pin <name>`. See the next
-section.
+If you want to protect an agent-created skill from archival, use
+`hermes curator pin <name>`. If you want the agent to stop changing a skill at all —
+for example a hand-authored skill you rely on — use `hermes curator lock <name>`.
+Both are described below.
 
 ## Pinning a skill
 
@@ -13708,7 +13717,37 @@ Only **agent-created** skills can be pinned — `hermes curator pin` refuses on 
 
 A small set of **protected built-ins** can be hardcoded as never-archivable and never-consolidatable, regardless of `curator.prune_builtins`, pin state, or LLM judgment. These back load-bearing UX, so silently archiving one would turn its slash command into an "Unknown command" error with no signal to you. (The set is currently empty — `plan`, its original member, graduated to a built-in `/plan` command with no skill on disk.) Protected built-ins are filtered out of the curator's candidate list entirely, so the consolidation pass never sees them.
 
-If you want a stronger guarantee than "no deletion" — for instance, freezing a skill's content entirely while the agent still reads it — edit `~/.hermes/skills/<name>/SKILL.md` directly with your editor. The pin guards tool-driven deletion, not your own filesystem access.
+If you want a stronger guarantee than "no deletion" — freezing a skill's content while the agent still reads and uses it — lock it (next section). Neither pin nor lock guards your own edits: your editor and the Desktop skill editor always work.
+
+## Locking a skill
+
+Pinning stops archival. Locking stops **the agent from changing a skill at all**, while the skill stays readable, listed in the skill index, auto-loadable and usable exactly as before.
+
+```bash
+hermes curator lock <skill>
+hermes curator unlock <skill>
+hermes curator status          # lists locked skills
+```
+
+In Desktop, open **Capabilities → Skills**, select the skill and use its lock switch.
+
+Once a skill is locked, every way the agent can write refuses it, in normal turns, cron jobs, subagents, the background self-improvement review and the curator pass alike, and even under `--yolo`:
+
+- **`skill_manage`** refuses `patch`, `edit`, `write_file`, `remove_file` and `delete`, for the single-op and the batch form.
+- **`write_file` and `patch`** refuse any path inside the skill's directory (`SKILL.md`, `references/`, `scripts/`, …).
+- **`terminal`** refuses commands that write there: redirections and `tee`, `cp`/`mv`/`rm`/`touch`/`mkdir`/`chmod`, `sed -i`/`perl -i`, `git` changes in the skill's tree, archive extraction into it, and inline `python -c`/`bash -c` code naming it, including after a `cd` into the skill. Reading the skill and running its scripts keep working.
+- The curator never archives a locked skill.
+- The agent cannot unlock it: `terminal` refuses `hermes curator unlock`, and the lock record (`skills/.usage.json`) is protected the same way while any skill is locked. The refusal tells the agent to describe the change it wanted so you can decide.
+
+Your own edits are not gated: editing the files in your editor or in the Desktop skill editor always works. To let the agent change it again, run `hermes curator unlock <skill>` or flip the switch.
+
+The flag is stored as `"locked": true` on the skill's entry in `~/.hermes/skills/.usage.json`, the same sidecar as `pinned`, so it is **per profile**: `hermes -p work curator lock deploy-runbook` locks that profile's copy only. Any skill that resolves in the profile can be locked (hand-written, agent-created, bundled or hub-installed); `lock` refuses a name it cannot resolve.
+
+What a lock is not:
+
+- It is a **policy check, not a sandbox.** The terminal check reads the command's write targets; a script that writes into the skill through its own logic, or `execute_code`, is not inspected. Pair it with filesystem permissions if you need a hard boundary.
+- If `.usage.json` is corrupt, the background passes are refused (fail closed) while normal turns proceed, so one broken file does not freeze every skill edit. Repair it, or run `hermes curator unlock <skill>` to rewrite it.
+- It does **not** stop `hermes update` / `hermes skills update` from refreshing a bundled or hub skill you have not modified; those are your commands, not agent writes.
 
 ## Usage telemetry
 
@@ -51021,7 +51060,7 @@ The install also ships `hermes-agent`, a minimal runner that sends one query and
 | `hermes send` | Send a one-shot message to a configured messaging platform (Telegram, Discord, Slack, Signal, SMS, …). Useful from shell scripts, cron jobs, CI hooks, and monitoring daemons — no agent loop, no LLM. |
 | `hermes peer` | Register peer Hermes gateways on other machines and DM their agents' canonical Bot Chats (`hermes peer dm <peer>[/<agent>] "…"`). The transport behind cross-machine bot-to-bot messaging. |
 | `hermes secrets` | Manage external secret sources (currently Bitwarden Secrets Manager) for pulling API keys at process startup instead of from `~/.hermes/.env`. |
-| `hermes migrate` | Diagnose and (optionally) rewrite `config.yaml` to replace references to retired models or deprecated settings (e.g. `migrate xai`). |
+| `hermes migrate` | Move over from another agent (`migrate grok-bot`, `migrate claude-code`, ... or bare to detect), or rewrite `config.yaml` for retired models and deprecated settings (`migrate xai`). |
 | `hermes codex-runtime` | Noninteractive counterpart of `/codex-runtime`: `migrate [--dry-run] [--json]` regenerates the Hermes-managed block in `~/.codex/config.toml` for the selected profile. See [Codex app-server runtime](../user-guide/features/codex-app-server-runtime.md#running-the-migration-from-a-script). |
 | `hermes status` | Show agent, auth, and platform status. |
 | `hermes usage` | Show the configured account's rate-limit windows (the `/usage` block) without a session; `--json` for scripts. |
@@ -51557,13 +51596,18 @@ Pull API keys from an external secret manager at process startup instead of stor
 ## `hermes migrate`
 
 ```bash
-hermes migrate <type>
+hermes migrate                 # find another agent's setup here and offer to import it
+hermes migrate <agent>         # openclaw, claude-code, codex, cursor, grok-bot or openbot
+hermes migrate <type>          # xai, relay
 ```
 
-Diagnose and (optionally) rewrite the active `config.yaml` to replace references to retired models or deprecated settings. A timestamped backup of the original `config.yaml` is taken before any rewrite (skip with `--no-backup`).
+Bare `hermes migrate` looks for OpenClaw, Claude Code, Codex CLI, Cursor, Grok Bot and OpenBot on this computer and offers to import what it finds, the same step a first `hermes setup` runs (without setup's own choices: OpenClaw keys come over only with `hermes migrate openclaw --migrate-secrets`). `hermes migrate <agent>` imports from that agent even when nothing is detected: it installs the [`agent-importers`](../user-guide/import-from-other-agents.md) plugin from the catalog when it is missing, then runs `hermes import-agent <agent>` (preview, then confirmation). It takes `--source`, `--dry-run`, `--overwrite` and `-y`; `grok-bot` and `openbot` also take `--activate-routines` and `--bot <name>`; `openclaw` takes `--migrate-secrets` (API keys and bot tokens come over only with it, unlike first-run setup, which passes it).
+
+The `xai` and `relay` types diagnose and (optionally) rewrite the active `config.yaml` to replace references to retired models or deprecated settings. A timestamped backup of the original `config.yaml` is taken before any rewrite (skip with `--no-backup`).
 
 | Subcommand | Description |
 |------------|-------------|
+| `openclaw`, `claude-code`, `codex`, `cursor`, `grok-bot`, `openbot` | Import that agent's setup (see above). |
 | `xai` | Scan `config.yaml` for references to xAI models scheduled for retirement on May 15, 2026 and (with `--apply`) rewrite them in-place to the official replacements per the xAI migration guide. Defaults to dry-run. |
 
 Common flags for migration subcommands:
@@ -51573,7 +51617,6 @@ Common flags for migration subcommands:
 | `--apply` | Rewrite `config.yaml` in-place (default: dry-run, no writes). |
 | `--no-backup` | Skip the timestamped backup of `config.yaml` when applying. |
 
-> Not to be confused with `hermes import-agent openclaw` (one-shot import of OpenClaw configuration into Hermes) — `hermes migrate` is the top-level config-rewrite command.
 
 
 ## `hermes codex-runtime`
@@ -83558,7 +83601,7 @@ hermes pm install chromium
 | `pm install --without NAME` | Do a bare install without the default optional package `NAME` (`chromium` or `cua-driver`), and record that choice. Later bare installs and `hermes update` also leave it out. The installers' `--skip-browser` / `-SkipBrowser` and `--skip-computer-use` / `-SkipComputerUse` (`--without cua-driver`) use this. The browser opt-out passes the legacy name `--without agent-browser`, which every PM release accepts and this one reads as `chromium`; a choice recorded under that name still skips `chromium`. |
 | `pm install --tools-only` | Install that tool closure and put it on PATH, then stop. The venv sync does not run. |
 | `pm env [names...]` | Print installed packages' PM-contributed environment values as JSON. It does not install missing packages, though a cold Hermes launch may prepare its own Python runtime first. |
-| `pm doctor` | Check installed tool identities, files, and digests against the lock. |
+| `pm doctor` | Check installed tool identities, files, and digests against the lock, and look for corrupt entries in PM's uv cache. `--repair` removes those entries so they are fetched again. |
 | `pm repair` | Rebuild the recorded Python dependency set in a new generation, validate it, then select it. Does not update pins, features, or plugin configuration. |
 | `pm environment NAME --extra EXTRA` / `--requirement REQ` | Make the isolated side environment `HERMES_HOME/environments/NAME` current and print only its Python path on stdout (progress goes to stderr), for shell callers such as skills: `PY="$(hermes pm environment documents --extra documents --extra documents-pdf)"`. `--extra` installs the pinned requirements of extras declared in `pyproject.toml`; `--requirement` takes bounded ad hoc requirements. The environment records its own lock, and only a changed requirement set or Python pin builds a new generation. Concurrent calls serialize on the environment's lock, and a rebuild lands in a new generation, so a caller already using the previous one keeps its files. An explicit install: it runs even where lazy installs are off. Never `pip install` into the result. |
 | `pm status` | Print the latest sync/update receipt as JSON, or report that no receipt exists. |
@@ -83635,6 +83678,7 @@ without upload times, it stops with `has no publish time`; use
 - **New environment requires restart:** restart the affected Hermes process. Do not add a second site-packages tree to its live imports.
 - **Dependency conflict:** read `hermes pm status`. Correct the plugin requirements before retrying admission.
 - **Damaged Python dependencies:** run `hermes pm repair`, then restart Hermes. Repair replays the selected generation's saved workspace and lock without parsing plugin configuration. An unreadable record or missing saved lock fails without selecting a reduced dependency set. Before a generation exists, repair uses the shipped or committed lock and recorded feature set.
+- **Corrupt cached package** (`The wheel is invalid`, `RECORD file is invalid`): a machine stop during an install can leave a uv cache entry whose files are empty or NUL-filled. Installs remove the damaged package from PM's uv cache and retry on their own; `hermes pm doctor` reports such entries and `hermes pm doctor --repair` removes them. If the same package is still invalid after a fresh download, the package source is serving a broken wheel.
 - **Interrupted dependency install:** startup requests the same PM repair before dependency activation. Automatic attempts are bounded; `pm repair` retries explicitly. A failed repair preserves the previous selection and its retry marker.
 - **Damaged Python executable or application source:** repair or reinstall through the package owner. PM cannot run without those files. Signed payload files are never modified by dependency repair.
 - **Unknown package or extra:** use the declared name. `pm install` takes package names, not Python extra names or pip specifications.
@@ -84152,7 +84196,10 @@ always-on-top overlays, OS-window inspection, external-terminal launch and the u
 
 Chats written before the gateway owned sessions show their history but cannot be continued from the
 browser until they are adopted: run `hermes sessions adopt` once on the host (`hermes -p <profile>
-sessions adopt` for another profile), or open them once in the native Desktop, TUI or CLI.
+sessions adopt` for another profile), or open them once in the native Desktop, TUI or CLI. That
+includes chats a phone app started through the dashboard login under its own label (`mobile`, `ios`):
+they continue like Desktop chats. Rows a separate WebUI process wrote with its own agent, and old cron
+or subagent runs, stay read-only.
 
 ### Open it from your phone or another computer
 
@@ -84344,6 +84391,17 @@ A real terminal lives in the right sidebar, next to the file browser:
 - **Ctrl+`** shows the terminal (opening one if none exist); **Ctrl+Shift+`** spawns an additional one. Multiple terminals stack in a tab rail — **Ctrl+Shift+↓/↑** walk between them, **Ctrl+Shift+W** closes the active one.
 - **Shells persist while hidden.** Closing or hiding the panel doesn't kill your shell — every open terminal stays mounted with its scrollback and running processes intact until you explicitly close it.
 - **Add to chat** — select terminal output and send it into the composer as context for your next message.
+
+**Per-gateway terminals.** Each terminal tab runs on the gateway it was opened on, and keeps running there
+when you pick another gateway in Sessions. **New terminal** (**+** on the terminal rail) opens on the
+gateway picked in Sessions. When an SSH gateway is registered, the chevron under **+** (or a
+right-click on **+**) opens one on **This device** or any SSH gateway, so several hosts can be open
+side by side. A tab shows its gateway as a small glyph on its rail square and in its tooltip
+(`zsh · NAS`); This device tabs are labeled only once tabs run on more than one host. URL/token and
+cloud gateways have no shell access, so a terminal opened while one is picked runs on This device
+and says so. After a relaunch, each tab reopens on its own gateway. Editing an SSH gateway
+disconnects its tabs (press Enter to reconnect). If a tab's gateway was removed, the tab says so and
+does not start a shell anywhere else.
 
 ### Live subagents
 
@@ -94468,13 +94526,13 @@ Causes worth checking:
 
 # Import from Other Agents
 
-`hermes import-agent` imports your existing **OpenClaw**, **Claude Code**, **OpenAI Codex CLI** or **Cursor** setup into Hermes with one command. You always see a per-item plan before anything is written, and `--dry-run` never touches disk.
+`hermes import-agent` imports your existing **OpenClaw**, **Claude Code**, **OpenAI Codex CLI**, **Cursor**, **Grok Bot** or **OpenBot** setup into Hermes with one command. You always see a per-item plan before anything is written, and `--dry-run` never touches disk.
 
 The command comes from the official **`agent-importers` plugin** from the [plugin catalog](./features/plugins.md), maintained by Nous Research in [NousResearch/hermes-official-plugins](https://github.com/NousResearch/hermes-official-plugins/tree/main/agent-importers).
 
 ## The easy way: `hermes setup`
 
-On a fresh install, `hermes setup` checks for `~/.openclaw` (or legacy `~/.clawdbot` / `~/.moltbot`), `~/.claude`, `~/.codex` and `~/.cursor` before anything else. When it finds one it asks **"Import your setup from Claude Code?"** (naming what it found); with several found you then pick which from a checklist, all checked. Say yes and setup installs the `agent-importers` plugin from the catalog, unless you already have it, and runs the import below for each pick, preview and confirmation included. For OpenClaw it passes `--migrate-secrets`, as Hermes' old built-in OpenClaw step did, so your API keys and bot tokens come over and the provider and messaging sections that follow are already filled in. If you then pick Quick Setup and the import brought a model along with its key, setup asks whether to keep that model (the default) or switch to Nous Portal. Say no, or have none of these folders, and nothing is installed. Already set up? Use the commands below.
+On a fresh install, `hermes setup` checks for `~/.openclaw` (or legacy `~/.clawdbot` / `~/.moltbot`), `~/.claude`, `~/.codex`, `~/.cursor` and the Grok Bot desktop app (or a `grok-bot-export*` file in `~/Downloads`) and OpenBot before anything else. When it finds one it asks **"Import your setup from Claude Code?"** (naming what it found); with several found you then pick which from a checklist, all checked. Say yes and setup installs the `agent-importers` plugin from the catalog, unless you already have it, and runs the import below for each pick, preview and confirmation included. For OpenClaw it passes `--migrate-secrets`, as Hermes' old built-in OpenClaw step did, so your API keys and bot tokens come over and the provider and messaging sections that follow are already filled in. If you then pick Quick Setup and the import brought a model along with its key, setup asks whether to keep that model (the default) or switch to Nous Portal. Say no, or have none of these folders, and nothing is installed. Already set up? Run `hermes migrate` for the same offer, `hermes migrate <agent>` (`openclaw`, `claude-code`, `codex`, `cursor`, `grok-bot`, `openbot`) to import from one agent, installing the plugin when it is missing, or use the commands below.
 
 ## By hand
 
@@ -94533,6 +94591,25 @@ Claude's `Bash(npm run test:*)` prefix rules become `npm run test*` globs. Non-`
 | `skills/**/<name>/` (dirs with `SKILL.md`, category folders allowed) | `~/.hermes/skills/cursor-imports/<name>/` |
 
 `.mdc` frontmatter (`description`, `globs`, `alwaysApply`) is routing metadata for Cursor's rule engine and is stripped; only the rule body is imported. A skill is the folder holding `SKILL.md`, so `skills/shipping/land-it/` imports as `cursor-imports/land-it/`; two skills with the same name in different folders are reported as a conflict.
+
+### Grok Bot
+
+Grok Bot keeps your Bots, routines and skills in its cloud account and has no export button, so each Bot exports itself. Run `hermes migrate grok-bot` (or `hermes import-agent grok-bot`): with no export yet it prints a message to paste into a Bot's chat. The Bot writes `grok-bot-export.json` (or replies with one JSON block) without changing anything; download it and run `hermes import-agent grok-bot --source <file>`. Files saved as `~/Downloads/grok-bot-export*` are found without `--source`. Repeat per Bot, into the profile that should own its work (`hermes -p <profile> ...`).
+
+| Grok Bot | Hermes |
+|---|---|
+| Routine on a schedule | [Cron job](./features/cron.md) `<Bot>: <routine>` with the same schedule, time zone and skills, created **paused** |
+| Routine on an event (Slack, GitHub, email, webhook, ...) | Its instruction and trigger saved to `grok-bot-import/<bot>-event-routines.md` to rebuild |
+| Skills | `skills/grok-bot-imports/<name>/` |
+| What the Bot remembers / facts about you | `memories/MEMORY.md` / `memories/USER.md` |
+| The Bot's role | `SOUL.md` while it still holds Hermes' default, else memory entries |
+| Apps with a remote MCP URL | `mcp_servers` in `config.yaml` |
+
+Routines arrive paused so they don't run twice while the Grok copy is still on: turn it off in Grok Bot, then `hermes cron resume <id>` (the import prints each id), or pass `--activate-routines`. Point a job's output somewhere with `hermes cron edit <id> --deliver telegram`. An export carrying credential-looking keys is refused, and token-shaped text is redacted.
+
+### OpenBot
+
+`hermes migrate openbot` (or `hermes import-agent openbot`) reads the OpenBot desktop app's local database (`openbot.db` in `~/Library/Application Support/OpenBot`, `~/.config/OpenBot` or `%APPDATA%\OpenBot`; read-only, so OpenBot can stay open) and each agent's workspace under `~/OpenBot/Agents`. Routines become paused cron jobs with the same schedule and time zone, the agent's description becomes `SOUL.md` (or memory entries), its memories go to `memories/MEMORY.md`, its workspace skills to `skills/openbot-imports/`, and MCP servers to `config.yaml` with secret-looking env vars stripped. `--bot <name>` picks agents; `hermes -p <profile> ...` gives an agent its own profile. Chats and provider accounts stay in OpenBot.
 
 ## What is never imported
 
