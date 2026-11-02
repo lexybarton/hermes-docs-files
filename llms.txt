@@ -33,7 +33,7 @@ Repo: https://github.com/NousResearch/hermes-agent
 - [Egress proxy](https://hermes-agent.nousresearch.com/docs/user-guide/egress)
 - [Egress credential-injection proxy (iron-proxy)](https://hermes-agent.nousresearch.com/docs/user-guide/egress/iron-proxy)
 - [Network Egress Isolation (Docker)](https://hermes-agent.nousresearch.com/docs/user-guide/egress/network-isolation): Segment Docker networks so the agent sandbox can only reach allowlisted hosts
-- [Import from Other Agents](https://hermes-agent.nousresearch.com/docs/user-guide/import-from-other-agents): One-command import of an OpenClaw (~/.openclaw), Claude Code (~/.claude), OpenAI Codex CLI (~/.codex) or Cursor (~/.cursor) setup into Hermes — instructions, rules, allowlists, MCP servers, skills, and memories.
+- [Import from Other Agents](https://hermes-agent.nousresearch.com/docs/user-guide/import-from-other-agents): One-command import of an OpenClaw (~/.openclaw), Claude Code (~/.claude), OpenAI Codex CLI (~/.codex), Cursor (~/.cursor), Grok Bot or OpenBot setup into Hermes — instructions, rules, allowlists, MCP servers, skills, memories and Grok Bot / OpenBot routines.
 - [Local Models](https://hermes-agent.nousresearch.com/docs/user-guide/local-models): Run models entirely on your own machine — no account, no API key, nothing leaves your computer.
 - [Managed Scope](https://hermes-agent.nousresearch.com/docs/user-guide/managed-scope): Administrator-pinned, user-immutable config and secrets via a system-level managed directory
 - [Connecting Desktop to Many Hermes Instances](https://hermes-agent.nousresearch.com/docs/user-guide/multi-connection-desktop)
