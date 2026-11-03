@@ -11425,8 +11425,10 @@ destructive-verb list misses:
   an uploading `curl`/`wget`. An `Authorization` header is ordinary API use and
   is not flagged.
 - Invisible or bidirectional Unicode control characters (zero-width spaces,
-  right-to-left overrides, isolates), which make the command you approve differ
-  from the one that runs. Emoji joiner sequences are not flagged.
+  right-to-left overrides, isolates, and variation selectors that do not follow
+  an emoji), which make the command you approve differ from the one that runs.
+  Emoji joiner sequences, keycap emoji (`1️⃣`, `#️⃣`), and an emoji's own
+  presentation selector (as in folder names like `ℹ️ Info`) are not flagged.
 
 Both go through the normal approval flow like every other dangerous pattern.
 
@@ -24074,6 +24076,14 @@ Each time the event fires, Hermes spawns a subprocess for every matching hook (m
 `profile` names the Hermes profile that fired the hook (`"default"` outside profiles), so one
 script can serve every profile behind a multiplexed gateway; the subprocess also runs with that
 profile's `HERMES_HOME`. `tool_name` and `tool_input` are `null` for non-tool events (`pre_llm_call`, `subagent_stop`, session lifecycle). The `extra` dict carries all event-specific kwargs (`user_message`, `conversation_history`, `child_role`, `duration_ms`, …). Unserialisable values are stringified rather than omitted.
+
+`extra.kanban_task_id` identifies the board task owned by the execution firing the
+hook. It is empty for ordinary sessions, delegated children and in-process cron
+runs, even if their process inherited a worker environment. `extra.task_id` keeps
+its existing turn/session meaning. Use the board identity in a policy hook instead
+of inferring it from workspace paths. The hook subprocess still has its worker
+identity environment stripped; payload metadata does not grant worker authority.
+The same field is included by the shared outbound-webhook payload builder.
 
 **stdout — optional response:**
 
@@ -74111,10 +74121,12 @@ consumers. They are not interchangeable cleanup targets.
 - Native staging prunes obsolete entries only in its build-owned tool store.
   It does not prune the user's machine-wide store.
 - Native staging retains `uv-cache/` for offline mutable-environment rebuilds.
-  It copies extracted wheels and index/revision metadata, but excludes redundant
-  wheel ZIPs and cached sdist `src/` trees (including Rust `target/` outputs)
-  before copying. The provider cache is unchanged; native signing reaches the
-  extracted binaries without scanning build-only artifacts.
+  It copies extracted wheels, built wheel ZIPs and index/revision metadata, but
+  excludes cached sdist `src/` trees (including Rust `target/` outputs) before
+  copying. On macOS and Linux, uv's wheel entries stay relative symlinks into
+  `archive-v0/`, so each unpacked wheel ships once; on Windows uv writes
+  pointer files instead. The provider cache is unchanged; native
+  signing reaches the extracted binaries without scanning build-only artifacts.
 - PM-runtime and application builds share the provider's persistent uv cache.
   CI restores/saves that cache, not the temporary build HOME. Failed builds
   retain completed wheels. General PM staging uses its v2 cache namespace;
