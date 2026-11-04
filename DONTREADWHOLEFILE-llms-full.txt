@@ -12580,7 +12580,7 @@ metadata:
 | `requires_toolsets` | Skill is **hidden** when the listed toolsets are unavailable. Shown when they're present. |
 | `requires_tools` | Same, but checks individual tools. |
 
-**Example:** The built-in `duckduckgo-search` skill uses `fallback_for_toolsets: [web]`. When you have `FIRECRAWL_API_KEY` set, the web toolset is available and the agent uses `web_search` — the DuckDuckGo skill stays hidden. If the API key is missing, the web toolset is unavailable and the DuckDuckGo skill automatically appears as a fallback.
+**Example:** a curl-based search skill declaring `fallback_for_toolsets: [web]` stays hidden while the web toolset is available and appears only when it is disabled, so the agent still has a search path.
 
 Skills without any conditional fields behave exactly as before — they're always shown.
 
@@ -13093,7 +13093,7 @@ Default taps (browsable without any setup):
 - [anthropics/skills](https://github.com/anthropics/skills)
 - [huggingface/skills](https://github.com/huggingface/skills)
 - [NVIDIA/skills](https://github.com/NVIDIA/skills) — NVIDIA-verified skills (signed `skill.oms.sig` + governance `skill-card.md`)
-- [wandb/skills](https://github.com/wandb/skills), [qdrant/skills](https://github.com/qdrant/skills), [pinecone-io/skills](https://github.com/pinecone-io/skills) — each vendor's own skills for its product
+- [wandb/skills](https://github.com/wandb/skills), [qdrant/skills](https://github.com/qdrant/skills), [pinecone-io/skills](https://github.com/pinecone-io/skills), [makenotion/skills](https://github.com/makenotion/skills), [Airtable/skills](https://github.com/Airtable/skills), [Shopify/Shopify-AI-Toolkit](https://github.com/Shopify/Shopify-AI-Toolkit) — each vendor's own skills for its product
 - [garrytan/gstack](https://github.com/garrytan/gstack)
 - [K-Dense-AI/scientific-agent-skills](https://github.com/K-Dense-AI/scientific-agent-skills) and [synthetic-sciences/openscience](https://github.com/synthetic-sciences/openscience) — ~480 scientific research skills (bioinformatics, chemistry, physics, ML training, scholarly tooling), grouped under one `science` category. Community trust: every install is security-scanned. Many wrap third-party tools with their own licenses (some GPL; KEGG requires a commercial license for non-academic use) — check each skill's prerequisites.
 
@@ -13214,7 +13214,7 @@ Important behavior:
 |-------|--------|--------|
 | `builtin` | Ships with Hermes | Always trusted |
 | `official` | `optional-skills/` in the repo | Built-in trust, no third-party warning |
-| `trusted` | Trusted registries/repos such as `openai/skills`, `anthropics/skills`, `huggingface/skills`, `NVIDIA/skills`, `wandb/skills`, `qdrant/skills`, `pinecone-io/skills` | More permissive policy than community sources |
+| `trusted` | Trusted registries/repos such as `openai/skills`, `anthropics/skills`, `huggingface/skills`, `NVIDIA/skills`, `wandb/skills`, `qdrant/skills`, `pinecone-io/skills`, `makenotion/skills`, `Airtable/skills`, `Shopify/Shopify-AI-Toolkit` | More permissive policy than community sources |
 | `community` | Everything else (`skills.sh`, well-known endpoints, custom GitHub repos, most marketplaces) | Non-dangerous findings can be overridden with `--force`; `dangerous` verdicts stay blocked |
 
 ### Update lifecycle
@@ -50559,7 +50559,7 @@ metadata:
 | `fallback_for_toolsets` | Skill is **hidden** when ANY listed toolset **is** available |
 | `fallback_for_tools` | Skill is **hidden** when ANY listed tool **is** available |
 
-**Use case for `fallback_for_*`:** Create a skill that serves as a workaround when a primary tool isn't available. For example, a `duckduckgo-search` skill with `fallback_for_tools: [web_search]` only shows when the web search tool (which requires an API key) is not configured.
+**Use case for `fallback_for_*`:** Create a skill that serves as a workaround when a primary tool isn't available. For example, a curl-based search skill with `fallback_for_tools: [web_search]` only shows when the `web_search` tool is disabled.
 
 **Use case for `requires_*`:** Create a skill that only makes sense when certain tools are present. For example, a web scraping workflow skill with `requires_toolsets: [web]` won't clutter the prompt when web tools are disabled.
 
@@ -54314,9 +54314,8 @@ Secrets consumed by specific bundled / optional skills. Each is only needed if y
 
 | Variable | Used by skill | Description |
 |----------|---------------|-------------|
-| `NOTION_API_KEY` | `notion` | Notion integration token. |
+| `NOTION_API_KEY` | Teams meeting pipeline | Notion integration token for the Notion sink. |
 | `LINEAR_API_KEY` | `linear` | Linear personal API key. |
-| `AIRTABLE_API_KEY` | `airtable` | Airtable personal access token. |
 | `TENOR_API_KEY` | `gif-search` | Tenor API key for GIF search. |
 
 ### Langfuse Observability
@@ -56363,7 +56362,6 @@ hermes skills uninstall <skill-name>
 | [**blackbox**](../user-guide/skills/optional/autonomous-ai-agents/autonomous-ai-agents-blackbox.md) | Delegate coding tasks to the Blackbox AI multi-model CLI. |
 | [**dynamic-workflow**](../user-guide/skills/optional/autonomous-ai-agents/autonomous-ai-agents-dynamic-workflow.md) | Plan-in-code fan-outs, adversarial verification, waves. |
 | [**grok**](../user-guide/skills/optional/autonomous-ai-agents/autonomous-ai-agents-grok.md) | Delegate coding to xAI Grok Build CLI (features, PRs). |
-| [**honcho**](../user-guide/skills/optional/autonomous-ai-agents/autonomous-ai-agents-honcho.md) | Configure and troubleshoot Honcho memory for Hermes. |
 | [**opencode**](../user-guide/skills/optional/autonomous-ai-agents/autonomous-ai-agents-opencode.md) | Delegate coding to OpenCode CLI (features, PR review). |
 | [**openhands**](../user-guide/skills/optional/autonomous-ai-agents/autonomous-ai-agents-openhands.md) | Delegate coding to OpenHands CLI (model-agnostic, LiteLLM). |
 
@@ -56522,7 +56520,6 @@ hermes skills uninstall <skill-name>
 
 | Skill | Description |
 |-------|-------------|
-| [**mpp-agent**](../user-guide/skills/optional/payments/payments-mpp-agent.md) | Pay HTTP 402 APIs via Machine Payments Protocol (MPP). |
 | [**stripe-link-cli**](../user-guide/skills/optional/payments/payments-stripe-link-cli.md) | Agent payments via Stripe Link — cards, SPT, approvals. |
 | [**stripe-projects**](../user-guide/skills/optional/payments/payments-stripe-projects.md) | Provision SaaS services + sync creds via Stripe Projects. |
 
@@ -56530,17 +56527,14 @@ hermes skills uninstall <skill-name>
 
 | Skill | Description |
 |-------|-------------|
-| [**airtable**](../user-guide/skills/optional/productivity/productivity-airtable.md) | Airtable REST API via curl. Records CRUD, filters, upserts. |
 | [**box**](../user-guide/skills/optional/productivity/productivity-box.md) | Box manages cloud files, sharing, search, and metadata. |
 | [**canvas**](../user-guide/skills/optional/productivity/productivity-canvas.md) | Fetch Canvas LMS courses and assignments via API token. |
 | [**decision-questionnaire**](../user-guide/skills/optional/productivity/productivity-decision-questionnaire.md) | Turn an unanswerable decision into a questionnaire doc. |
 | [**here-now**](../user-guide/skills/optional/productivity/productivity-here-now.md) | Publish sites to &#123;slug&#125;.here.now and store files in Drives. |
 | [**live-dashboard**](../user-guide/skills/optional/productivity/productivity-live-dashboard.md) | Build self-updating dashboards from live sources. |
 | [**memento-flashcards**](../user-guide/skills/optional/productivity/productivity-memento-flashcards.md) | Spaced-repetition flashcards: create, review, quiz, export. |
-| [**notion**](../user-guide/skills/optional/productivity/productivity-notion.md) | Notion API + ntn CLI: pages, databases, markdown, Workers. |
 | [**property-listings**](../user-guide/skills/optional/productivity/productivity-property-listings.md) | Present property and rental listings as desktop cards. |
 | [**shop**](../user-guide/skills/optional/productivity/productivity-shop.md) | Shop catalog search, checkout, order tracking, returns. |
-| [**shopify**](../user-guide/skills/optional/productivity/productivity-shopify.md) | Query Shopify Admin/Storefront GraphQL APIs via curl. |
 | [**siyuan**](../user-guide/skills/optional/productivity/productivity-siyuan.md) | Query and edit a SiYuan knowledge base via its API. |
 | [**telephony**](../user-guide/skills/optional/productivity/productivity-telephony.md) | Provision Twilio numbers, SMS/MMS, and AI outbound calls. |
 
@@ -56553,7 +56547,6 @@ hermes skills uninstall <skill-name>
 | [**darwinian-evolver**](../user-guide/skills/optional/research/research-darwinian-evolver.md) | Evolve prompts/regex/SQL/code with Imbue's evolution loop. |
 | [**domain-intel**](../user-guide/skills/optional/research/research-domain-intel.md) | Passive recon of subdomains, SSL certs, WHOIS, and DNS. |
 | [**drug-discovery**](../user-guide/skills/optional/research/research-drug-discovery.md) | Drug discovery: ChEMBL search, drug-likeness, interactions. |
-| [**duckduckgo-search**](../user-guide/skills/optional/research/research-duckduckgo-search.md) | Free keyless web, news, and image search via ddgs. |
 | [**gitnexus-explorer**](../user-guide/skills/optional/research/research-gitnexus-explorer.md) | Serve an interactive codebase knowledge graph web UI. |
 | [**llm-wiki**](../user-guide/skills/optional/research/research-llm-wiki.md) | Karpathy's LLM Wiki: build/query interlinked markdown KB. |
 | [**osint-investigation**](../user-guide/skills/optional/research/research-osint-investigation.md) | Follow the money via public records and sanctions data. |
@@ -56562,7 +56555,6 @@ hermes skills uninstall <skill-name>
 | [**research-paper-writing**](../user-guide/skills/optional/research/research-research-paper-writing.md) | Write ML papers for NeurIPS/ICML/ICLR: design→submit. |
 | [**rss-feeds**](../user-guide/skills/optional/research/research-rss-feeds.md) | Read RSS, Atom, JSON feeds; discover feeds behind a page. |
 | [**scrapling**](../user-guide/skills/optional/research/research-scrapling.md) | Scrape sites with stealth browsing and Cloudflare bypass. |
-| [**searxng-search**](../user-guide/skills/optional/research/research-searxng-search.md) | Free keyless meta-search aggregating 70+ engines. |
 
 ## security
 
@@ -64915,11 +64907,12 @@ verify destination readiness before removing the preview application. Keeping
 the qualified receiver manifest immutable lets an offline preview migrate after
 the destination channel has advanced; the destination subsequently owns updates.
 
-The current workflow builds the bundled variant, on ARM64 and Intel runners.
-Light has separate client/feed routing but no release matrix leg in this change.
+The current workflow builds the bundled variant on ARM64 runners only; there is
+no Intel (x64) leg. Light has separate client/feed routing but no release matrix
+leg in this change.
 
-`python -m scripts.releases.r2 finalize` requires one metadata file for each architecture,
-named `arm64-CHANNEL-mac.yml` and `x64-CHANNEL-mac.yml`. It rejects wrong
+`python -m scripts.releases.r2 finalize` requires exactly one metadata file,
+named `arm64-CHANNEL-mac.yml`. It rejects wrong
 versions, variants, architectures, hashes and inconsistent legacy path fields.
 Each referenced ZIP/DMG is streamed back and checked against its SHA-512 and
 size. Publication checks the live version, conditionally replaces its ETag,
@@ -74521,7 +74514,7 @@ files on `main`.
    `tests/ci/test_stable_release_commit_threading.py` enforces that.
 4. Run the lanes the claim records: by default the whole source, Docker, Nix,
    PM bundle, install/update, Windows, signed-package, and native-upgrade
-   acceptance graph, without macOS Intel and Termux.
+   acceptance graph, without Termux.
 5. Push immutable versioned Docker and R2 artifacts from the tested bytes. The
    Docker image is pushed as soon as its own tests pass, tagged by the attempt
    ref. Do not move `stable` or `latest` aliases yet and do not rebuild for
@@ -74597,7 +74590,7 @@ a test lane is a suite that gates the release. `release` starts from the
 default set and edits it:
 
 ```sh
-# The default: everything except macOS Intel and Termux
+# The default: everything except Termux
 python scripts/release.py release --commit "$(git rev-parse origin/main)" --remote origin
 # Only the signed Windows bundles and the Docker image, no tests
 python scripts/release.py release --commit "$(git rev-parse origin/main)" --only windows,docker --remote origin
@@ -74605,8 +74598,8 @@ python scripts/release.py release --commit "$(git rev-parse origin/main)" --only
 python scripts/release.py release --commit "$(git rev-parse origin/main)" --without windows --remote origin
 # Only the Store bundle: no Azure signing anywhere
 python scripts/release.py release --commit "$(git rev-parse origin/main)" --only windows-store --remote origin
-# Everything, plus macOS Intel, without the install/update E2E
-python scripts/release.py release --commit "$(git rev-parse origin/main)" --with macos-intel --without install-e2e --remote origin
+# Everything, plus Termux, without the install/update E2E
+python scripts/release.py release --commit "$(git rev-parse origin/main)" --with termux --without install-e2e --remote origin
 ```
 
 `--only` replaces the default set, `--with` adds lanes and `--without`
@@ -74619,7 +74612,6 @@ lists every lane.
 | `windows` | on | signed Windows x64 and arm64 MSIX and the universal bundle, which feed the update channel |
 | `windows-store` | on | the unsigned Microsoft Store bundle, submitted to Partner Center (needs no Azure signing) |
 | `macos-arm64` | on | macOS Apple Silicon DMG and ZIP |
-| `macos-intel` | off | macOS Intel DMG and ZIP: unsupported on `main`, and its runner adds over an hour |
 | `termux` | off | Termux (Android aarch64) APT package |
 | `ci`, `nix`, `docker-tests`, `pm-bundle`, `windows-live`, `install-e2e`, `bootstrap-version` | on | the standalone suites |
 | `termux-checks` | on | Termux verification; runs only with `termux` |
@@ -74643,7 +74635,8 @@ requires each job they remove to report `skipped`, and every other gated job to
 report `success`. A job that ran although a lane removes it also blocks the
 release. A claim cut before lanes existed (`skipBundles`, `skipTests`,
 `includeMacosIntel`, `includeTermux`) reads as the lane set that gated the same
-jobs. A claim without `lanesRevision` was cut when `windows` also meant the Store
+jobs. macOS Intel is no longer built, so such a claim reads only while its
+`includeMacosIntel` is absent or `false`. A claim without `lanesRevision` was cut when `windows` also meant the Store
 bundle, so its `windows` reads as `windows` plus `windows-store`.
 
 What a release publishes follows what it built:
@@ -74672,11 +74665,11 @@ What a release publishes follows what it built:
   claim's `smoke` lane. The next full release uses that manifest as its upgrade
   baseline like any other. Cut a normal release after an untested one.
 
-When macOS Intel is left out, its rows are absent from the candidate manifest,
-the release body's downloads table and the downloads page. There is one macOS
-stable feed (`releases/darwin/stable/stable-mac.yml`), and `promote` replaces it
-with the arm64 leg alone, so Intel Macs on that feed get no update until a
-release is cut with `--with macos-intel`. When Termux is left out the APT
+No release builds macOS Intel: the candidate manifest, the release body's
+downloads table and the downloads page carry no Intel Mac row. There is one
+macOS stable feed (`releases/darwin/stable/stable-mac.yml`), and `promote`
+writes it from the arm64 leg alone, so Intel Macs on that feed get no
+update. When Termux is left out the APT
 indexes are not rewritten, so the APT channel stays on its previous release.
 A release that adds a target back after one that left it out has no published
 baseline for it, so that target's upgrade arm is skipped like a first release.
@@ -74787,10 +74780,10 @@ published release with a Termux R2 handoff. Explicit non-publishing desktop buil
 retain no downloadable job artifacts.
 
 The desktop workflow takes a `jobs` input with the groups `darwin-arm64`,
-`darwin-x64`, `win32-arm64`, `win32-x64`, `win32-bundle`, `linux-x64`,
-`linux-arm64`, and `termux`. Stable calls it once per group, except the linux
-groups, which wait for a real Linux build, and the `darwin-x64`, `termux` and
-any other group whose lane the claim leaves out, which it does not call. Each Mac arch and the Windows bundle
+`win32-arm64`, `win32-x64`, `win32-bundle`, `linux-x64`, `linux-arm64`, and
+`termux`. Stable calls it once per group, except the linux groups, which wait
+for a real Linux build, and the `termux` and any other group whose lane the
+claim leaves out, which it does not call. The Mac arch and the Windows bundle
 stage a receipt, and each install arm starts from its own receipt as soon as
 its own bytes are staged. `acceptance` is the one join that blocks publication.
 
@@ -76795,18 +76788,15 @@ PRs will be accepted to fix issues with them, but they will take precedence belo
 
 ### Build targets and support priority
 
-Stable releases build the macOS desktop bundle for Apple Silicon (`arm64`) only.
-The Intel macOS (`x64`) bundle and the Termux APT package are **not built by
-default**: a release includes them only when it is cut with
-`release.py release --with macos-intel` or `--with termux`. A release
-without macOS Intel replaces the one shared macOS stable update feed with an
-arm64-only feed, so Intel Macs installed from a desktop bundle get no update
-until a release is cut with `--with macos-intel`. A release without Termux
-leaves the Termux APT channel on its previous release.
+Releases build the macOS desktop bundle for Apple Silicon (`arm64`) only; no
+release or CI workflow builds or tests an Intel macOS (`x64`) bundle. The macOS
+update feed is arm64-only, so Intel Macs installed from an older desktop bundle
+get no update. The Termux APT package is **not built by default**: a release
+includes it only when it is cut with `release.py release --with termux`. A
+release without Termux leaves the Termux APT channel on its previous release.
 The `Hermes-Setup.dmg` bootstrap installer is built for Apple Silicon only, so
 on an Intel Mac it reports "not supported on this Mac". Intel Macs can install
-the [CLI](./installation.md#linux--macos--wsl2) and run
-`hermes desktop`, or use a `darwin-x64` bundle from a release that included it.
+the [CLI](./installation.md#linux--macos--wsl2) and run `hermes desktop`.
 Linux desktop packaging is disabled in the release workflow, although local
 AppImage builds and native Linux PM bundle checks exist.
 
@@ -76819,7 +76809,7 @@ PRs to fix them will _not_ be accepted, and any code that keeps compatibility wi
 
 - Android / Termux on non-aarch64 devices (aarch64 is [supported](./termux.md) via our APT package)
 - installs via the AUR (we might upstream patches if it helps out &lt;3)
-- 32-bit x86 macOS. Intel x86_64 desktop bundles are built only for releases cut with `--with macos-intel`.
+- 32-bit x86 macOS, and Intel x86_64 macOS desktop bundles (none are built).
 - installs via `pypi` (e.g. `uv tool install hermes-agent`, `pip install hermes-agent`, etc.)
 - installs via `brew` (`brew install hermes-agent`)
 
@@ -84334,9 +84324,10 @@ and only that app can change it: a browser signed in over the network cannot.
 **Start** builds the Webapp if it is missing or out of date (the same build `hermes webapp` runs, which
 can take a few minutes the first time), registers its sign-in address with your Nous account when that
 address changed, saves the `webapp:` settings and restarts the gateway, which reads them when it
-starts. While a chat is running the gateway refuses to restart: the pane shows **Restart needed**, the
-settings apply on the next restart, and **Restart gateway** restarts it once the chat ends. **Stop**
-turns the Webapp off the same way. A Webapp you turned on for this computer only
+starts. Until it is done the pane names the step it is on and how long Start has run, also in a
+pane opened during it. While a chat is running the gateway refuses to restart: the pane shows
+**Restart needed**, the settings apply on the next restart, and **Restart gateway** restarts it once
+the chat ends. **Stop** turns the Webapp off the same way. A Webapp you turned on for this computer only
 (`webapp.enabled: true` without Web Access) shows as served on this computer.
 
 Web Access changes only the `webapp:` settings and keeps your `webapp.port`. It leaves
@@ -94473,22 +94464,6 @@ Switch to a self-hosted instance (see [Option A](#option-a--self-host-with-docke
 ### `web_extract` returns truncated content with a `[TRUNCATED]` footer
 
 That's expected for pages over the character budget. The footer names the on-disk file holding the full clean text and the exact `read_file` call to page through the omitted middle. To see more inline, raise `web.extract_char_limit` in `config.yaml` or pass a larger `char_limit` on the call.
-
----
-
-## Optional skill: `searxng-search`
-
-For agents that need to use SearXNG via `curl` directly (e.g. as a fallback when the web toolset isn't available), install the `searxng-search` optional skill:
-
-```bash
-hermes skills install official/research/searxng-search
-```
-
-This adds a skill that teaches the agent how to:
-- Call the SearXNG JSON API via `curl` or Python
-- Filter by category (`general`, `news`, `science`, etc.)
-- Handle pagination and error cases
-- Fall back gracefully when SearXNG is unreachable
 
 ---
 
