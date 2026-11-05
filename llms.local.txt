@@ -13,6 +13,7 @@ Repo: https://github.com/NousResearch/hermes-agent
 - [Learning Path](./getting-started/learning-path.md): Choose your learning path through the Hermes Agent documentation based on your experience level and goals.
 - [Updating](./getting-started/updating.md): How to update Hermes Agent to the latest version or uninstall it
 - [Nix Setup](./getting-started/nix-setup.md): Install and deploy Hermes Agent with Nix — from quick `nix run` to fully declarative NixOS module with container mode
+- [Official Domains & Phishing Safety](./getting-started/official-domains.md): How to verify you are using genuine Hermes Agent resources, and how to spot impersonation scams.
 - [Platform Support](./getting-started/platform-support.md): Which operating systems, distribution methods, and features Hermes Agent supports.
 - [Android / Termux](./getting-started/termux.md): Install Hermes Agent on Android from its signed Termux APT repository
 
