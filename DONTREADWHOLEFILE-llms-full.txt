@@ -16229,7 +16229,7 @@ A `/command` registered with `ctx.register_command()` runs in the gateway proces
 
 - **Return its text** instead of calling `print()`. Printed output goes to the gateway's stdout, not to the user's chat.
 - **Read the session's working directory with `agent.runtime_cwd.resolve_agent_cwd()`**, not `os.getcwd()`, which is the gateway's own directory. The gateway pins the session's directory while the handler runs.
-- **Take the calling session as handler keywords**: declare `session_id`, `session_key`, `platform` or `source` (the sender's `SessionSource`) and Hermes passes them; one-argument handlers keep working unchanged. The same values are bound as `HERMES_SESSION_*` around the handler (`gateway.session_context.get_session_env`, never `os.environ`), so a background job the handler starts records the session as its parent.
+- **Take the calling session as handler keywords**: declare `session_id`, `session_key`, `platform` or `source` (the sender's `SessionSource`) and Hermes passes them; one-argument handlers keep working unchanged. The same values are bound as `HERMES_SESSION_*` around the handler (read them with `from gateway.session_context import get_session_env`, never `os.environ`), so a background job the handler starts records the session as its parent.
 
 The classic CLI waits for the reply for as long as the handler runs. Ctrl+C stops the wait, not the handler: the handler finishes in the gateway and its reply is not shown. The command runs over its own connection to the gateway, so the session's prompts, interrupts and other commands are not held up while it runs.
 
@@ -45809,7 +45809,6 @@ hermes-agent/
 │   ├── hooks.py              # Hook discovery and lifecycle events
 │   ├── mirror.py             # Cross-session message mirroring
 │   ├── status.py             # Token locks, profile-scoped process tracking
-│   ├── builtin_hooks/        # Extension point for always-registered hooks (none shipped)
 │   └── platforms/            # Core ingress adapters: api_server, webhook,
 │                             #   msgraph_webhook
 │
@@ -47788,7 +47787,6 @@ including top-level one-shot launches. It does not become a process-wide option.
 | `gateway/hooks.py` | Hook discovery, loading, and lifecycle event dispatch |
 | `gateway/mirror.py` | Cross-session message mirroring for `send_message` |
 | `gateway/status.py` | Token lock management for profile-scoped gateway instances |
-| `gateway/builtin_hooks/` | Extension point for always-registered hooks (none shipped) |
 | `gateway/platform_registry.py` | Adapter registry, factories, and deferred (lazy) loaders for bundled platform plugins |
 | `plugins/platforms/<name>/` | Bundled messaging adapters (most platforms: `adapter.py` + `plugin.yaml`) |
 | `gateway/platforms/` | Shared `base.py` plus legacy/direct adapters (Signal, API server, webhooks, …) |
@@ -48094,7 +48092,7 @@ Gateway hooks are Python modules that respond to lifecycle events:
 | `agent:end` | Agent finishes and returns response |
 | `command:*` | Any slash command is executed |
 
-Hooks are discovered from `gateway/builtin_hooks/` (an extension point — currently empty in the shipped distribution; `_register_builtin_hooks()` is a no-op stub) and `<profile home>/hooks/` (user-installed; `~/.hermes/hooks/` for the default profile, one directory per served profile under multiplexing — paths resolve at call time, never at import). Each hook is a directory with a `HOOK.yaml` manifest and `handler.py`.
+Hooks are discovered from `<profile home>/hooks/` (user-installed; `~/.hermes/hooks/` for the default profile, one directory per served profile under multiplexing — paths resolve at call time, never at import). Each hook is a directory with a `HOOK.yaml` manifest and `handler.py`.
 
 ## Memory Provider Integration
 
@@ -63587,7 +63585,9 @@ The server issues `session:operator` only at these existing trusted boundaries:
   such a login keeps in its cookies never work there on their own: the Webapp's listener accepts a
   bearer token or a socket's `?token=`, and renews a refresh token, only when it gave that token to a
   native app's RFC 8252 sign-in (digests kept in `webapp/native-sign-in-tokens.json` in the gateway home until they
-  expire), so native apps stay signed in across a sign-out and a restart.
+  expire), so native apps stay signed in across a sign-out and a restart. The deployment session
+  token (`HERMES_DASHBOARD_SESSION_TOKEN`) also works there as a bearer token or `?token=` while the
+  session-token provider is enabled; it has no refresh token.
 - The HTTP mutation gate, after a verified dashboard Session, native HTTP owner grant,
   or permitted legacy session token has been accepted.
 
@@ -65456,15 +65456,49 @@ contract is opt-in and exists for third-party archiving providers. Enabling
 (manual and automatic): agent init logs a warning naming the active provider,
 and each refusal names `compression.checkpoint_required` as the key to disable.
 
-The gate binds to every compaction authority, not just the Hermes
-summarizer: server-side native compaction (`compression.codex_responses_native`)
+The gate binds to every compaction authority the host runs, not just the
+Hermes summarizer: server-side native compaction (`compression.codex_responses_native`)
 is suppressed while the gate is armed, post-turn micro-compaction
 (`compression.micro_compact`) is forced off at agent init (it absorbs old
-exchanges into a rolling summary with no checkpoint hook in its path), and
-the `codex_app_server` API mode is refused at agent init — the codex agent
-compacts its own thread with no truthful pre-compaction boundary, so a
-required checkpoint cannot be guaranteed there. The checkpoint-aware Hermes
-compressor stays the only lossy authority.
+exchanges into a rolling summary with no checkpoint hook in its path), the
+proactive tool-result prune (`compression.proactive_prune_tokens`) is
+suppressed at its call site (off by default, so a default install has nothing
+to suppress there), and the `codex_app_server` API mode is refused at agent
+init — the codex agent compacts its own thread with no truthful
+pre-compaction boundary, so a required checkpoint cannot be guaranteed there.
+A plugin context engine's `compress()` is covered too: the host calls
+`on_pre_compress()` before it. Not covered: a plugin context engine that
+removes or rewrites host-transcript messages outside `compress()` (from
+`on_turn_complete()`, say). The host cannot checkpoint that path and does not
+refuse such an engine yet.
+
+### Forks under an armed gate
+
+Hermes runs a second agent without a provider in four places (delegated
+subagents, the curator pass, the batch runner, the Feishu comment responder). With the gate off they stay provider-less. With
+`checkpoint_required` armed such a fork arms the same gate and would fail its
+first compaction with `BLOCKED_MISSING_PREREQUISITE`, so it loads the
+configured provider, initialized with `agent_context="subagent"` (`platform`,
+plus `parent_session_id` where the fork has a parent session, tells the shapes
+apart). The detached review and `/btw` forks are different:
+they persist nothing, so the gate does not apply to them. Two consequences:
+
+- **One `initialize()` per fork** — a round trip per spawn for a
+  network-backed store.
+- **Fork transcripts reach the archive** through `on_pre_compress()`.
+
+The fork's prompt stays as it was with `skip_memory=True`: the built-in
+MEMORY.md/USER.md store is not loaded for `agent_context="subagent"`, unless
+the fork requests the `memory` toolset (then it gets the store, gate or no
+gate).
+
+The host keeps everything else off for `agent_context="subagent"`, whether or
+not your provider reads the label: no `prefetch()`/`queue_prefetch()`, no
+`sync_turn()`, `on_turn_start()`, `on_session_end()` or `on_delegation()`.
+`initialize()`, `on_session_switch()` and `on_pre_compress()` still run, so a
+checkpoint provider must save on `on_pre_compress()` regardless of how it
+scopes non-primary writes — skipping it there either breaks the checkpoint
+contract (success without a save) or kills the fork at its first compaction.
 
 What your provider receives depends on its declared API version. Version 1
 providers (the implicit default — every pre-existing provider) keep the
@@ -70363,14 +70397,19 @@ def register(ctx):
 
 - Return the text to show. `print()` writes to the gateway's stdout, and the user never sees it.
 - Take the session's working directory from `agent.runtime_cwd.resolve_agent_cwd()`, not `os.getcwd()`, which is the gateway's own directory. Resolve relative paths against it.
-- Read session identity with `gateway.session_context.get_session_env("HERMES_SESSION_PLATFORM")` and the other `HERMES_SESSION_*` names, not `os.environ`.
+- Read session identity with `get_session_env("HERMES_SESSION_PLATFORM")`, `get_session_env("HERMES_SESSION_CHAT_ID")` and the other `HERMES_SESSION_*` names, not `os.environ`. Import the function itself with `from gateway.session_context import get_session_env`: that name is the public seam, and `hermes plugins validate` reports `import gateway.session_context` as a private import.
 
 ```python
 from agent.runtime_cwd import resolve_agent_cwd
+from gateway.session_context import get_session_env
 
 def _handle_todo(raw_args: str) -> str:
     todo = resolve_agent_cwd() / "TODO.md"  # the session's folder, not the gateway's
     return todo.read_text() if todo.exists() else "No TODO.md here."
+
+def _handle_where(raw_args: str) -> str:
+    platform = get_session_env("HERMES_SESSION_PLATFORM")  # unbound: falls back to os.environ, then ""
+    return f"{platform or 'local'} chat {get_session_env('HERMES_SESSION_CHAT_ID') or '(none)'}"
 ```
 
 ### Ask the user to pick an option
@@ -71570,6 +71609,116 @@ on [hermes-agent](https://github.com/NousResearch/hermes-agent/issues)
 describing what you need and why. We would much rather add a proper seam than
 list a patch, and a plugin that will use the hook is exactly the concrete
 consumer a new hook needs.
+
+---
+
+<!-- source: website/docs/developer-guide/plugins/public-api.md -->
+# Public plugin API
+
+<!-- GENERATED by scripts/gen_plugin_api_docs.py from hermes_cli/data/plugin_api.json — DO NOT EDIT. -->
+<!-- tests/hermes_cli/test_plugin_validate_private_imports.py fails when this page is stale. -->
+
+# Public plugin API
+
+These are the Hermes modules and names a plugin may import. `hermes plugins validate` reads the same
+list (`hermes_cli/data/plugin_api.json`) and warns, without failing, on any other import of a Hermes
+module (catalog rule 9: public surfaces only). Imports of the standard library, third-party packages,
+the plugin's own modules, and imports under `if TYPE_CHECKING:` are never flagged.
+
+A module row allows the module and every name in it that does not start with an underscore. A row
+with a name allows that one name only.
+
+| Module | Name | Listed from |
+|---|---|---|
+| `agent.account_usage` | whole module | developer-guide / plugins docs |
+| `agent.acp_client` | whole module | developer-guide / plugins docs |
+| `agent.browser_provider` | whole module | developer-guide / plugins docs |
+| `agent.context_engine` | whole module | developer-guide / plugins docs |
+| `agent.credential_pool` | whole module | developer-guide / plugins docs |
+| `agent.delegation_backends` | whole module | developer-guide / plugins docs |
+| `agent.delegation_provider` | whole module | developer-guide / plugins docs |
+| `hermes_cli.auth_model_picker` | `prompt_model_selection` | developer-guide / plugins docs |
+| `hermes_cli.auth` | `resolve_external_process_provider_credentials` | developer-guide / plugins docs |
+| `hermes_cli.model_setup` | whole module | developer-guide / plugins docs |
+| `agent.image_gen_provider` | whole module | developer-guide / plugins docs |
+| `agent.memory_manager` | whole module | developer-guide / plugins docs |
+| `agent.memory_provider` | whole module | developer-guide / plugins docs |
+| `agent.secret_scope` | whole module | developer-guide / plugins docs |
+| `agent.secret_sources.base` | whole module | developer-guide / plugins docs |
+| `agent.subagent_lifecycle` | whole module | developer-guide / plugins docs |
+| `agent.terminal_env_provider` | whole module | developer-guide / plugins docs |
+| `agent.transports` | whole module | developer-guide / plugins docs |
+| `agent.transports.chat_completions` | whole module | developer-guide / plugins docs |
+| `agent.video_gen_provider` | whole module | developer-guide / plugins docs |
+| `agent.web_search_provider` | whole module | developer-guide / plugins docs |
+| `cli` | whole module | developer-guide / plugins docs |
+| `gateway.config` | whole module | developer-guide / plugins docs |
+| `gateway.platform_registry` | whole module | developer-guide / plugins docs |
+| `gateway.platforms._shared` | whole module | developer-guide / plugins docs |
+| `gateway.platforms.base` | whole module | developer-guide / plugins docs |
+| `gateway.platforms.event` | whole module | developer-guide / plugins docs |
+| `gateway.platforms.helpers` | whole module | developer-guide / plugins docs |
+| `gateway.status` | whole module | developer-guide / plugins docs |
+| `hermes_cli.auth_oauth_pkce_plugin` | whole module | developer-guide / plugins docs |
+| `hermes_cli.config` | whole module | developer-guide / plugins docs |
+| `hermes_cli.plugin_events` | whole module | developer-guide / plugins docs |
+| `hermes_cli.plugin_provider_requests` | whole module | developer-guide / plugins docs |
+| `hermes_constants` | whole module | developer-guide / plugins docs |
+| `hermes_platform` | whole module | developer-guide / plugins docs |
+| `hermes_state` | whole module | developer-guide / plugins docs |
+| `plugins.plugin_storage` | whole module | developer-guide / plugins docs |
+| `plugins.plugin_utils` | whole module | developer-guide / plugins docs |
+| `pm` | whole module | developer-guide / plugins docs |
+| `providers` | whole module | developer-guide / plugins docs |
+| `providers.base` | whole module | developer-guide / plugins docs |
+| `tools.browser_supervisor` | whole module | developer-guide / plugins docs |
+| `tools.browser_supervisor_capture` | whole module | developer-guide / plugins docs |
+| `tools.computer_use.backend` | whole module | developer-guide / plugins docs |
+| `tools.registry` | whole module | developer-guide / plugins docs |
+| `agent.context_references` | whole module | PluginContext (hermes_cli/plugins.py) |
+| `agent.plugin_llm` | whole module | PluginContext (hermes_cli/plugins.py) |
+| `agent.transcription_provider` | whole module | PluginContext (hermes_cli/plugins.py) |
+| `agent.tts_provider` | whole module | PluginContext (hermes_cli/plugins.py) |
+| `cron.execution_identity` | whole module | PluginContext (hermes_cli/plugins.py) |
+| `hermes_cli.dashboard_auth` | whole module | PluginContext (hermes_cli/plugins.py) |
+| `hermes_cli.platform_actions` | whole module | PluginContext (hermes_cli/plugins.py) |
+| `hermes_cli.plugins` | `PluginContext` | PluginContext (hermes_cli/plugins.py) |
+| `hermes_cli.plugins_ledger` | `PluginRegistration` | PluginContext (hermes_cli/plugins.py) |
+| `hermes_cli.plugins_state` | `PluginState` | PluginContext (hermes_cli/plugins.py) |
+| `agent.runtime_cwd` | `resolve_agent_cwd` | prose in memory-provider / model-provider / terminal-environment plugin pages (tools.environments:BaseEnvironment is the package's `__all__` re-export) |
+| `agent.usage_pricing` | `CostResult` | prose in memory-provider / model-provider / terminal-environment plugin pages (tools.environments:BaseEnvironment is the package's `__all__` re-export) |
+| `hermes_cli.auth_constants` | `AuthError` | prose in memory-provider / model-provider / terminal-environment plugin pages (tools.environments:BaseEnvironment is the package's `__all__` re-export) |
+| `tools.environments.base` | `BaseEnvironment` | prose in memory-provider / model-provider / terminal-environment plugin pages (tools.environments:BaseEnvironment is the package's `__all__` re-export) |
+| `tools.environments` | `BaseEnvironment` | prose in memory-provider / model-provider / terminal-environment plugin pages (tools.environments:BaseEnvironment is the package's `__all__` re-export) |
+| `utils` | `atomic_json_write` | prose in memory-provider / model-provider / terminal-environment plugin pages (tools.environments:BaseEnvironment is the package's `__all__` re-export) |
+| `utils` | `read_json_or_empty` | prose in memory-provider / model-provider / terminal-environment plugin pages (tools.environments:BaseEnvironment is the package's `__all__` re-export) |
+| `gateway.platforms.access_policy_mixin` | `OwnAccessPolicyMixin` | adding-platform-adapters.md § Public helpers for platform plugins |
+| `tools.approval` | `resolve_gateway_approval` | adding-platform-adapters.md § Public helpers for platform plugins |
+| `tools.approval` | `resolve_gateway_approval_card` | adding-platform-adapters.md § Public helpers for platform plugins |
+| `tools.clarify_gateway` | `get_pending` | adding-platform-adapters.md § Public helpers for platform plugins |
+| `tools.clarify_gateway` | `resolve_gateway_clarify` | adding-platform-adapters.md § Public helpers for platform plugins |
+| `tools.clarify_gateway` | `mark_awaiting_text` | adding-platform-adapters.md § Public helpers for platform plugins |
+| `tools.clarify_gateway` | `SKIPPED` | adding-platform-adapters.md § Public helpers for platform plugins |
+| `tools.url_safety` | `is_safe_url` | adding-platform-adapters.md § Public helpers for platform plugins |
+| `tools.url_safety` | `create_ssrf_safe_async_client` | adding-platform-adapters.md § Public helpers for platform plugins |
+| `gateway.platforms._http_client_limits` | `platform_httpx_limits` | adding-platform-adapters.md § Public helpers for platform plugins |
+| `hermes_cli.gateway_setup_wizard` | `print_setup_header` | adding-platform-adapters.md § Public helpers for platform plugins |
+| `hermes_cli.gateway_setup_wizard` | `confirm_reconfigure` | adding-platform-adapters.md § Public helpers for platform plugins |
+| `hermes_cli.gateway_setup_wizard` | `offer_home_channel` | adding-platform-adapters.md § Public helpers for platform plugins |
+| `hermes_cli.gateway_setup_wizard` | `save_env_values` | adding-platform-adapters.md § Public helpers for platform plugins |
+| `hermes_cli.gateway_setup_wizard` | `prompt_csv` | adding-platform-adapters.md § Public helpers for platform plugins |
+| `hermes_cli.setup` | `prompt` | adding-platform-adapters.md § Public helpers for platform plugins |
+| `hermes_cli.setup` | `prompt_choice` | adding-platform-adapters.md § Public helpers for platform plugins |
+| `hermes_cli.setup` | `prompt_yes_no` | adding-platform-adapters.md § Public helpers for platform plugins |
+| `hermes_cli.cli_output` | whole module | adding-platform-adapters.md § Public helpers for platform plugins |
+| `tools.skills_tool` | `find_all_skills` | plugins/index.md § Read the skill catalog |
+| `tools.skills_tool` | `sort_skills` | plugins/index.md § Read the skill catalog |
+| `tools.skills_tool` | `skill_search_dirs` | plugins/index.md § Read the skill catalog |
+| `tools.skills_tool` | `locate_skill` | plugins/index.md § Read the skill catalog |
+| `tools.skills_tool` | `skill_lookup_path_error` | plugins/index.md § Read the skill catalog |
+| `tools.skills_sync` | `dir_hash` | plugins/index.md § Read the skill catalog |
+| `tools.skill_usage` | `read_skill_name` | plugins/index.md § Read the skill catalog |
+| `gateway.session_context` | `get_session_env` | plugins/index.md § platform plugins: read session identity through the task-local context |
 
 ---
 
@@ -84592,6 +84741,8 @@ instructions. Behind the sign-in gate (below) it also signs out every browser th
 dashboard account; each must sign in again. The account tokens such a login keeps in its cookies work
 on the Webapp only as that login (the gateway refuses them as a bearer token, on a connection's URL and
 on its token refresh), so they end with it. A native Hermes app that signed in to the gateway on its own stays signed in.
+The deployment session token (`HERMES_DASHBOARD_SESSION_TOKEN`, see [Deployment session-token provider](./features/web-dashboard.md#deployment-session-token-provider-token-only-deployments))
+also works there on its own, as a bearer token, in the `X-Hermes-Session-Token` header (what Desktop sends on REST) or on a connection's URL, while the session-token provider is enabled.
 
 For a named profile, `hermes -p work webapp` opens the Webapp on `work`. Profiles the default gateway
 serves share its Webapp; a standalone profile's own gateway serves its own when its config turns it on.
@@ -93829,7 +93980,7 @@ curl -s http://<host>:9119/api/status | jq '.auth_required, .auth_providers'
 
 The bundled `plugins/dashboard_auth/session_token` plugin makes the **deployment session token** (`HERMES_DASHBOARD_SESSION_TOKEN`) a first-class gated-mode credential. This is the shape secret-managed deployments already provision — a single shared token (nix/agenix hands it over as a decrypted file; the Nix modules set `HERMES_DASHBOARD_SESSION_TOKEN=file:<path>` from `backend.sessionTokenFile`) that Hermes Desktop's remote-gateway **"Session token"** field presents. Without this provider, a non-loopback bind with only a provisioned token hit the fail-closed gate and pushed the operator into basic-auth or OAuth credentials the deployment never asked for.
 
-When the env var is provisioned, the provider registers automatically and `verify_session` constant-time-compares the presented credential against it. Both legs a token-mode client uses run through that seam — the REST `Authorization: Bearer` path and the `/api/ws` `?token=` upgrade credential — so one provisioned token authorizes both. There is **no browser sign-in flow**: `/login` renders a note explaining the credential channel instead of sign-in buttons, and the provider is never offered by the auto-SSO redirect.
+When the env var is provisioned, the provider registers automatically and `verify_session` constant-time-compares the presented credential against it. Both legs a token-mode client uses run through that seam — REST, where Desktop's "Session token" connection sends the token in the `X-Hermes-Session-Token` header (a bearer token in the `Authorization` header works too and wins when both are sent; only this provider's token works in the dedicated header), and the `/api/ws` `?token=` upgrade credential — so one provisioned token authorizes both. There is **no browser sign-in flow**: `/login` renders a note explaining the credential channel instead of sign-in buttons, and the provider is never offered by the auto-SSO redirect.
 
 :::warning Treat the token like a password
 The provisioned token grants full dashboard access to whoever holds it. Provision it from a secret manager (never a Nix store path), rotate by redeploying the secret — rotation invalidates every saved client copy, which surfaces as "HTTP reachable but the WebSocket fails" in Desktop until the new token is pasted in. There is no per-user identity behind it: for shared or internet-facing deployments prefer the [Nous Research](#default-provider-nous-research) or [self-hosted OIDC](#self-hosted-oidc-provider) provider.
