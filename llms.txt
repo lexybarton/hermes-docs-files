@@ -265,7 +265,7 @@ Repo: https://github.com/NousResearch/hermes-agent
 - [Trajectory Format](https://hermes-agent.nousresearch.com/docs/developer-guide/trajectory-format)
 - [Video Generation Provider Plugins](https://hermes-agent.nousresearch.com/docs/developer-guide/video-gen-provider-plugin): How to build a video-generation backend plugin for Hermes Agent
 - [Web Search Provider Plugins](https://hermes-agent.nousresearch.com/docs/developer-guide/web-search-provider-plugin): How to build a web-search/extract/crawl backend plugin for Hermes Agent
-- [TUI & Desktop from Worktrees](https://hermes-agent.nousresearch.com/docs/developer-guide/worktree-ui-dev): Run the Ink TUI and Electron desktop app from a git worktree without a full npm install per checkout
+- [TUI & Desktop from Worktrees](https://hermes-agent.nousresearch.com/docs/developer-guide/worktree-ui-dev): Run the Ink TUI and Electron desktop app from a git worktree without a full pnpm install per checkout
 
 ## Reference
 

@@ -79,7 +79,7 @@ The desktop/server scripts are not the Termux installation path.
 ### What the source installer does
 
 The scripts clone the source, bootstrap uv, and delegate dependency preparation
-to PM. PM provides pinned Python, Node.js, npm, ripgrep, and FFmpeg. The source
+to PM. PM provides pinned Python, Node.js, npm, pnpm, ripgrep, and FFmpeg. The source
 installation selects the `all` Python extra, not every optional extra.
 PM also installs the browser and computer-use tools by default: a pinned
 Chromium (Chrome for Testing) that Hermes launches for local browsing, and
@@ -2454,7 +2454,7 @@ The flake provides an editable Python venv with the `dev` dependency group, runn
 on the interpreter `pm/lock.json` pins. `HERMES_PYTHON` and `VIRTUAL_ENV` point at it,
 and it needs no `PYTHONPATH`. It does not install
 Python dependencies into a repository-local `.venv`. The shell also provides
-Node.js and runtime tools. Its npm hook refreshes JS workspaces when their inputs change.
+Node.js and runtime tools. Its pnpm hook refreshes JS workspaces when their inputs change.
 
 ```bash
 cd hermes-agent
@@ -2471,7 +2471,7 @@ The included `.envrc` activates the dev shell automatically:
 ```bash
 cd hermes-agent
 direnv allow    # one-time
-# Nix reuses its built Python environment; the npm hook checks JS inputs.
+# Nix reuses its built Python environment; the pnpm hook checks JS inputs.
 ```
 
 ### Flake Checks
@@ -4036,7 +4036,7 @@ Point-in-time copies of `config.yaml` itself (taken before `hermes setup` rewrit
 
 For git installs, Hermes auto-stashes dirty tracked files, plus any untracked file at a path the update adds, before checking out the update branch or pulling. Untracked files the update never writes stay in place. Interactive terminal updates ask whether to keep the changes before stashing anything; answering no deletes them instead of leaving a stash entry behind. Non-interactive updates (desktop/chat app, gateway, or `--yes`) use `updates.non_interactive_local_changes`: `stash` restores local source edits after a successful pull, while `discard` drops the update-created stash after a successful pull. Use `discard` only on managed installs where local source edits are never meant to persist.
 
-Before that stash step, Hermes also restores tracked `package-lock.json` diffs left by npm install/build churn. Commit or manually stash intentional lockfile edits before updating.
+Before that stash step, Hermes also restores tracked `package-lock.json` diffs that npm installs leave in the WhatsApp bridge and Photon sidecar. Commit or manually stash intentional lockfile edits before updating.
 
 ## Terminal Backend Configuration
 
@@ -9676,7 +9676,7 @@ This combination gives you:
 
 ## Developing the UI surfaces across worktrees
 
-The TypeScript surfaces (`ui-tui/`, `apps/desktop/`) each need a `node_modules`, which a fresh `npm ci` per worktree duplicates across every branch. If you hack on the TUI or desktop app from multiple worktrees, see [TUI & Desktop from Worktrees](../developer-guide/worktree-ui-dev.md) for the `htui` / `hgui` helpers that share one install by symlink.
+The TypeScript surfaces (`ui-tui/`, `apps/desktop/`) each need a `node_modules`, which a fresh `pnpm install` per worktree repeats for every branch. If you hack on the TUI or desktop app from multiple worktrees, see [TUI & Desktop from Worktrees](../developer-guide/worktree-ui-dev.md) for the `htui` / `hgui` helpers that share one install by symlink.
 
 ---
 
@@ -11988,6 +11988,31 @@ edits — add `--all`:
 If the ledger is empty (a store created before this feature, or Hermes hasn't
 written any files in the project yet), `/rollback` falls back to the full
 restore automatically.
+
+## `/undo` lists the files the undone turns changed
+
+`/undo` only rewinds the conversation; it never touches files. When checkpoints
+are on and the undone turns changed files in the project, `/undo` adds one line
+naming them and pointing at `/rollback`:
+
+```
+/undo
+↶ Files changed in the undone turns: app.js, notes.md. Run /rollback to see checkpoints and restore them.
+```
+
+The line names no checkpoint: run `/rollback` to see the list and pick the one
+to restore (by number or hash). The file list is best effort: it compares the
+project with the checkpoint taken around when the undone turns started, and it
+only says what changed, not what a restore will bring back. The line itself
+writes nothing, and with checkpoints off, or when no undone turn took a
+checkpoint, `/undo` prints exactly what it always did. The editor (ACP) and the
+gateway chat client do not run `/rollback`, so they print no line.
+
+A whole-tree `/rollback` also undoes the newest remaining chat turn (step 4
+above), but only when that turn made the checkpoint or came after it. After
+`/undo`, the turns you kept ended before the checkpoint, so they stay. Each
+checkpoint records its exact time; for a checkpoint made by an older version,
+only the second is known, and a kept turn in that same second is kept too.
 
 ## Single-File Restore
 
@@ -16673,7 +16698,7 @@ Hybrid repos (agent + desktop halves in one repo) use one link and one
 dialog. The same modal is reachable without a link via **Capabilities →
 Plugins → Install from Git**. Legacy `hermes://plugin-agent/…` and
 `hermes://plugin-desktop/…` URLs route into the same dialog. In dev builds
-(`npm run dev`) the scheme is `hermes-dev://`.
+(`pnpm run dev`) the scheme is `hermes-dev://`.
 
 Websites need no SDK — a normal anchor works:
 
@@ -45414,6 +45439,7 @@ Choose the highest (least-footprint) rung that correctly solves the problem:
 | **Git**              | With the `git-lfs` extension installed                                                        |
 | **Python 3.14** | Current development uses PM's pinned interpreter. The broader `>=3.11,<3.15` package metadata keeps old updaters working, not the current runtime on older Python. |
 | **Node.js** | Use the PM pin or a version accepted by root `package.json` engines |
+| **pnpm** | Exactly the root `package.json` `devEngines` pin; `source ./activate` provides it |
 
 ### PM developer environment
 
@@ -45484,15 +45510,19 @@ than copying production credentials into the checkout.
 
 ### JavaScript workspaces and website
 
-From the repository root, run `npm ci` for the desktop, TUI, dashboard, and
-shared JS workspaces. The website is separate:
+From the repository root, run `pnpm install --frozen-lockfile` for the desktop,
+TUI, dashboard, and shared JS workspaces. Root `package.json` pins pnpm in
+`devEngines` (`source ./activate` provides that exact version). Hermes's builds and
+`hermes update` refuse any other pnpm version; a direct `pnpm install` does not check
+it. The root `preinstall` script refuses `npm install`. The website is a separate npm
+project:
 
 ```bash
 npm ci --prefix website
 npm run build:fast --prefix website
 ```
 
-Use a Node/npm version accepted by the corresponding `package.json` engines.
+Use a Node version accepted by the corresponding `package.json` engines.
 Native desktop dependencies can also require the platform build toolchain.
 
 Logos and icons are generated from `assets/nous-girl-*.svg` and
@@ -53189,7 +53219,7 @@ Launch the web dashboard to manage configuration, API keys, and sessions. For a 
 | `--host` | `127.0.0.1` | Bind address |
 | `--no-open` | — | Don't auto-open the browser |
 | `--insecure` | off | **Deprecated / no-op.** Formerly bypassed auth on a non-loopback bind. Since the June 2026 hardening a public bind *always* requires an auth provider (password or OAuth). Bind `127.0.0.1` and tunnel to keep it local. |
-| `--skip-build` | off | Skip the web UI build step and serve the existing `dist` directly. Useful for non-interactive contexts (Windows Scheduled Tasks, CI) where npm isn't available. Pre-build with `cd web && npm run build`. |
+| `--skip-build` | off | Skip the web UI build step and serve the existing `dist` directly. Useful for non-interactive contexts (Windows Scheduled Tasks, CI) where pnpm isn't available. Pre-build with `cd web && pnpm run build`. |
 | `--isolated` | off | When launched from a named profile (`worker dashboard`), run a dedicated per-profile server instead of routing to the machine dashboard. |
 | `--stop` | — | Stop the running `hermes dashboard` / `hermes serve` backend **of this Hermes home** and exit (`-p <profile>` / `HERMES_HOME` select which; backends of other profiles, other installs on the machine, and the shell you typed the command into are never touched — a backend whose owner cannot be read is left alone). SIGTERM, a 10s grace, then SIGKILL; a hosted Chat TUI that outlives its backend is stopped too (it would otherwise keep the deleted `state.db-wal` open and block the next start). Messaging-gateway bots started from the dashboard are not touched. |
 | `--status` | — | List running `hermes dashboard` processes and exit. |
@@ -53382,7 +53412,7 @@ Additional behavior:
 - **Restart-phase recovery.** If the in-process restart phase aborts while importing the freshly pulled tree, supervised gateway profiles are retried through a clean Python process. Only restarts independently confirmed by systemd (`systemctl --user is-active`) are reported as verified; a relaunch that merely exited 0 is recorded as `relaunch_attempted` and the restart stays owed (a `gateway_restart` follow-up; the update itself still exits 0 because the code is in place). Manual gateways and serve/dashboard runtimes are never killed without a relaunch authority; they are recorded as skipped with a reason and remain in the incomplete-update report with the exact restart command.
 - **Update receipts + fleet version check.** Every run writes a machine-readable receipt to `~/.hermes/logs/update_receipts/` in the root Hermes home, even from a sticky profile (pre-update fleet plan, steps, skips with reasons, restart outcome, follow-ups; `latest.json` points at the newest and reads `running` while an update is in progress). After the restart phase the updater verifies each live gateway's running code against the updated checkout and prints a per-profile version matrix. A gateway still on pre-update code does not fail the update once the new code is in place: the update prints a `⚠` line with the exact restart command, exits 0, records a `gateway_restart` follow-up, and keeps the restart owed — every CLI start warns about it and the next `hermes update` retries it.
 - **Local source changes.** For git installs, dirty tracked files are auto-stashed before branch checkout or pull, together with any untracked file at a path the update adds. Other untracked files and folders stay where they are, untouched, because they cannot block the update. Interactive terminal updates ask "Keep these changes after updating?" before anything is stashed: yes stashes them and puts them back after the pull, no deletes them right away, so no stash entry is left behind. A run with nothing to pull does not ask. Non-interactive updates restore it by default; set `updates.non_interactive_local_changes: discard` only on managed installs where local source edits should be thrown away after a successful pull. If stash restore conflicts or the pull fails, the stash is left in place for manual recovery.
-- **npm lockfile churn.** Before stashing or switching branches, Hermes makes a best-effort cleanup of tracked `package-lock.json` diffs produced by npm install/build steps. Commit or manually stash intentional lockfile edits before running `hermes update`.
+- **npm lockfile churn.** Before stashing or switching branches, Hermes makes a best-effort cleanup of tracked `package-lock.json` diffs that npm installs leave in the npm projects (the WhatsApp bridge and the Photon sidecar). `pnpm-lock.yaml` is never reverted: installs do not rewrite it. Commit or manually stash intentional lockfile edits before running `hermes update`.
 - **Pairing data snapshot.** Even when `--backup` is off, `hermes update` takes a lightweight snapshot of `~/.hermes/pairing/` and the Feishu comment rules before `git pull`. You can roll it back with `hermes backup restore --state pre-update` if a pull rewrites a file you were editing.
 - **Legacy `hermes.service` warning.** If Hermes detects a pre-rename `hermes.service` systemd unit (instead of the current `hermes-gateway.service`), it prints a one-time migration hint so you can avoid flap-loop issues.
 - **Exit codes.** `0` on success, `1` on pull/install/post-install errors, `2` on unexpected working-tree changes that block `git pull`.
@@ -54920,8 +54950,8 @@ Three dashboard-auth providers ship in the box. For a remote Hermes Desktop conn
 | `HERMES_DESKTOP_IGNORE_EXISTING` | Set to `1` to make Desktop skip the installed runtime (`~/.hermes/hermes-agent`, or `%LOCALAPPDATA%\hermes\hermes-agent` on Windows) during backend resolution, so no local backend starts and Desktop shows the connect-or-install choice. The bundled runtime, `HERMES_DESKTOP_HERMES_ROOT`, an unpackaged source checkout, and `HERMES_DESKTOP_HERMES` still win. A runtime installed during this launch is used. Equivalent to `hermes desktop --ignore-existing`. |
 | `HERMES_DESKTOP_CWD` | Initial project directory for Desktop chat sessions. Set by `hermes desktop --cwd`. |
 | `HERMES_DESKTOP_PYTHON` | Absolute path to a Python interpreter for the backend, checked before Electron auto-resolves one for the source checkout. Used by worktree dev helpers (see [TUI & Desktop from Worktrees](../developer-guide/worktree-ui-dev.md)) to reuse a shared venv. |
-| `HERMES_DESKTOP_DEV_SERVER` | Vite dev-server URL the Electron shell loads instead of the packaged bundle (e.g. `http://127.0.0.1:5174`). Set automatically by `npm run dev`; only relevant when hacking on the app. A backend that inherits it also trusts that renderer's origin for CORS and WebSocket upgrades. |
-| `HERMES_DESKTOP_CDP_PORT` | Overrides the Chrome DevTools Protocol port the renderer exposes on `127.0.0.1` for DOM/CSS inspection tooling (default `9222`). Dev-server runs (`npm run dev`, `hgui`) open it automatically; a packaged app never does, and no value here changes that. Set to `off` to disable it on a dev run. Anything that can reach the port can execute code in the renderer. |
+| `HERMES_DESKTOP_DEV_SERVER` | Vite dev-server URL the Electron shell loads instead of the packaged bundle (e.g. `http://127.0.0.1:5174`). Set automatically by `pnpm run dev`; only relevant when hacking on the app. A backend that inherits it also trusts that renderer's origin for CORS and WebSocket upgrades. |
+| `HERMES_DESKTOP_CDP_PORT` | Overrides the Chrome DevTools Protocol port the renderer exposes on `127.0.0.1` for DOM/CSS inspection tooling (default `9222`). Dev-server runs (`pnpm run dev`, `hgui`) open it automatically; a packaged app never does, and no value here changes that. Set to `off` to disable it on a dev run. Anything that can reach the port can execute code in the renderer. |
 | `HERMES_DESKTOP_NVIDIA_SWIFTSHADER` | (Desktop on Linux, NVIDIA only) Override for the EGL fallback that routes rendering through SwiftShader on driver series with a broken EGL probe (`580.x`, #40077): `1` forces the fallback on — the recovery hatch if a future series reintroduces the crash but is not yet in the closed list; `0` opts out and uses the native GPU path at your own risk. Force-on does not apply where another gate already disabled the GPU (remote display, WSLg, `HERMES_DESKTOP_DISABLE_GPU=0`). |
 | `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY` | (Desktop side) The in-app update check (`Help → Check for Updates…` and the passive update banner) reaches `api.github.com` through the proxy these standard variables name, with `NO_PROXY` exemptions honoured — the same convention `curl`, `npm` and `git` follow. Unset, the check connects directly. |
 
@@ -55234,7 +55264,7 @@ Hermes sets these itself to carry state across a boundary where no `config.yaml`
 | Variable | Description |
 |----------|-------------|
 | `HERMES_TUI` | Launch the [TUI](../user-guide/tui.md) instead of the classic CLI when set to `1`. Equivalent to passing `--tui`. |
-| `HERMES_TUI_DIR` | Path to a prebuilt `ui-tui/` directory (must contain `dist/entry.js` and populated `node_modules`). Used by distros and Nix to skip the first-launch `npm install`. |
+| `HERMES_TUI_DIR` | Path to a prebuilt `ui-tui/` directory (must contain `dist/entry.js` and populated `node_modules`). Used by distros and Nix to skip the first-launch `pnpm install`. |
 | `HERMES_TUI_RESUME` | Resume a specific TUI session by ID on launch. When set, `hermes --tui` skips forging a fresh session and picks up the named session instead — useful for re-attaching after a disconnect or terminal crash. |
 | `HERMES_TUI_THEME` | Force the TUI color theme: `light`, `dark`, or a raw 6-character background hex (e.g. `ffffff` or `1a1a2e`). When unset, Hermes auto-detects using `COLORFGBG` and terminal background queries; this variable overrides detection on terminals (Ghostty, Warp, iTerm2, etc.) that don't set `COLORFGBG`. |
 | `HERMES_INFERENCE_MODEL` | Force the model for `hermes -z` / `hermes chat` without mutating `config.yaml`. Pairs with the `--provider` flag. Useful for scripted callers (sweeper, CI, batch runners) that need to override the default model per run. |
@@ -60432,7 +60462,7 @@ A **desktop plugin** is a single ESM file that default-exports a `HermesPlugin`.
 It imports one module — `@hermes/plugin-sdk` — and gets everything: the app's
 live state, the gateway JSON-RPC door, a scoped REST/socket backend namespace,
 React Query, and the app's own UI kit so plugin UI looks native by default. No
-repo clone, no `npm run build`, no patching app source. Drop the file in
+repo clone, no `pnpm run build`, no patching app source. Drop the file in
 `$HERMES_HOME/desktop-plugins/<id>/plugin.js` and the app loads it within seconds
 and hot-reloads every save.
 
@@ -62466,7 +62496,7 @@ host.i18n.languageOptions(): LanguageOption[]   // bundled ∪ registered ∪ ba
 Where English has a **function** entry (``results: n => `${n} results` ``), a pack
 gives a plain string with POSITIONAL placeholders — `{0}`, `{1}` in argument
 order — and the merge wraps it into the same call shape. The full key set is
-published in `locales/_keys.desktop.json` (regenerate with `npm run i18n:keys`
+published in `locales/_keys.desktop.json` (regenerate with `pnpm run i18n:keys`
 in `apps/desktop` and commit it; CI pins the file to `en.ts`), which is what `hermes plugins
 validate` checks a pack's `<lang>.desktop.yaml` against.
 
@@ -74235,7 +74265,7 @@ interfaces, not proof that every distribution passed native acceptance.
 
 Providers retain their package managers and locks. Product builders do not
 install missing dependencies or download inputs. The Node dependency provider
-uses one locked workspace union. Nix supplies its own npm and Python inputs.
+uses one locked workspace union. Nix supplies its own Node and Python inputs.
 Termux supplies bionic tools and wheels. Shared recipes do not imply identical
 bytes, dependency selections, or Python environments across targets.
 
@@ -74263,12 +74293,12 @@ The current-checkout retry, pulled-checkout, and ZIP update paths all use
 `update_cmd_maint._prepare_updated_checkout`: one PM dependency sync, then a
 fresh process on the selected interpreter for the frontend builds. Build
 failure aborts completion; an existing stale product is not a successful
-update. There is no updater-specific npm cache, fallback install, extra
+update. There is no updater-specific pnpm store, fallback install, extra
 refresh, or memory-provider reinstall. PM owns the complete Python union.
 
 Build a desktop distribution from a clean checkout at its release tag. Start
 with a host Python that can run the entrypoint and Git; preparation acquires the
-pinned Python, Node and npm through PM. Native compilers/SDKs remain host inputs:
+pinned Python, Node and pnpm through PM. Native compilers/SDKs remain host inputs:
 
 ```sh
 python -m scripts.bundles.desktop --tag=vX.Y.Z
@@ -74349,7 +74379,7 @@ come from the selected revision.
 
 `hermes pm bundle --out /work/agent-payload --ref HEAD` stages native tools,
 the application environment, and the agent. That PM command does not build
-frontends. `npm run payload --workspace apps/desktop` uses the stage driver
+frontends. `pnpm --dir apps/desktop run payload` uses the stage driver
 that includes them. Neither command creates an Electron installer.
 
 ### Split PM Bundle preparation and assembly
@@ -74375,10 +74405,10 @@ bootstraps or repairs dependencies. The receipt and lock are output siblings
 Assembly deliberately supplies no frontend products, as with `hermes pm bundle`.
 
 The `payload-test` producer on the existing cache action selects only `tools`,
-`python/runtime` and `native`. It excludes source `node_modules`, npm caches,
+`python/runtime` and `native`. It excludes source `node_modules`, pnpm stores,
 icon environments and packagers. PM's managed tool bootstrap still includes Node
-and npm, but does not run desktop `npm ci`. Native compiler identity and Windows
-ARM64 prerequisites use the shared owner once. Cache hits always undergo provider
+and npm, but does not install the desktop workspace dependencies. Native
+compiler identity and Windows ARM64 prerequisites use the shared owner once. Cache hits always undergo provider
 admission; native SDK/compiler prerequisites still belong to the host. PR jobs
 only restore; saves require successful preparation on the default-branch trusted
 lane with no alternate source ref. No signing or publication is added.
@@ -74474,13 +74504,13 @@ at `/opt/hermes/hermes_cli/web_dist`. The assembler also plants its shared TUI
 asset layout beneath `hermes_cli/tui_dist`. Venv command symlinks preserve the
 paths used by s6 and the privilege-drop shim.
 
-The Docker frontend stage owns npm dependencies and compilation. The runtime
-stage copies only the frontend products and the locked TypeScript package for
+The Docker frontend stage owns pnpm workspace dependencies and compilation. The
+runtime stage copies only the frontend products and the locked TypeScript package for
 runtime linting. Node/npm and Photon's separately installed sidecar dependencies
 remain runtime inputs. Python dependency preparation precedes the application
 source copy. Actual cache-hit and layer-size claims require build evidence.
 
-Nix retains `importNpmLock`, uv2nix, platform overrides, and store references.
+Nix retains `fetchPnpmDeps`, uv2nix, platform overrides, and store references.
 Its builders run during derivation builds, not evaluation. Per-product source
 filters keep frontend, Python, and resource inputs separate. Nix wrappers
 consume the assembler's command map and retain their PATH and extra-Python
@@ -74558,8 +74588,8 @@ consumers. They are not interchangeable cleanup targets.
 The native cache behavior is in `scripts/bundles/native.py`.
 Removing all caches from a payload can break offline environment reconstruction.
 
-Desktop transport selects PM tool entries, Python download/wheel caches, npm's
-content-addressed downloads, prepared workspace dependencies, and native/package
+Desktop transport selects PM tool entries, Python download/wheel caches, pnpm's
+content-addressable store, prepared workspace dependencies, and native/package
 tool inputs through `scripts/ci/desktop_build_cache.py`. It does not select the
 workdir, virtual environments, live user home, signing tokens, or products.
 The signature-result cache is separate. Native wheel partitions depend on
@@ -77002,7 +77032,7 @@ my-backend-web = "my_backend_web_package"
 
 # TUI & Desktop from Worktrees
 
-The Python core runs fine from any [git worktree](../user-guide/git-worktrees.md) — `cd` in and `hermes` just works. The two TypeScript surfaces do not: `ui-tui/` and `apps/desktop/` each need a populated `node_modules`, and a fresh `npm ci` per worktree is slow and duplicates gigabytes across every branch you have checked out.
+The Python core runs fine from any [git worktree](../user-guide/git-worktrees.md) — `cd` in and `hermes` just works. The two TypeScript surfaces do not: `ui-tui/` and `apps/desktop/` each need a populated `node_modules`, and a fresh `pnpm install` per worktree is slow and repeats for every branch you have checked out.
 
 `htui` and `hgui` are two shell helpers that close that gap. Each launches its surface **from the current worktree** while borrowing `node_modules` from one canonical checkout — so a throwaway branch costs a symlink, not an install.
 
@@ -77010,13 +77040,13 @@ They're developer conveniences, not shipped commands. Drop them in `~/.zshrc`; a
 
 ## The deps-sharing model
 
-One checkout is the **deps checkout** — the one place you actually run `npm install`. Every other worktree links against it, and only re-installs locally when its lockfile diverges (a branch that bumps a dependency must not silently run against stale packages).
+One checkout is the **deps checkout** — the one place you actually run `pnpm install`. Every other worktree links against it, and only re-installs locally when its lockfile diverges (a branch that bumps a dependency must not silently run against stale packages).
 
 ```mermaid
 flowchart TD
-    A[htui / hgui in a worktree] --> B{package-lock.json<br/>matches deps checkout?}
+    A[htui / hgui in a worktree] --> B{pnpm-lock.yaml<br/>matches deps checkout?}
     B -- yes --> C[symlink node_modules<br/>from deps checkout]
-    B -- no --> D[local npm ci<br/>in this worktree]
+    B -- no --> D[local pnpm install<br/>in this worktree]
     C --> E[launch surface]
     D --> E
 ```
@@ -77051,7 +77081,7 @@ htui() {
 
 ## `hgui` — desktop app from the worktree
 
-The desktop app needs dependencies at both the repo root and `apps/desktop/`, a Vite server, and a Python backend. The stock `npm run dev` pins Vite to `5174`; Electron also defaults to CDP port `9222` and takes a single-instance lock on its user-data directory. Changing only the Vite port is not enough to run two desktops.
+The desktop app needs dependencies at both the repo root and `apps/desktop/`, a Vite server, and a Python backend. The stock `pnpm run dev` pins Vite to `5174`; Electron also defaults to CDP port `9222` and takes a single-instance lock on its user-data directory. Changing only the Vite port is not enough to run two desktops.
 
 This **zsh** example gives each launch an explicit slot (`HGUI_SLOT`, default `0`). Use a different slot in each terminal. It uses the [shared helpers](#shared-helpers) below and requires `lsof`:
 
@@ -77072,11 +77102,11 @@ hgui() (
   deps="${HERMES_GUI_DEPS_CHECKOUT:-$HERMES_MAIN_CHECKOUT}"
   desktop="$root/apps/desktop"
 
-  if cmp -s "$root/package-lock.json" "$deps/package-lock.json"; then
+  if cmp -s "$root/pnpm-lock.yaml" "$deps/pnpm-lock.yaml"; then
     _hermes_link_deps "$desktop" "$deps/apps/desktop" || return 1
     _hermes_link_deps "$root" "$deps" || return 1
   else
-    ( cd "$root" && npm ci ) || return 1
+    ( cd "$root" && pnpm install --frozen-lockfile ) || return 1
   fi
 
   cd "$desktop" || return 1
@@ -77093,7 +77123,7 @@ hgui() (
 
   # Mirror the dev scripts, replacing their fixed ports. No repo edits needed.
   concurrently -k -n "vite,electron" \
-    "node scripts/assert-root-install.mjs && npm run clean:renderer && vite --host 127.0.0.1 --port $vite_port --strictPort" \
+    "node scripts/assert-root-install.mjs && pnpm run clean:renderer && vite --host 127.0.0.1 --port $vite_port --strictPort" \
     "tsc --build tsconfig.electron.json && wait-on http://127.0.0.1:$vite_port && node scripts/bundle-electron-main.mjs --dev && electron ."
 )
 ```
@@ -77152,7 +77182,7 @@ _hermes_link_deps() {
 ```
 
 :::info Why link only when locks match
-A symlink to a divergent `node_modules` is worse than no install — the worktree would build against packages its own lockfile never declared. Byte-comparing `package-lock.json` is the cheap, exact guard: same lock ⇒ safe to borrow; different lock ⇒ `npm ci` locally. Vite realpaths symlinks before enforcing `server.fs.allow`, which is why `apps/desktop/vite.config.ts` whitelists the real `node_modules` location.
+A symlink to a divergent `node_modules` is worse than no install — the worktree would build against packages its own lockfile never declared. Byte-comparing `pnpm-lock.yaml` is the cheap, exact guard: same lock ⇒ safe to borrow; different lock ⇒ `pnpm install --frozen-lockfile` locally. Vite realpaths symlinks before enforcing `server.fs.allow`, which is why `apps/desktop/vite.config.ts` whitelists the real `node_modules` location.
 :::
 
 ## See also
@@ -84006,7 +84036,7 @@ Verify the interpreter and source before doing work:
 python -c "import sys, pm; print(sys.executable); print(pm.__file__)"
 python -c "import httpx; print(httpx.__file__)"
 node --version
-npm --version
+pnpm --version
 hermes --version
 ```
 
@@ -84032,15 +84062,20 @@ These commands use the selected development home. A source-file edit is visible
 to the next process. Restart the affected CLI, gateway, or backend after edits.
 Reinstalling every dependency is unnecessary for a Python-only source change.
 
-For the JavaScript workspaces, run `npm ci` once at the repository root, then
-run the relevant workspace command. For example:
+For the JavaScript workspaces, run `pnpm install --frozen-lockfile` once at the
+repository root, then run the relevant workspace command. For example:
 
 ```bash
-npm run build --workspace ui-tui
-npm run dev --workspace apps/desktop
+pnpm --dir ui-tui run build
+pnpm --dir apps/desktop run dev
 ```
 
-The website is separate: `npm ci --prefix website`, then
+Activation provides the pnpm version root `package.json` pins in `devEngines`.
+Hermes's builds and `hermes update` refuse any other pnpm version (a direct
+`pnpm install` does not check it), and the root `preinstall` script refuses
+`npm install` (npx and other npm commands only warn).
+
+The website is a separate npm project: `npm ci --prefix website`, then
 `npm run build:fast --prefix website`. PM activation supplies tools, not these
 `node_modules` directories or built assets. Native desktop builds have additional
 requirements in the [desktop build guide](https://github.com/NousResearch/hermes-agent/blob/main/apps/desktop/BUILDING.md).
@@ -84207,7 +84242,7 @@ not substitutes for an installed application's update mechanism.
 | `pm update --check` | Query without writing. Exit 1 can mean updates exist; inspect output to distinguish an error. |
 | `pm update --target TARGET` | Resolve versions for the specified target. |
 | `pm update --skip-target TARGET` | Leave TARGET's pins unchanged (repeatable), for example `linux-arm64-bionic` while the termux pool lags upstream. Later runs still report the package as current. `pm lock --bump NAME VERSION` re-pins every target at a version, and `pm update --termux` repins a retired `linux-arm64-bionic` row. |
-| `pm update --uv` / `--npm` | Also refresh the Python or npm dependency resolution. |
+| `pm update --uv` / `--pnpm` | Also refresh the Python dependency resolution (`uv.lock`) or the JavaScript one (`pnpm-lock.yaml`). |
 | `pm update --termux [--check]` | Repin the termux pool archives the rolling pool has retired (the runtime-lib pin table and the bionic lock rows). `--check` reports without writing and exits 1 when a pin is retired. |
 | `pm install --target TARGET NAME...` | Stage explicit cross-target packages without recording them as the host's installed runtime. The win32 `git` target pins a self-extracting PortableGit archive: staging it runs the vendor extractor and therefore requires a Windows host. |
 | `pm bundle --out DIR [--ref REF]` | Stage a source snapshot, native tools, facts, and Python dependencies. It does not produce a signed desktop installer. |
@@ -84237,8 +84272,8 @@ and preserves the partial download.
 PM does not retry bad hashes, certificate failures, local filesystem errors or
 other permanent failures. A successful probe followed by a range GET 403 or 404
 retains the CDN fallback: one serial attempt at the missing ranges. Extraction,
-verification and publication are not repeated. Python and npm package requests
-remain under uv and npm's own retry policies.
+verification and publication are not repeated. Python and JavaScript package
+requests remain under uv and pnpm's own retry policies.
 
 ## Release age and package mirrors
 
@@ -84254,6 +84289,12 @@ which Hermes passes to uv, or with `UV_INDEX_URL`.
 `hermes pm lock` is the one step that applies the check. Run against a mirror
 without upload times, it stops with `has no publish time`; use
 `https://pypi.org/simple` for that step.
+
+JavaScript workspace dependencies follow the same rule through
+`minimumReleaseAge` in `pnpm-workspace.yaml` (in minutes: `20160` is 14 days),
+with exemptions listed in `minimumReleaseAgeExclude`. CI enforces it when it
+installs `pnpm-lock.yaml`; source, bundle and Docker installs trust the
+committed lock.
 
 ## Diagnostics
 
@@ -85260,7 +85301,7 @@ When you start Hermes from the application grid or menu (the launcher sets `DESK
 
 | Flag                 | Description                                                                               |
 | -------------------- | ----------------------------------------------------------------------------------------- |
-| `--skip-build`       | Skip npm install/package and launch the existing unpacked app from `apps/desktop/release` |
+| `--skip-build`       | Skip pnpm install/package and launch the existing unpacked app from `apps/desktop/release` |
 | `--force-build`      | Force a full rebuild even if the content stamp matches                                    |
 | `--build-only`       | Build the desktop app but do not launch it (used by `hermes update`)                      |
 | `--source`           | Launch via `electron .` against `apps/desktop/dist` instead of the packaged app           |
@@ -85606,12 +85647,12 @@ To **use a mirror** (e.g. a corporate one, or `npmmirror.com`, the de-facto Elec
 
 ```bash
 ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ \
-  bash -c 'cd "$HOME/.hermes/hermes-agent/apps/desktop" && CSC_IDENTITY_AUTO_DISCOVERY=false npm run pack'
+  bash -c 'cd "$HOME/.hermes/hermes-agent/apps/desktop" && CSC_IDENTITY_AUTO_DISCOVERY=false pnpm run pack'
 ```
 
-**Other native downloads (e.g. the `get-windows` prebuilt on Windows) that need a mirror:** put the npm keys in `$HERMES_HOME/npmrc` (`%LOCALAPPDATA%\hermes\npmrc` on Windows, `~/.hermes/npmrc` elsewhere) — for example `node_get_windows_binary_host_mirror=https://<mirror>/sindresorhus/get-windows/releases/download/`. Every `npm ci`/`npm run` the updater spawns (desktop, web and TUI builds) points `NPM_CONFIG_USERCONFIG` at that file when it exists, so the config survives `hermes update`; the repo-root `.npmrc` is git-tracked and gets autostashed on every update, and `~/.npmrc` may be missed because the desktop hand-off inherits the GUI's environment. An `NPM_CONFIG_USERCONFIG` you set yourself is never overridden.
+**Other native downloads (e.g. the `get-windows` prebuilt on Windows) that need a mirror:** put the npm keys in `$HERMES_HOME/npmrc` (`%LOCALAPPDATA%\hermes\npmrc` on Windows, `~/.hermes/npmrc` elsewhere) — for example `node_get_windows_binary_host_mirror=https://<mirror>/sindresorhus/get-windows/releases/download/`. Every dependency install and build the updater spawns (desktop, web and TUI builds) points `NPM_CONFIG_USERCONFIG` at that file when it exists (pnpm reads its registry and auth from it) and hands its other keys to dependency install scripts as `npm_config_<key>` environment variables, so the config survives `hermes update`; `~/.npmrc` may be missed because the desktop hand-off inherits the GUI's environment. An `NPM_CONFIG_USERCONFIG` you set yourself is never overridden.
 
-**If `get-windows` is missing or half-installed:** the build no longer fails — it prints `[stage-native-deps] get-windows not installed ... read_window_below will be unavailable in this build` and ships without the `read_window_below` tool. When the package directory exists but is not loadable (a Windows in-place update interrupted by a running Hermes window, `TAR_ENTRY_ERROR` in the install log), the same warning names the directory, and the next `hermes desktop --force-build` or update removes it before its npm install so the package is re-extracted — close every Hermes window and gateway first so the extract is not interrupted again. A package whose native binding or macOS helper is missing is likewise shipped without window enumeration rather than failing the build.
+**If `get-windows` is missing or half-installed:** the build no longer fails — it prints `[stage-native-deps] get-windows not installed ... read_window_below will be unavailable in this build` and ships without the `read_window_below` tool. When the package directory exists but is not loadable (a Windows in-place update interrupted by a running Hermes window, `TAR_ENTRY_ERROR` in the install log), the same warning names the directory, and the next `hermes desktop --force-build` or update removes it before its pnpm install so the package is re-extracted — close every Hermes window and gateway first so the extract is not interrupted again. A package whose native binding or macOS helper is missing is likewise shipped without window enumeration rather than failing the build.
 
 To clear a corrupt cached zip by hand:
 
@@ -85625,26 +85666,26 @@ rm -f "$HOME/.cache/electron"/electron-*.zip            # Linux
 If you want to hack on the app itself, install workspace deps from the repo root once, then run the dev server from `apps/desktop`:
 
 ```bash
-npm install          # from repo root — links apps/desktop, web, apps/shared
+pnpm install         # from repo root — links apps/desktop, web, apps/shared
 cd apps/desktop
-npm run dev          # Vite renderer + Electron, which boots the Python backend
+pnpm run dev         # Vite renderer + Electron, which boots the Python backend
 ```
 
 Point the app at a specific checkout, or sandbox it from your real config:
 
 ```bash
-HERMES_DESKTOP_HERMES_ROOT=/path/to/clone npm run dev
-HERMES_HOME=$HOME/.hermes/cache/scratch/throwaway npm run dev
-npm run dev:fake-boot   # exercise the startup overlay with deterministic delays
+HERMES_DESKTOP_HERMES_ROOT=/path/to/clone pnpm run dev
+HERMES_HOME=$HOME/.hermes/cache/scratch/throwaway pnpm run dev
+pnpm run dev:fake-boot   # exercise the startup overlay with deterministic delays
 ```
 
 Build installers:
 
 ```bash
-npm run dist:mac     # DMG + zip
-npm run dist:win     # NSIS + MSI
-npm run dist:linux   # AppImage + deb + rpm
-npm run pack         # unpacked app under release/ (no installer)
+pnpm run dist:mac     # DMG + zip
+pnpm run dist:win     # NSIS + MSI
+pnpm run dist:linux   # AppImage + deb + rpm
+pnpm run pack         # unpacked app under release/ (no installer)
 ```
 
 macOS/Windows signing and notarization run automatically when the relevant credentials are present in the environment (`CSC_LINK` / `CSC_KEY_PASSWORD` / `APPLE_*` for macOS, `WIN_CSC_*` for Windows).
@@ -88599,7 +88640,7 @@ The Hermes web dashboard (`hermes dashboard`) is built to be reskinned and exten
 2. **UI plugins** — a directory with `manifest.json` + a JavaScript bundle that registers a tab, replaces a built-in page, augments one via page-scoped slots, or injects components into named shell slots.
 3. **Backend plugins** — a Python file inside that plugin directory that exposes a FastAPI `router`; routes are mounted under `/api/plugins/<name>/` and called from the plugin's UI.
 
-All three are **drop-in at runtime**: no repo clone, no `npm run build`, no patching the dashboard source. This page is the canonical reference for all three.
+All three are **drop-in at runtime**: no repo clone, no `pnpm run build`, no patching the dashboard source. This page is the canonical reference for all three.
 
 If you just want to use the dashboard, see [Web Dashboard](./web-dashboard). If you want to reskin the terminal CLI (not the web dashboard), see [Skins & Themes](./skins) — the CLI skin system is unrelated to dashboard themes.
 
@@ -93216,7 +93257,7 @@ If these dependencies are damaged, run `hermes pm repair` and restart Hermes.
 For source setup, use the [PM developer workflow](../../reference/package-management.md#developer-workflow).
 Messaging and voice extras are separate requests, not implied by `all`.
 
-When you run `hermes dashboard` without the dependencies, it will tell you what to install. If the frontend hasn't been built yet and `npm` is available, it builds automatically on first launch.
+When you run `hermes dashboard` without the dependencies, it will tell you what to install. If the frontend hasn't been built yet, it builds automatically on first launch with the Node and pnpm Hermes provisions.
 
 The Chat tab is part of every `hermes dashboard` launch — the embedded browser chat pane (running the TUI over PTY/WebSocket) is always available, with no extra flag required.
 
@@ -94399,8 +94440,8 @@ hermes dashboard --no-open
 
 # Terminal 2: start the Vite dev server with HMR
 cd web/
-npm install
-npm run dev
+pnpm install
+pnpm run dev
 ```
 
 The Vite dev server at `http://localhost:5173` proxies `/api` requests, WebSockets included, to the FastAPI backend at `http://127.0.0.1:9119` (set `HERMES_DASHBOARD_URL` to use another backend). It reads the session token from the backend server-side. It forwards WebSocket upgrades with their `Host` and `Origin` unchanged, so the page's Origin names the host and port it dialled and the backend admits it as same-origin without trusting port `5173`. This holds when `HERMES_DASHBOARD_URL` points at a port forward to the backend (for example `http://127.0.0.1:8000` through `ssh -L 8000:localhost:9119`). Vite's own CORS is turned off, so other local pages cannot read the token from the dev server either.
@@ -94411,7 +94452,7 @@ The build is CPU- and memory-intensive (Vite 8's Rust-native Rolldown bundler pa
 
 ## Automatic Build on Update
 
-When you run `hermes update`, the web frontend is automatically rebuilt if `npm` is available. This keeps the dashboard in sync with code updates. If `npm` isn't installed, the update skips the frontend build and `hermes dashboard` will build it on first launch.
+When you run `hermes update`, the web frontend is automatically rebuilt with the Node and pnpm Hermes provisions. This keeps the dashboard in sync with code updates. If the update cannot provision them (for example with lazy installs disabled), it skips the frontend build and `hermes dashboard` will build it on first launch.
 
 ## Themes & plugins
 
