@@ -3060,7 +3060,7 @@ On macOS, `F6`/`F7` mean the physical function keys, not the media/system contro
 | `Ctrl+X Ctrl+E` | Emacs-style alternate binding for the external editor (same behavior as `Ctrl+G`). |
 | `Ctrl+S` | **Stash the prompt.** Parks the current draft and clears the composer so you can send something else first. Press `Ctrl+S` again on an empty composer to bring the draft back (cursor at the end, attached images restored). Repeated presses build a stack rather than overwriting, so an earlier draft is never silently lost — with two or more stashed, `Ctrl+S` opens a browse panel (`↑`/`↓` to navigate, `Enter` to restore, `D` to discard, `Esc` or `Ctrl+S` to close). A `📌 N` badge in the status bar shows how many drafts are parked. Multi-line drafts round-trip exactly, including blank lines. The stash lives in memory for the session only — nothing is written to disk, since drafts often contain secrets. |
 | `Ctrl+C` | Clear a typed draft first (even while the agent works); with an empty prompt, interrupt the agent (double-press within 2s to force exit) |
-| `Esc Esc` | With a draft: discard it (Up recalls it). On an idle, empty prompt: open the **backtrack** picker (same as `/rewind`). `↑`/`↓` move through your earlier prompts (newest first, with a preview); `Enter` edits the selected prompt and resends it, cutting the session back to just before it only when you send (cancel with `Esc Esc` or `Ctrl+C` and nothing is removed); `f` forks a new session from just before that prompt with it prefilled, leaving the original untouched; `Esc` closes the picker. |
+| `Esc`, `Esc` | **Backtrack** (same as `/rewind`). On an idle, empty prompt the first `Esc` shows `esc again to edit previous message` (it waits for you; any other key cancels it and acts normally), the second opens a **transcript browser**: every prompt (`›`) and reply (`•`) of the session in a panel sized to the screen, the latest prompt selected in reverse video. `←`/`h` and `→`/`l` pick an older/newer prompt, `↑`/`↓` (`k`/`j`) scroll a row and `PgUp`/`PgDn` a page; `Enter` puts the selected prompt back in the composer for editing, and sending the edit cuts the session back to just before it (nothing is removed until you send; cancel with `Esc Esc`, `Ctrl+C` or an empty submit); `f` forks a new session from just before that prompt with it prefilled, leaving the original untouched; `Esc` or `q` closes, and any other key closes the browser and types normally. With a draft, `Esc Esc` discards it instead (Up recalls it). |
 | `Ctrl+T` / `F6` | Open the full-screen live work monitor (subagents and background processes) without losing the composer draft. The live dock appears automatically above the status bar; arrows select a worker or process, `Enter` shows its recent log, `s` steers a worker, and `x` requests stop with confirmation. See [Monitoring subagents](./features/delegation.md#monitoring-running-subagents-agents). |
 | `Ctrl+R` / `F7` | Toggle the live work dock between its multi-row preview and a single summary line without moving composer focus. `Ctrl+R` is the reliable fallback when macOS reserves the function-key row. Besides subagents and background processes, the dock shows a standing `/goal` (active, parked or paused, with turns used) on its top row and the prompts waiting in `/queue` on its bottom rows. |
 | `Ctrl+D` | Exit (on an empty prompt; with text it deletes under the cursor). While the gateway runs a turn, it exits and leaves the turn running: the gateway finishes it, ends the session afterwards, and `hermes --resume` shows the reply. A turn that asks a question (approval or clarify) meanwhile waits for its timeout or for you to resume. Use `Ctrl+C` to stop the turn instead. |
@@ -3591,7 +3591,7 @@ On macOS, `F7` means the physical F7 function key. MacBook keyboards may use tha
 - **Slash autocompletion** opens as a floating panel with descriptions, not an inline dropdown.
 - **Typing while the agent is busy** (`display.busy_input_mode: queue`, the TUI default) submits the message to the gateway immediately. The gateway's durable session queue orders it behind the running turn, so it survives a gateway crash or restart and shows up as `[queued] …` in the `queued (N)` panel of every client attached to the session — the Desktop app sees the same list. Your message's transcript bubble appears when its turn actually starts. `steer` and `interrupt` still act on the live turn as before.
 - **`Ctrl+X`** opens the live session switcher. When a queued message is highlighted (sent while the agent was still running), it still deletes that queued message instead — for a gateway-queued row this cancels it on the gateway (`prompt.cancel`), so it disappears for every viewer; picking and re-sending an edited row cancels the original and submits the edit as a new input (if the original has already started by then, it is stopped and the edit runs after it). **`Esc`** cancels editing and unhighlights without deleting.
-- **`Esc Esc`** on an idle, empty composer opens the **rewind picker** (same as `/rewind`): your earlier prompts, newest first. **Enter** opens the highlighted one for editing; **Enter** again removes that prompt and everything after it from the session and sends your edit as a new turn. Nothing is removed until you send, and **Esc** steps back (edit → list → closed). **f** forks from here instead: a new session with everything *before* the highlighted prompt, with that prompt waiting in the composer (not sent) so you can take the conversation another way; the original session is left untouched. Forking the very first prompt starts a fresh session with it prefilled. While the list is open the transcript scrolls to the highlighted prompt and marks it, so ↑/↓ also jumps between your earlier messages. With a draft in the composer `Esc Esc` still discards the draft, and mid-turn it still interrupts. Prompts that carried images are listed by number only and can't be picked.
+- **`Esc`, `Esc`** on an idle, empty composer goes back to an earlier prompt (Codex-style backtrack, same as `/rewind`). The first `Esc` primes it and the hint row shows `esc again to edit previous message` (only when there is an earlier prompt; with none, the second `Esc` says `No previous message to edit.`). There is no time limit, but any other key, a click, a paste or a new turn cancels the prime and then acts as usual. The second `Esc` opens **transcript browsing** with your latest prompt selected and drawn in reverse video, and a hint row `Browsing transcript · ↑↓/jk scroll · ←→/hl prompts · ↵ edit · f fork · esc back`. **←/h** picks the next older prompt and **→/l** the next newer one (it stops at the ends); **↑/↓/j/k** scroll the transcript a line and **PgUp/PgDn** a page, without changing the selection. **Enter** closes browsing and puts the selected prompt in the composer, not sent, with the hint `↺ Editing prompt N — Enter rewinds here and sends · Esc Esc cancels`: edit it and press **Enter**, and that prompt plus everything after it is removed from the session and your edit goes out as a new turn. Nothing is removed until you send. Sending an empty composer, a slash command, `Esc Esc`, `Ctrl+C` or switching session cancels the edit and removes nothing. **f** forks instead: a new session with everything *before* the selected prompt, with that prompt waiting in the composer (not sent); the original session is left untouched, and forking the very first prompt starts a fresh session with it prefilled. **Esc** goes back to where the transcript was scrolled before, **q** or `Ctrl+C` closes, and any other key closes browsing and is typed into the composer. In `--tui-native` mode, where the transcript lives in the terminal's own scrollback, browsing opens a transcript pager of the session's prompts and replies above the composer instead, with the same keys. With a draft in the composer `Esc Esc` still discards the draft, and mid-turn it still interrupts. Prompts that carried images keep their number but can't be selected.
 - **Approval prompts** offer **No, and tell Hermes what to do instead** after **Deny**. Pick it (or press its number), type the instruction, and press **Enter**: the instruction is steered into the running turn (as `/steer` would) and the command is denied, so Hermes sees both together and tries again your way. If the turn already ended, the instruction is queued as your next prompt. **Esc** on the typing row goes back to the choices; **Esc** on the choices still denies outright.
 - **`Ctrl+G` / `Ctrl+X Ctrl+E`** — open the current input buffer in `$EDITOR` for multi-line / long-prompt composition; save-and-exit sends the contents back as the prompt.
 
@@ -3602,7 +3602,7 @@ All slash commands work unchanged. A few are TUI-owned — they produce richer o
 | Command | TUI behavior |
 |---------|--------------|
 | `/help` | Overlay with categorized commands, arrow-key navigable |
-| `/rewind` | Rewind picker: pick an earlier prompt, then **Enter** to edit and resend it (everything after it is removed when you send) or **f** to fork a new session from just before it. Also `Esc Esc` on an empty composer |
+| `/rewind` | Transcript browsing (no prime step): **←/→** pick an earlier prompt, **Enter** puts it in the composer to edit and resend (everything from it on is removed when you send), **f** forks a new session from just before it, **Esc** goes back. Also `Esc`, `Esc` on an empty composer |
 | `/sessions` (alias `/switch`) | Live session switcher — list open TUI sessions, switch between them, close them, or start another one |
 | `/model` | Modal model picker grouped by provider, with cost hints |
 | `/skin` | Live preview — theme change applies as you browse |
@@ -3772,18 +3772,18 @@ See [Sessions](sessions.md) for lifecycle, search, compression, and export.
 
 ## How the TUI talks to its gateway
 
-By default the TUI spawns its own in-process gateway, so each TUI instance is self-contained — there's nothing to configure.
+By default the TUI attaches to the profile's shared gateway, the same process that serves `hermes chat`, the Desktop app and your messaging platforms. When no gateway is running, the TUI starts one; a gateway started this way stops itself after it has been idle for a while. The TUI connects to it over a local WebSocket (`/api/ws`) that speaks the `hermes-gateway-v1` protocol, with a single-use ticket from the attach step. There is nothing to configure. Other local programs attach the same way with [`hermes gateway attach --json`](../reference/cli-commands.md#local-runtime-discovery-and-startup).
 
-You may see a `HERMES_TUI_GATEWAY_URL` env var referenced in the codebase or logs. This is an **internal wiring detail of the web dashboard**, not a user-facing remote-attach knob. When you open the dashboard's "Chat" tab (`hermes dashboard` → `/chat`), the dashboard's web server spawns an embedded TUI child process and injects `HERMES_TUI_GATEWAY_URL` so that child attaches to the dashboard's own in-process `tui_gateway` over a loopback WebSocket (`/api/ws`). The `/api/ws` endpoint exists only inside the dashboard server (`hermes_cli/web_server.py`) and is bound to that process's lifetime and auth.
+You may see a `HERMES_TUI_GATEWAY_URL` env var referenced in the codebase or logs. This is an **internal wiring detail of the web dashboard**, not a user-facing remote-attach knob. When you open the dashboard's "Chat" tab (`hermes dashboard` → `/chat`), the dashboard's web server spawns an embedded TUI child process and injects `HERMES_TUI_GATEWAY_URL` so that child attaches to the dashboard's own in-process `tui_gateway` over a loopback WebSocket (`/api/ws`). That endpoint lives in the dashboard server (`hermes_cli/web_server.py`) and is bound to that process's lifetime and auth.
 
-There is no general "point any TUI at any standalone gateway port" mode. In particular, the OpenAI-compatible API server (`hermes gateway` / the `api_server` platform) does **not** serve `/api/ws` — it's the model-backend surface (`/v1/chat/completions`, `/v1/models`, …) and deliberately does not expose the TUI's JSON-RPC control channel. Setting `HERMES_TUI_GATEWAY_URL` to that port will 404.
+There is no general "point any TUI at any gateway port" mode: the gateway's own `/api/ws` admits only a loopback client holding a single-use ticket from the attach step. In particular, the OpenAI-compatible API server (`hermes gateway` / the `api_server` platform) does **not** serve `/api/ws` — it's the model-backend surface (`/v1/chat/completions`, `/v1/models`, …) and deliberately does not expose the TUI's JSON-RPC control channel. Setting `HERMES_TUI_GATEWAY_URL` to that port will 404.
 
 ### If the connection drops
 
-- **Spawned gateway (default):** when the gateway process dies mid-session the TUI says *Hermes stopped unexpectedly — restarting and reopening your chat*, respawns it (bounded to a few attempts per minute) and reopens the same saved session. The reply that was in flight is lost with the process.
-- **Attached gateway (dashboard chat):** when only the WebSocket drops the TUI says *Connection to Hermes lost — reconnecting and reopening your chat…*, reconnects with growing backoff and reattaches to the same session — including a reply that is still streaming on the backend. Nothing is resubmitted.
+- **The WebSocket drops:** the TUI says *Connection to Hermes lost — reconnecting and reopening your chat…*, reconnects with growing backoff and reattaches to the same session — including a reply that is still streaming on the gateway. Nothing is resubmitted.
+- **The gateway is gone** (a crash, its idle exit, `hermes gateway stop`): the TUI starts it again, at most a few times per minute, and reopens the same saved session. A reply that was in flight when the gateway crashed is lost with it.
 
-If you want multiple surfaces to share one set of sessions, use the shared `~/.hermes/state.db` (see [Sessions](sessions.md)) or the web dashboard's embedded chat (see [Web Dashboard](features/web-dashboard.md#chat)) — not a hand-set gateway URL.
+The TUI, `hermes chat`, the Desktop app and your messaging platforms already share the profile's gateway and its sessions (see [Sessions](sessions.md)); a hand-set gateway URL adds nothing.
 
 ## Reverting to the classic CLI
 
@@ -22742,6 +22742,7 @@ def register(ctx):
 - If a Python plugin callback on a **timeout-bounded** hook (hot-path observers such as `post_tool_call` / `pre_llm_call`, plus the policy hook `pre_tool_call`) **blocks** longer than `plugins.hook_callback_timeout` (default 30s, set `0` to disable, max 600), it is abandoned without joining the worker so the agent loop continues. Timed-out or still-running `pre_tool_call` callbacks **fail closed** (block the tool); other bounded hooks fail open (skip). Hooks with a documented caller-thread contract (`subagent_stop`) are never moved onto a timeout worker. Shell hooks keep their own per-entry `timeout`.
 - The catalog below is descriptive: **observers** ignore returns, **transforms** accept the first valid string replacement, and **directive/control** hooks consume documented return shapes. Plugin middleware is a separate registry and surface, not another hook category.
 - Correlation fields such as `turn_id`, `api_request_id`, `task_id`, `session_id`, and `api_call_count` are hook-specific and may be absent. Treat IDs as opaque.
+- Tool hooks also carry `conversation_id`: the conversation's first session id, which stays the same when a rotating compression replaces `session_id`, and which a delegated subagent shares with its delegator. Key per-conversation state on it.
 - Runtime event-name validity comes from `hermes_cli.plugins.VALID_HOOKS`. `hermes hooks list` lists configured shell/outbound hooks, not every available event; `hermes hooks test <event>` reports the valid set only when an invalid event is supplied.
 
 ### Cache-safe system prompt sections
@@ -22770,8 +22771,8 @@ The contract is deliberately narrow:
 - `after_memory` is the only placement anchor. Sections are sorted by ID,
   rendered after memory/profile context and before session metadata; plugins
   cannot reorder or replace core prompt content.
-- A callable receives a read-only mapping with `session_id`, `model`,
-  `provider`, `platform`, `profile_name`, and `cwd`. It runs **once for a new
+- A callable receives a read-only mapping with `session_id`, `conversation_id`,
+  `model`, `provider`, `platform`, `profile_name`, and `cwd`. It runs **once for a new
   session**. Its rendered bytes are frozen on compression and recovered from
   the already-persisted full system prompt after a process restart/resume;
   plugin state is not re-read for an existing session.
@@ -22794,9 +22795,9 @@ Payload fields below are the exact event-specific fields supplied by each call s
 
 | Hook | Category | Exact timing and return behavior | Explicit payload fields | Privacy / sensitivity |
 |---|---|---|---|---|
-| [`pre_tool_call`](#pre_tool_call) | Directive/control | Once before execution; any valid `block` wins over any `approve` (then the first valid `approve`), and `modify` returns are shallow-merged into the tool arguments. | `tool_name`, `args`, `task_id`, `session_id`, `tool_call_id`, `turn_id`, `api_request_id`, `middleware_trace` | Raw arguments may contain user content, paths, commands, or secrets. |
-| `post_tool_call` | Observer | After blocked, error, or successful result; return ignored. | `tool_name`, `args`, `result`, `task_id`, `session_id`, `tool_call_id`, `turn_id`, `api_request_id`, `duration_ms`, `status`, `error_type`, `error_message`, `middleware_trace` | Result/error text may contain arbitrary tool or user content and secrets. |
-| `transform_tool_result` | Transform | After `post_tool_call`, before conversation append; first string replaces the result. | `tool_name`, `args`, `result`, `task_id`, `session_id`, `tool_call_id`, `turn_id`, `api_request_id`, `duration_ms`, `status`, `error_type`, `error_message` | Exposes the full model-bound result and arguments. |
+| [`pre_tool_call`](#pre_tool_call) | Directive/control | Once before execution; any valid `block` wins over any `approve` (then the first valid `approve`), and `modify` returns are shallow-merged into the tool arguments. | `tool_name`, `args`, `task_id`, `session_id`, `conversation_id`, `tool_call_id`, `turn_id`, `api_request_id`, `middleware_trace` | Raw arguments may contain user content, paths, commands, or secrets. |
+| `post_tool_call` | Observer | After blocked, error, or successful result; return ignored. | `tool_name`, `args`, `result`, `task_id`, `session_id`, `conversation_id`, `tool_call_id`, `turn_id`, `api_request_id`, `duration_ms`, `status`, `error_type`, `error_message`, `middleware_trace` | Result/error text may contain arbitrary tool or user content and secrets. |
+| `transform_tool_result` | Transform | After `post_tool_call`, before conversation append; first string replaces the result. | `tool_name`, `args`, `result`, `task_id`, `session_id`, `conversation_id`, `tool_call_id`, `turn_id`, `api_request_id`, `duration_ms`, `status`, `error_type`, `error_message` | Exposes the full model-bound result and arguments. |
 | `transform_terminal_output` | Transform | After bounded foreground process capture, before final output limiting; first string replaces output. | `command`, `output`, `returncode`, `task_id`, `env_type` | Command/output may contain credentials. |
 | `pre_transcription` | Transform | Fired by the STT dispatcher after provider resolution and before any backend (built-in, command-type, or plugin-registered) is invoked; dict results are applied in registration order, last-writer-wins per field (`prompt`, `language`, `model`; `file_path` is read-only). | `file_path`, `provider`, `model`, `language`, `prompt`, `source` | The final prompt is uploaded to the configured STT provider with the audio — keep secrets out of hook returns. |
 | `pre_llm_call` | Directive/control | Once per turn before the loop; all valid string/`{"context": ...}` returns are joined and injected into the user message; the first valid `{"action": "block", "message": ...}` ends the turn before any inference request. | `session_id`, `task_id`, `turn_id`, `user_message`, `conversation_history`, `is_first_turn`, `model`, `platform`, `parent_session_id`, `sender_id` | Full user message and conversation history. |
@@ -24031,7 +24032,7 @@ Fires **after** a tool returns and **before** the result is appended to the conv
 def my_callback(tool_name: str, args: dict, result: str, task_id: str, **kwargs) -> str | None:
 ```
 
-The full payload also includes `session_id`, `tool_call_id`, `turn_id`, `api_request_id`, `duration_ms`, `status`, `error_type`, and `error_message`. `result` is the final result returned by tool dispatch; it and `args` can contain arbitrary user/tool content and secrets.
+The full payload also includes `session_id`, `conversation_id`, `tool_call_id`, `turn_id`, `api_request_id`, `duration_ms`, `status`, `error_type`, and `error_message`. `result` is the final result returned by tool dispatch; it and `args` can contain arbitrary user/tool content and secrets.
 
 **Return value:** The first `str` replaces the result (including an empty string); `None` leaves it unchanged.
 
@@ -47918,6 +47919,58 @@ Service persistence is separately opt-in during setup. Imports and noninteractiv
 setup do not install a missing service based on an imported preference. See
 [optional service installation](#optional-service-installation).
 
+## `hermes gateway attach`
+
+`hermes gateway attach --json` is the public attach step for a local client that has its own UI
+and dials the gateway itself. It runs `hermes_cli/gateway_runtime_attach.py::attach_gateway`, the
+same function behind the Ink TUI's `ui-tui/scripts/gateway_bootstrap.py`, so both clients get the
+same discovery, start, recovery and verdicts.
+
+| Flag | Meaning |
+|------|---------|
+| (none) | Discover the owner that serves the active profile. Never start one. |
+| `--start` | Ensure the owner, as `ensure` does (a client's first launch). |
+| `--recover` | Discover; when the owner is not ready (it crashed, ended by its idle exit, was stopped, or an older Hermes's gateway answers), ensure it. Bound how often a client uses this, as Ink does with `OWNER_RECOVERY_LIMIT`, so a crash-looping owner is not restarted without pause. |
+| `--timeout S` | Start deadline for `--start`/`--recover` (default `60`). Discovery and the ticket mint each add at most 5 seconds. `--start` and `--recover` are mutually exclusive. |
+
+When no service is installed, `attach` starts an unmanaged gateway with the idle exit: it stops
+itself once no client, adapter or job needs it, and the next `attach --start` starts a new one. An
+installed service that `attach` starts keeps running, as with `ensure`. A restart's after-turn
+wait (`draining`/`restart_wait`) is attachable, so a client can still answer a parked prompt.
+Launch policy (model, provider, toolsets, cwd, Kanban board) belongs in `session.create`; the
+command removes those variables from its own environment before it can start a daemon.
+
+Success (exit `0`) prints one JSON line: `ensure`'s fields (`state`, `reason_code`, `detail`,
+`endpoint`, `client_code_sha`) plus:
+
+```json
+{"url": "ws://127.0.0.1:<port>/api/ws", "protocol": "hermes-gateway-v1",
+ "protocols": ["hermes-gateway-v1", "hermes-gateway-ticket.<ticket>"], "ticket": "<ticket>"}
+```
+
+`endpoint` holds `profile_id`, `instance_id`, `capabilities`, `code_sha` and the other discovery
+fields. Dial `url` with `protocols` as the WebSocket subprotocols, from loopback, with **no
+`Origin` header**, and check that the server selected `protocol`. Then speak `hermes-gateway-v1`:
+`runtime.describe` for the owner's `session.create` contract, then `session.create` or
+`session.resume`. When `client_code_sha` and `endpoint.code_sha` differ, the gateway outlived
+`hermes update`: restart it (`hermes gateway restart`) rather than keep attaching to old code.
+
+The ticket is the WebSocket's only credential. It is minted by the control socket's
+`session-ticket` verb (purpose `interactive`, scope `profile`) over the same-user socket, or the
+SID-checked named pipe on Windows; a profile served by the default multiplexer gets its ticket
+from the multiplexer's control socket. It is single-use, bound to the caller's profile and that
+owner's `instance_id`, and expires after 30 seconds. `attach` prints it to stdout for the calling
+process only; it never logs it. Run `attach` again for each new connection and each reconnect.
+
+With no owner to attach, the JSON adds `message` and has no `url` or `ticket`. `message` is
+the verdict Ink shows: `gateway <state>: <reason_code>` (`not ready` when there is no code),
+then one `gateway <state>: …` line per line of the refusal's remedy, or a failed start's
+redacted output. The same text goes to stderr. The exit code is `ensure`'s for that verdict. When
+the owner was attachable but no ticket could be minted (it went away, or refused the grant), the
+verdict is `inaccessible`/`ticket_unavailable` (exit `7`) with the bounded cause, or the local
+repair command, in `detail`; run `attach` again. Invalid arguments exit `2` with `ensure`'s
+`invalid_invocation` line.
+
 ## Architecture Overview
 
 ```text
@@ -51635,6 +51688,7 @@ Subcommands:
 |------------|-------------|
 | `run` | Run the gateway in the foreground. Recommended for WSL, Docker, and Termux. |
 | `ensure` | Discover or request a local session runtime without installing a service or replacing an existing owner. Emits JSON; see below. |
+| `attach` | Give a local client the gateway's WebSocket URL and one single-use session ticket for this profile. Emits JSON; see below. |
 | `start` | Start the installed systemd/launchd background service. |
 | `stop` | Stop the service (or foreground process). |
 | `restart` | Restart the service. |
@@ -51683,6 +51737,21 @@ service. Exit `0` means ready; any other code is a refusal or a deadline, never 
 to start a replacement. Service identity checks, the home-permission policy behind
 `unsafe_control_permissions`, and every exit code:
 [Gateway internals: `hermes gateway ensure`](../developer-guide/gateway-internals.md#hermes-gateway-ensure).
+
+`hermes gateway attach [--json] [--start] [--recover] [--timeout 60]` is the attach step for a
+local client that dials the gateway itself (a third-party chat UI, for example). It prints
+`ensure`'s JSON plus, once the gateway is attachable, `url` (`ws://127.0.0.1:<port>/api/ws`),
+`protocol` (`hermes-gateway-v1`), `protocols` (the WebSocket subprotocols to dial with) and
+`ticket`. The ticket is single-use, bound to the active profile, and expires 30 seconds after it
+is minted; it goes to stdout for the calling process only and is never logged. A plain call only
+discovers the gateway; `--start` starts it when none serves the profile; `--recover` discovers
+first and starts (or replaces an older Hermes's gateway) only when it is not ready. An unmanaged
+gateway that `attach` starts (no service installed) stops itself once it has been idle for a while.
+With no gateway to attach,
+the JSON carries `message` (the `gateway <state>: <reason>` lines, with the remedy when there is
+one), the same text goes to stderr, and the exit code is `ensure`'s for that verdict. The Ink TUI
+attaches through the same code. Details and the dial rules:
+[Gateway internals: `hermes gateway attach`](../developer-guide/gateway-internals.md#hermes-gateway-attach).
 
 ## `hermes lsp`
 
@@ -53478,7 +53547,7 @@ Type `/` in the CLI to open the autocomplete menu. Built-in commands are case-in
 | `/prompt` (alias: `/compose`) | Compose your next prompt in `$EDITOR` (markdown) instead of the inline input — useful for long, multi-line, or carefully-formatted prompts. |
 | `/retry` | Retry the last message (resend to agent) |
 | `/undo` | Remove the last user/assistant exchange |
-| `/rewind [N \| fork N]` | **Backtrack** (classic CLI; also `Esc Esc` on an idle, empty prompt). Opens a picker of your earlier prompts, newest first, with a preview of the selected one. `Enter` puts it back in the composer for editing: sending the edit cuts the session back to just before that prompt (the later messages are archived, as with `/undo`) and sends the new text; cancelling with `Esc Esc`, `Ctrl+C` or an empty submit removes nothing. `f` forks instead: a new branched session holding only the history before that prompt, with the prompt prefilled (not sent); the original session is kept as it was. `/rewind N` edits prompt N directly and `/rewind fork N` forks before it. |
+| `/rewind [N \| fork N]` | **Backtrack** (classic CLI; also `Esc`, `Esc` on an idle, empty prompt: the first shows `esc again to edit previous message`). Opens a transcript browser of your prompts and replies with the latest prompt selected in reverse video: `←`/`→` (`h`/`l`) pick a prompt, `↑`/`↓` (`k`/`j`) and `PgUp`/`PgDn` scroll. `Enter` puts it back in the composer for editing: sending the edit cuts the session back to just before that prompt (the later messages are archived, as with `/undo`) and sends the new text; cancelling with `Esc Esc`, `Ctrl+C` or an empty submit removes nothing. `f` forks instead: a new branched session holding only the history before that prompt, with the prompt prefilled (not sent); the original session is kept as it was. `Esc` or `q` closes. `/rewind N` edits prompt N directly and `/rewind fork N` forks before it. |
 | `/title` | Set a title for the current session (usage: /title My Session Name) |
 | `/compress [here [N] \| focus topic]` | Manually compress conversation context (flush memories + summarize). `/compress here [N]` summarizes everything except the most recent N exchanges (default 2), kept verbatim — pick your own compression boundary. A focus topic narrows what a full summary preserves. |
 | `/rollback` | List or restore filesystem checkpoints (usage: /rollback [number]) |
@@ -65351,7 +65420,17 @@ fields; callers may initialize a provider without an agent or a session database
 | `gateway_session_key` | Stable messaging-chat identity for per-chat session isolation. |
 | `user_id`, `user_id_alt`, `user_name`, `chat_id` | Gateway identity fields, included when present. |
 | `agent_identity` | Active profile name, when available. |
+| `resumed` | `True` when an earlier turn of this session id ran (the agent continues a stored transcript: `--resume`, a gateway chat after a restart, a reopened Desktop/TUI session). `False` for a new session id: a subagent, a cron run, a fresh chat. A `/branch` child seeded with copied history is `True`. A mid-process `/resume` arrives through `on_session_switch()` instead. |
+| `message_count` | Messages already stored for this session id. On TUI/Desktop it can include the prompt being submitted, so a fresh chat may report `1` with `resumed` `False`. |
 | `agent_workspace`, `agent_context` | Runtime agent scope. `agent_workspace` is `hermes`; `agent_context` is `cron` for scheduler runs, `subagent` for `delegate_task` children, else `primary` — skip automatic writes for the non-primary values. |
+
+Read optional keys with `kwargs.get(...)`; older Hermes versions omit the newer ones (`resumed`,
+`message_count`).
+
+`on_turn_start(turn_number, message, **kwargs)` receives `model` (the turn's primary model id at
+turn start; `""` when unset, a preset name under mixture-of-agents) and the turn's author:
+`author_id`, `author_name`, `author_is_bot`. Declare only the keywords you need; the manager passes
+a provider only the ones its signature accepts.
 
 Do not assume `os.getcwd()` identifies the conversation's workspace: one Desktop
 or gateway backend can serve several sessions. If `cwd` is absent and directory
@@ -65403,10 +65482,11 @@ workspace; absent or empty cwd remains unpinned.
 | `on_profile_created(profile_name, hermes_home)` | A profile selecting your provider was created (a clone carries `memory.provider`), from the CLI, dashboard or Desktop | Per-profile state: a peer, a host entry |
 | `on_profile_renamed(old_name, new_name, hermes_home)` | That profile was renamed (`hermes_home` is the new directory) | Re-key state stored under the old name |
 
-The two profile hooks run on an uninitialized instance with that profile's home and its own `.env`
-secrets bound. A key that profile's `.env` lacks reads as unset: the caller's environment is never
-used. An exception (`SystemExit` included) is logged and never fails the create or rename. They run inside the
-create/rename request on every surface, so do network work on a background thread.
+The two profile hooks run on an uninitialized instance with that profile's home and its own
+secrets bound: its `.env` plus its configured secret sources (1Password and the like). A key it
+lacks reads as unset: the caller's environment is never used. An exception (`SystemExit` included) is logged and never fails the create or rename. They run inside the
+create/rename request on every surface, so do network work on a background thread. Under
+`plugins.isolation: host`, a plugin host started only for the hook is stopped when it returns.
 
 For native `replace` and `remove`, `metadata["previous_content"]` contains the full
 entry selected under the native-store lock. Notifications are emitted only after
@@ -65620,6 +65700,9 @@ def write_config_fields(self, values: dict, hermes_home: str) -> None:
     # json.JSONDecodeError counts) to refuse the save (shown as a 400), e.g. when your file does not parse.
     ...
 ```
+
+Declaring `storage=STORAGE_PROVIDER` without `write_config_fields` makes a save return 501; a
+provider that fails to load returns 503; an unknown `storage` value shows no panel and refuses saves.
 
 ## Save Config
 
@@ -66306,6 +66389,9 @@ def on_tool_execution(**kwargs):
     result = kwargs["next_call"](kwargs["args"])
     return result
 ```
+
+As with hooks, a callback without `**kwargs` receives only the fields its
+signature names, so a field added to the payload later does not break it.
 
 If multiple plugins register the same execution middleware kind, Hermes runs
 them as a nested chain in registration order. Middleware failures are fail-open:
@@ -68301,6 +68387,38 @@ invocation. `allow_task_override: true` is an explicit operator grant for
 using Hermes built-in auxiliary tasks; it does not permit another plugin's
 tasks. Omit `task=` (or use `"auto"`) to keep the active main provider/model.
 
+#### From the plugin's frontend: `llm.oneshot`
+
+A plugin's frontend (a Desktop page, a chat frontend attached to the
+gateway) runs the same task over the gateway's `llm.oneshot` JSON-RPC
+method, without a Python subprocess:
+
+```json
+{"method": "llm.oneshot", "params": {
+  "task": "classifier",
+  "instructions": "Classify the ticket.",
+  "input": "<ticket text>",
+  "schema": {"type": "object", "properties": {"label": {"type": "string"}}, "required": ["label"]},
+  "redact": true
+}}
+```
+
+- `task` is a built-in auxiliary task or one a loaded plugin registered; it
+  resolves through `auxiliary.<task>` like `ctx.llm`. An unknown key is
+  refused (`invalid_params`, `field: task`) instead of running on the main
+  model. Omitted, it is `title_generation`.
+- `schema` (a JSON Schema object) asks for JSON through the prompt and the
+  provider's JSON mode. The reply is `{"text": ..., "parsed": <value>}`. An
+  answer that is not JSON, or does not match the schema, is an error. An
+  install without the `jsonschema` package (not a core dependency) refuses
+  a `schema` request before the model is called.
+- `redact: true` masks secrets in `input` with the agent's redactor before
+  the model sees it.
+- A `session_id` lends that session's model to a task that does not name
+  its own: when `auxiliary.<task>.provider` is `auto` (the default). A task
+  configured with an explicit provider or model keeps it; explicit settings
+  win over the session's route, as for `ctx.llm`.
+
 #### Inheriting a built-in slot
 
 `inherit_from` names a built-in auxiliary task (`compression`, `mcp`,
@@ -69494,9 +69612,15 @@ def unit_convert(args: dict, **kwargs) -> str:
 1. **Signature:** `def my_handler(args: dict, **kwargs) -> str`
 2. **Return:** Always a JSON string. Success and errors alike.
 3. **Never raise:** Catch all exceptions, return error JSON instead.
-4. **Accept `**kwargs`:** Hermes injects context keywords (`task_id`, `session_id`, `user_task`,
-   `parent_agent`, ...) and only forwards the ones your signature names, so `def handler(args)`
+4. **Accept `**kwargs`:** Hermes injects context keywords (`task_id`, `session_id`, `conversation_id`,
+   `user_task`, `parent_agent`, ...) and only forwards the ones your signature names, so `def handler(args)`
    works; `**kwargs` is how you opt into the full, additively growing context.
+5. **Key per-conversation state on `conversation_id`:** `session_id` names the current transcript
+   segment, and a rotating compression (`compression.in_place: false`) replaces it mid-conversation.
+   `conversation_id` is the id of the conversation's first session and does not change. `/new` and
+   `/branch` start a new conversation. A delegated subagent's calls carry its own `session_id` and its
+   delegator's `conversation_id`. Both are empty when the call has no session (for example, a tool call
+   from inside an `execute_code` script).
 
 ## Step 5: Write the registration
 
@@ -70323,6 +70447,29 @@ The canonical list of kinds is `VALID_MIDDLEWARE` in `hermes_cli/middleware.py`:
 - Middleware payloads carry `middleware_schema_version` (`hermes.middleware.v1`) alongside the observer telemetry fields.
 - Unknown kinds register with a warning instead of failing, so a plugin written against a newer Hermes still loads on an older one.
 
+### Give each session's commands its own environment variables
+
+Tools run in the process that serves the session. With the shared gateway, that is the gateway daemon, so a variable from the terminal or pane that shows a conversation is not in the environment of the commands the agent runs. `ctx.register_session_env(names, resolver)` closes that gap without a change to the commands:
+
+```python
+def pane_env(session_id):
+    pane = find_pane_showing(session_id)  # your plugin's own lookup
+    if pane is None:
+        return {}  # the commands keep the gateway's own values
+    return {"MY_PANE": pane.id, "MY_PANE_SOCKET": pane.socket or None}
+
+def register(ctx):
+    ctx.register_session_env(["MY_PANE", "MY_PANE_SOCKET"], pane_env)
+```
+
+- Hermes calls `resolver(session_id)` each time it starts a local process for a session: a foreground or background `terminal` command, a `terminal()` call from `execute_code`, and the other subprocesses that get the session's `HERMES_SESSION_*` variables. The value is read at that moment, so a change (the conversation moves to another pane) applies to the next command.
+- `session_id` is the session the process runs for. A subagent's commands get the subagent's id; map it to its parent session in your resolver when the parent's values must apply.
+- Return a map of declared names to strings. A value of `None` removes the name from the process environment. A name you leave out keeps the gateway's own value. Names you did not declare are ignored.
+- The declared names are never saved in the shared shell snapshot, so one session's value cannot reach a later command of another session, and an `export` of one of these names does not carry to the next command.
+- Names must be valid environment variable names. `HERMES_*` names are refused (they belong to core). Provider and Hermes credential names that the subprocess scrub removes are also removed from your values.
+- A resolver that raises is logged and contributes nothing; the command still runs. Keep it fast and local: it runs on every spawn.
+- Values apply on the local terminal backend only. Remote backends (Docker, SSH, Modal and other sandboxes) do not receive them.
+
 ### Register CLI commands
 
 Plugins can add their own `hermes <plugin>` subcommand tree:
@@ -70533,6 +70680,62 @@ def register(ctx):
 ```
 
 For running a full `hermes <subcommand>` (e.g. `hermes kanban show`), shell out with the `terminal` tool via `ctx.dispatch_tool("terminal", {"command": "hermes kanban show ..."})` — there is no in-process slash-command bridge for headless worker sessions, and tools are the supported way to drive Hermes from a hook.
+
+### Talk to your own frontend: plugin RPC methods and session events
+
+A frontend that is a JSON-RPC client of the gateway (a terminal frontend attached to the shared gateway, a
+custom web client on `/api/ws`) can call its own Python half, and the Python half can push an event to the
+clients viewing one session:
+
+```python
+def register(ctx):
+    def pane_state(params, *, session_id, **kwargs):
+        # session_id is the session the call named (None for a sessionless call), already authorized.
+        state = load_state(session_id)
+        ctx.emit_to_session(session_id, "pane.changed", {"rows": len(state)})
+        return {"rows": state}
+
+    ctx.register_rpc("pane.state", pane_state)
+```
+
+The client calls `plugin.<plugin_id>.pane.state` with any JSON params (`session_id` names the session) and
+listens for the event frame of type `plugin.<plugin_id>.pane.changed`:
+
+```json
+{"jsonrpc": "2.0", "id": 7, "method": "plugin.my-plugin.pane.state", "params": {"session_id": "local-…", "page": 2}}
+```
+
+- **Names are forced into your namespace** (`<plugin_id>` is `ctx.plugin_id`). `ctx.register_rpc(name, handler)`
+  serves `plugin.<plugin_id>.<name>`, and `ctx.emit_to_session(session_id, event, payload=None)` sends
+  `plugin.<plugin_id>.<event>`. `name` and `event` are bare dotted names (segments of `[A-Za-z0-9_-]`), as for
+  `broadcast_plugin_event`. A plugin whose id is not `[a-z0-9_-]{1,64}` (a category plugin such as
+  `image_gen/x`) cannot register one: the call raises `ValueError`.
+- **The handler** is called as `handler(params, session_id=...)` off the gateway loop, in the owning
+  profile's scope. It may be `async def`: it then runs on its own event loop in that worker thread, never
+  on the gateway loop, the same as a plugin slash command. Accept `**kwargs`: later releases may pass more context. Its return value must be
+  JSON-encodable and is the call's `result`. An exception, or a value JSON cannot encode, answers the call
+  with error `4001`, reason `plugin_rpc_failed`, and the exception text in `error.data.detail`. The call
+  holds that client's request lane until it returns, so keep it short: start long work in a thread and
+  report through `emit_to_session`.
+- **Unload removes the methods.** Once the plugin is disabled or removed, its methods answer `-32601`
+  like any unknown method.
+- **Session events go to that session's viewers only**, on its event stream: clients attached now, and a
+  client that reconnects replays them. `session_id` may be the conversation's id or its agent's current
+  id (compression gives the agent a new one), so a tool or hook can pass the `session_id` it received.
+  `payload` is a JSON dict. The call returns `True` when a live viewer took the frame, `False` when no
+  client is viewing or this process holds no such session. `hermes_cli.plugin_events.emit_plugin_session_event(plugin_id, session_id, event, payload)`
+  is the same call for code without `ctx`.
+- **Where it works:** on a gateway that owns sessions (its session authority, as on the shared
+  `hermes gateway run` gateway that attached frontends use). A backend without one answers the method
+  with `-32601`. In a process without one (`hermes chat`, cron, a
+  `dashboard.turn_isolation` compute child) `emit_to_session` returns `False`.
+
+**Security.** A plugin method gets the same gate as a plugin slash command on that gateway: the connection
+needs the `session:control` capability, and a call that names a `session_id` must pass that session's
+authorization (the right profile, the owner of a local session, a superseded conversation is read-only).
+Beyond that, any client the gateway authenticated can call any plugin method with any params. Hermes does
+not check callers per method (`SECURITY.md` §2.6, rule 4): treat a plugin method like a plugin tool, validate
+its params, and never expose through it more than the plugin's own data and actions.
 
 ### Send raw CDP commands to the agent's browser
 
@@ -71705,16 +71908,16 @@ with a name allows that one name only.
 | `tools.browser_supervisor_capture` | whole module | developer-guide / plugins docs |
 | `tools.computer_use.backend` | whole module | developer-guide / plugins docs |
 | `tools.registry` | whole module | developer-guide / plugins docs |
-| `agent.context_references` | whole module | PluginContext (hermes_cli/plugins.py) |
-| `agent.plugin_llm` | whole module | PluginContext (hermes_cli/plugins.py) |
-| `agent.transcription_provider` | whole module | PluginContext (hermes_cli/plugins.py) |
-| `agent.tts_provider` | whole module | PluginContext (hermes_cli/plugins.py) |
-| `cron.execution_identity` | whole module | PluginContext (hermes_cli/plugins.py) |
-| `hermes_cli.dashboard_auth` | whole module | PluginContext (hermes_cli/plugins.py) |
-| `hermes_cli.platform_actions` | whole module | PluginContext (hermes_cli/plugins.py) |
-| `hermes_cli.plugins` | `PluginContext` | PluginContext (hermes_cli/plugins.py) |
-| `hermes_cli.plugins_ledger` | `PluginRegistration` | PluginContext (hermes_cli/plugins.py) |
-| `hermes_cli.plugins_state` | `PluginState` | PluginContext (hermes_cli/plugins.py) |
+| `agent.context_references` | whole module | PluginContext (hermes_cli/plugins_context.py) |
+| `agent.plugin_llm` | whole module | PluginContext (hermes_cli/plugins_context.py) |
+| `agent.transcription_provider` | whole module | PluginContext (hermes_cli/plugins_context.py) |
+| `agent.tts_provider` | whole module | PluginContext (hermes_cli/plugins_context.py) |
+| `cron.execution_identity` | whole module | PluginContext (hermes_cli/plugins_context.py) |
+| `hermes_cli.dashboard_auth` | whole module | PluginContext (hermes_cli/plugins_context.py) |
+| `hermes_cli.platform_actions` | whole module | PluginContext (hermes_cli/plugins_context.py) |
+| `hermes_cli.plugins` | `PluginContext` | PluginContext (hermes_cli/plugins_context.py) |
+| `hermes_cli.plugins_ledger` | `PluginRegistration` | PluginContext (hermes_cli/plugins_context.py) |
+| `hermes_cli.plugins_state` | `PluginState` | PluginContext (hermes_cli/plugins_context.py) |
 | `agent.runtime_cwd` | `resolve_agent_cwd` | prose in memory-provider / model-provider / terminal-environment plugin pages (tools.environments:BaseEnvironment is the package's `__all__` re-export) |
 | `agent.usage_pricing` | `CostResult` | prose in memory-provider / model-provider / terminal-environment plugin pages (tools.environments:BaseEnvironment is the package's `__all__` re-export) |
 | `hermes_cli.auth_constants` | `AuthError` | prose in memory-provider / model-provider / terminal-environment plugin pages (tools.environments:BaseEnvironment is the package's `__all__` re-export) |
@@ -72001,7 +72204,38 @@ hermes acp --setup          # interactive provider/model setup for ACP terminal 
 
 ## TUI Gateway JSON-RPC
 
-`tui_gateway/server.py` is the protocol the Ink TUI (`hermes --tui`) and the embedded dashboard PTY bridge talk to. Any external host can speak the same protocol over stdio (or WebSocket via `tui_gateway/ws.py`).
+`tui_gateway/server.py` is the method and event catalog behind the Ink TUI (`hermes --tui`), the Desktop app and the embedded dashboard PTY bridge. The Ink TUI reaches it on the profile's shared gateway over WebSocket (`/api/ws`, protocol `hermes-gateway-v1`, a single-use ticket per connection); any external host can speak the same frames over stdio (`tui_gateway/entry.py`) or a WebSocket (`tui_gateway/ws.py`).
+
+### A Node client: `@hermes/shared/gateway-client`
+
+The Ink TUI's gateway client lives in `apps/shared` (`@hermes/shared`), so another Node frontend can use it without compiling Ink's source. It dials the owner with a ticket, reads `runtime.describe` before `session.create`, translates requests and results for `hermes-gateway-v1` (`@hermes/shared/gateway-canonical`), reconnects with backoff, re-ensures a gone owner a bounded number of times per minute, and emits typed events (`@hermes/shared/gateway-types`).
+
+The client does not know where its connection comes from. The caller passes `connect(start, recover)`, which returns `{url, protocols, profile_id, instance_id}` and runs again for every reconnect (tickets are single-use). Ink passes its `gateway_bootstrap.py` helper; any other local client can run `hermes gateway attach --json` (added with this client's split, #142159) (with `--start` on the first call and `--recover` when asked to recover) and pass its `url` and `protocols`:
+
+```ts
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
+
+import { GatewayClient } from '@hermes/shared/gateway-client'
+import type { AnyGatewayEvent } from '@hermes/shared/gateway-types'
+
+const gw = new GatewayClient({
+  connect: async (start, recover) => {
+    const flags = start ? ['--start'] : recover ? ['--recover'] : []
+    const { stdout } = await promisify(execFile)('hermes', ['gateway', 'attach', '--json', ...flags])
+    const { url, protocols, endpoint } = JSON.parse(stdout)
+
+    return { url, protocols, profile_id: endpoint.profile_id, instance_id: endpoint.instance_id }
+  }
+})
+
+gw.on('event', (event: AnyGatewayEvent) => { /* … */ })
+gw.start()
+gw.drain()
+const session = await gw.request('session.create', {})
+```
+
+`hermes gateway attach` exits non-zero with the verdict on stdout when there is no owner to attach, so `execFile` rejects and the client retries on its backoff. Sessions are created with `source: "tui"`, the gateway's terminal-client policy, and `session.create` refuses an owner whose `runtime.describe` does not offer it. Other options (`terminalConnectFailure`, `attachUrl`, `sidecarUrl`, timeouts, `toolProgress`, `onLifecycle`, `text`, `fallbackWebSocket`) are documented on `GatewayClientOptions`. Browser-safe modules stay in `apps/shared/src/`; Node-only ones (the client, `prompt-history`) are in `apps/shared/src/node/`, and `apps/shared/src/node/boundary.test.ts` fails if the package's program ever includes a file from another workspace.
 
 ### Method catalog (selected)
 
@@ -72019,6 +72253,8 @@ delegation.status       subagent.interrupt      subagent.steer
 spawn_tree.save / list / load
 terminal.resize         clipboard.paste         image.attach
 ```
+
+Plugins add `plugin.<plugin_id>.<name>` methods (`ctx.register_rpc`) and session events of type `plugin.<plugin_id>.<event>` (`ctx.emit_to_session`); see [plugin RPC methods and session events](./plugins/index.md#talk-to-your-own-frontend-plugin-rpc-methods-and-session-events).
 
 `session.active_list`, `session.activate`, and `session.close` are the process-local live-session controls used by the TUI session switcher. Use `session.list` / `/resume` for saved transcript discovery; use the active-session methods only for sessions that are currently open in the TUI gateway process.
 
@@ -84478,10 +84714,11 @@ Use the **Move up** and **Move down** arrows beside a room to choose its positio
 - **Who answers a message that names nobody** is a Room settings choice on gateway-owned rooms: **Everyone** (the default), a **lead** that hands the message on, or **Pick who answers automatically**. The automatic choice makes one short tool-less model call over the room purpose and notes, each member's role (its profile description) and the last few messages, and the room shows **Assigned to X** above the replies. @mentions, `@all`/`@everyone`, scheduled posts and replies inside an existing thread never reach that call, and a failed or unreadable answer falls back to everyone. Route the call to a cheap model with `auxiliary.group_router` (`hermes model` → auxiliary → Group router).
 - Each member keeps its own persistent room session, so room context survives like any other conversation.
 - **Not every Bot replies to every message.** Speaking is each member's own choice — a Bot replies only when it has something new to add and passes otherwise, and @-mentioning specific members scopes the round to them. Expect the members you addressed (or whoever has something to say) to speak, and the rest to stay quiet.
-- **Gateway group chats keep running when you close the Desktop.** On a connection whose gateway runs group chats (Desktop's own gateway, or a `hermes serve` / `hermes dashboard` backend reached over SSH, URL or Cloud), a new group chat whose bots all belong to the active connection is a *gateway group chat*: the gateway owns its log and schedules its turns through a durable driver, so closing Hermes Desktop (or losing its connection) does not stop a discussion, and the group chat catches up from the log when you reopen it. Its header shows who is working and what the group chat waits on (approvals, replies that need attention), the group chat says when its group driver is unavailable, and the header offers **Stop** while work is active, and **Rename** and **Disband**, only where the gateway lists those methods; an approval shows the command it would allow (or, for a plugin approval rule, the plugin's description) before you choose **Allow once**. A message the gateway refuses before posting it comes back for editing; one that may already have been sent offers **Retry**, which never posts it twice; **Stop** also stops a message still sending. A standalone `hermes serve` / `hermes dashboard` backend forwards group chat requests when a gateway serves the profile. The root gateway fences and imports existing standalone group chats from `shared-state.db` into its `state.db` once, so those group chats have one owner and remain reachable. Without an owning gateway, standalone group chats stay with their standalone backend. Both routes support attachments; **Discard** appears only when the owning gateway advertises it. Older servers that do not advertise file methods hide upload and disable download. Every other group chat is a *classic group chat*: Desktop runs its rounds, so it pauses while Desktop is closed. Group chats whose members span several machines are classic: each member's turns run on its own gateway, and the cross-connection courier described under *bot-to-bot messaging* applies to them. A group chat saved as Desktop-driven keeps that engine after membership edits, and an older group chat whose bots span connections opens in that workspace too. For a classic group chat that reaches the migration gate on a gateway connection, Desktop first opens that gateway's group chat of the same name when there is one; otherwise it does not run there. Instead it says what to do: when its bots are on this connection it offers **Start new group**, a fresh gateway group chat with the same bots that does not copy the earlier messages; when they are on other computers it names those connections, so you can switch to the one where they run and start a group there, or start a new group with bots from this connection. Its earlier messages stay readable below, read only. A connection whose Hermes is too old for group chats, or that can't be reached, says so and offers **Retry**.
+- **Gateway group chats keep running when you close the Desktop.** On a connection whose gateway runs group chats (Desktop's own gateway, or a `hermes serve` / `hermes dashboard` backend reached over SSH, URL or Cloud), a new group chat whose bots all belong to the active connection is a *gateway group chat*: the gateway owns its log and schedules its turns through a durable driver, so closing Hermes Desktop (or losing its connection) does not stop a discussion, and the group chat catches up from the log when you reopen it. Its header shows who is working and what the group chat waits on (approvals, replies that need attention), the group chat says when its group driver is unavailable, and the header offers **Stop** while work is active, and **Rename** and **Disband**, only where the gateway lists those methods; an approval shows the command it would allow (or, for a plugin approval rule, the plugin's description) before you choose **Allow once**. A message the gateway refuses before posting it comes back for editing; one that may already have been sent offers **Retry**, which never posts it twice; **Stop** also stops a message still sending. A standalone `hermes serve` / `hermes dashboard` backend forwards group chat requests when a gateway serves the profile. The root gateway fences and imports existing standalone group chats from `shared-state.db` into its `state.db` once, so those group chats have one owner and remain reachable. Without an owning gateway, standalone group chats stay with their standalone backend. Both routes support attachments; **Discard** appears only when the owning gateway advertises it. Older servers that do not advertise file methods hide upload and disable download. Every other group chat is a *classic group chat*: Desktop runs its rounds, so it pauses while Desktop is closed. Group chats whose members span several machines are classic: each member's turns run on its own gateway, and the cross-connection courier described under *bot-to-bot messaging* applies to them. A group chat saved as Desktop-driven keeps that engine after membership edits, and an older group chat whose bots span connections opens in that workspace too. For a classic group chat that reaches the migration gate on a gateway connection, Desktop first opens that gateway's group chat of the same name when there is one; otherwise it does not run there. Instead it says what to do: when its bots are on this connection it offers **Start new group**, a fresh gateway group chat with the same bots that does not copy the earlier messages; when they are on other computers it names those connections, so you can switch to the one where they run and start a group there, or start a new group with bots from this connection. Its earlier messages stay readable below, read only. A connection whose Hermes is too old for group chats, or that can't be reached, says so and offers **Retry**. A gateway-owned group chat can also seat a Bot from another computer's gateway (see *Bots from another gateway in a gateway-owned Group Chat* below): its log and turn schedule stay on the home gateway, so it keeps running while Desktop is closed as long as both gateways run.
 
 - **Mentions read as identities.** In the transcript a routed `@bot` mention, the human handoff `@user`, and the broadcasts `@everyone` / `@all` render as inline references (accent text, not pills); unknown `@words` and e-mail addresses stay plain. Hover a Bot's message and use **Reply to @handle** to seed `@handle ` into the composer, so your next send goes to that Bot only (when a same-named Bot from a Connection shares the room, the tag is device-qualified, e.g. `@reviewer-mini` / `@reviewer-local`) — **Reply in thread** still continues the whole thread. If a reply box for a *different* thread is open, **Reply to** seeds the main composer instead and so starts a fresh thread; use **Reply in thread** to continue that thread.
 - **Rooms can span machines.** New Group Chat offers Bots from every registered connection, each with a device badge. A selection on the active connection becomes a room that connection's gateway owns (it keeps running when you close the Desktop). A selection that mixes connections — one Bot on this device plus one on another gateway is enough — becomes a Desktop-driven room, and the dialog says so before you create it: it runs while this Desktop is open, each member's turns run on its own machine and room session, and members carry a device badge (`dixie · Mac Mini`) in the room and in other members' transcripts. A selection made entirely of Bots on one other connection is not created from here: add a Bot from the active connection, or switch to that connection first. A member's turn that outlives this Desktop, because you quit or it crashed mid-turn, finishes on the member's own machine: the room posts that reply the next time it is driven, and does not re-drive the member while it is still working.
+- **Gateway-owned group chats can span machines too.** A gateway-owned group chat can seat a text-only bot from another gateway through JSON-RPC (see [bots from another gateway in a gateway-owned group chat](#bots-from-another-gateway-in-a-gateway-owned-group-chat)); it keeps running with Desktop closed. New group chat in Desktop currently creates a Desktop-driven group chat for a selection that mixes connections.
 - **Rooms show the same identity as the roster.** Transcript rows, the “X is thinking…” line and Activity rows resolve each member's title and avatar by its owning connection and profile — re-titling a Bot or changing its picture updates every room it sits in, remote members keep their own titles, and two same-named Bots on different connections never borrow each other's avatar. When two members would still read identically, Activity appends the connection label (`Reviewer · Mac Mini`).
 - **Plugins can watch members work.** The durable room log records `turn.started` and `turn.settled`; what a member does in between (tools, approvals, streamed text) is projected to plugins through the [`on_room_member_activity`](./features/hooks.md#on_room_member_activity) hook with room, member and turn coordinates, so community clients can build tool cards and live member status on top of Group Chat without reading Hermes internals.
 - **What a member says outside the room still reaches it.** Each member's room session is an ordinary Hermes session (titled `Group: <room> · <thread>`), so you can resume it from the CLI, a routine can post into it, or the Bot's own tools can write to it. When you open the room, and again each time the room drives that member, whatever those writers added since the room last looked — your questions and the member's answers — is posted into the room log under that member's name, once, in the thread the session belongs to; a window restart does not repeat it. The room's own turn prompts and their replies are never duplicated this way, and neither are the agent's housekeeping rows (context compaction notes, routine deliveries, delegation results) or the member's reactions to them. The room starts watching a session the first time it sees it: what was already in that session by then is not replayed, so a room restored on a second Desktop does not re-post its members' history.
@@ -84614,6 +84851,133 @@ viewer, not a relay. A gateway behind home NAT can dial out to a public peer
 a NAT boundary, put the room's authority on the host every participant can
 reach (typically the public VPS), or bridge the network with Tailscale/VPN.
 :::
+
+### Bots from another gateway in a gateway-owned group chat
+
+A group chat your gateway owns (its *home*) can seat a bot that lives on another
+gateway (its *member gateway*). The member's turns run on its own machine; the
+home keeps the group chat, its log and its schedule, even with Desktop closed. This is set up over the gateways'
+JSON-RPC; New group chat in Desktop does not offer gateway-owned peer setup yet.
+
+Limits: text only (a message with files fails that member's turn, visibly), and
+only the member gateway's `default` profile.
+
+These owner/lender rules apply to the canonical gateway (`hermes gateway run`),
+including when `hermes serve` forwards Desktop's group calls to it.
+
+**On the home gateway**, `groups.capabilities` must report `driver: true`,
+`persistent_process: true` and list `groups.peer.register` in `methods`; it does
+not need `room_link.enabled` itself.
+
+**On the member gateway**, `groups.capabilities` must report `room_link.enabled: true`
+and list `groups.peer.invite` in `methods`.
+That needs the `api_server` platform with durable run storage, an advertised
+endpoint (`gateway.room_link_url`, reachable from the home), and approvals not
+turned off (`approvals.mode: off` is refused; `manual` asks a person, `smart` may
+approve on its own). Otherwise `room_link.reason` names the first missing piece.
+Keep its `room_link.catalog`; the home pins it, endpoint included.
+
+When a bot on the member gateway needs command approval, the home gateway now
+exposes its prompt in the group chat and accepts `once` to allow that operation
+or `deny` to refuse it. An outdated prompt cannot approve
+a later operation; it reports that the room approval is no longer pending.
+
+Standalone `hermes serve` answering for its own group chats derives `persistent_process`
+from its lending catalog and skips API-server and endpoint checks for `room_link`;
+clients should not use it as a home for gateway-owned group chats.
+
+1. **Create the group chat on the home** with the member pinned to that catalog:
+
+   ```json
+   {"jsonrpc":"2.0","id":1,"method":"groups.create","params":{"room_id":"ROOM_ID","name":"Review","members":[
+     {"member_id":"host","profile":"default","handle":"host"},
+     {"member_id":"reviewer","profile":"default","handle":"reviewer","target":{
+       "kind":"peer","peer_id":"spark","installation_id":"CATALOG_INSTALLATION_ID",
+       "profile":"default","capability_digest":"CATALOG_DIGEST"}}]}}
+   ```
+
+   Until step 3, that member's turns fail with `peer room route is unavailable`.
+2. **Invite from the member gateway.** On an operator connection there (its local
+   gateway socket or a dashboard connection), mint a grant scoped to that one group chat
+   and member, using the `authority_gateway_id` and `authority_epoch` the group chat was
+   created with:
+
+   ```json
+   {"jsonrpc":"2.0","id":2,"method":"groups.peer.invite","params":{"room_id":"ROOM_ID","member_id":"reviewer",
+     "home_install_id":"HOME_GATEWAY_ID","authority_gateway_id":"HOME_GATEWAY_ID","authority_epoch":1}}
+   ```
+
+   `ttl_seconds` (60 to 86,400, default 3,600) is optional, and so is
+   `status_ttl_seconds`, the renewal horizon (from `ttl_seconds` up to 30 days, default
+   `ttl_seconds`; offered when `groups.capabilities` lists the `peer_renewal_horizon`
+   feature). The home renews the grant when it sends that member a turn near the end of
+   its `ttl_seconds`, never past the horizon. The grant id is the member gateway's to choose.
+3. **Register on the home** with the grant, the catalog and the catalog's own
+   endpoint URL as `target_url`. The home sends the grant to no other URL. It probes
+   the member gateway first and refuses a grant for another group chat, member, profile,
+   catalog or URL (`peer_target_mismatch`), a member it cannot reach
+   (`peer_unreachable`) or a revoked grant (`room_reauthorization_required`):
+
+   ```json
+   {"jsonrpc":"2.0","id":3,"method":"groups.peer.register","params":{"room_id":"ROOM_ID","member_id":"reviewer",
+     "target_url":"CATALOG_ENDPOINT_URL","target_profile":"default",
+     "grant":"GRANT","catalog":{"...":"the catalog from the member gateway"}}}
+   ```
+
+A member the home sends no turn within `ttl_seconds`, or one past its horizon, needs
+access again: its next turn fails, and `groups.state` reports its route as
+`needs_reauthorization` under `driver_status.peer_routes`. To renew access, invite
+again and register the new grant: the route keeps its identity, so work already accepted stays the same run on the member gateway. The
+earlier grant stays valid until it expires. `groups.peer.revoke` with a grant, on
+the member gateway, revokes that group chat member's access. Disband also revokes
+retained grants, including a longer-lived grant whose replacement has expired.
+A scoped grant handed in during Disband is held durably and revoked before
+deletion commits. A late grant triggers another revoke pass; after three passes,
+Disband asks you to retry. An unreachable member keeps the group chat and its
+unrevoked holds. A grant arriving after deletion remains owed through a restart.
+The home retries that revoke with backoff until the member confirms it or the grant
+expires. If there is no space to hold another grant during Disband, registration
+reports the failure and keeps earlier holds. A grant that was invited but never
+registered is the member gateway's to revoke.
+
+**A lost reply never runs a turn twice.** The home sends each turn under the
+idempotency key `room:<task>:<generation>`. If the member gateway's answer is lost,
+or its replay cannot connect, the turn stays uncertain on that same key until the
+home can read it back, rather than starting it again. If its status reads keep failing for 30 seconds, the home treats the turn as
+uncertain, then waits up to another minute for that member gateway before deferring
+the turn, which frees the group chat for the next
+message. **Retry** on that turn asks the member gateway for the same attempt: it
+posts the reply if the run finished (unless a newer message in that thread has
+superseded it, as for any late reply), follows the run if it is still going, and
+never starts another attempt. **Discard** of that turn ends it the way Disband
+does, and never starts it: the home asks the member gateway which run the turn's
+idempotency key started, without sending the turn again. If none, the member
+gateway closes that key, so a late copy of the turn is refused there, and the turn
+is discarded at once. If a run is found, the home stops it and settles the turn
+only once that gateway confirms the run ended. While the member gateway is
+unreachable, or too old to answer that question, the turn is kept. A turn still running when it reaches its time limit is stopped, as it would
+be on the home. This holds while the member gateway still keeps the run's record: it
+forgets a finished run once the grant's status lifetime has passed, so a replay
+after that (a Retry under a new grant much later) can start the turn again.
+A closed unused key survives member restarts for 30 days after closing, the issuer's
+maximum status lifetime, covering every grant alive then. If the close reply was
+lost, Retry confirms that the key is closed and cancels the same attempt. After
+the closed key expires, a turn still deferred at home can start under newly granted
+access if you explicitly choose Retry.
+
+**Stop never claims more than the member gateway confirmed.** A turn is recorded as
+cancelled only once its gateway confirms the run ended. Stop of a deferred turn asks
+that gateway to stop the run the home knows of; if it cannot confirm (the gateway is
+down, or the home never learned the run's id), the turn stays deferred, and nothing
+is sent that could start it. A Stop of a running turn that its gateway does not
+confirm within a minute stops holding the group chat: the turn is recorded as deferred,
+not cancelled, and the group chat takes the next message. **Disband** waits for the
+same confirmation: it is refused (still stopping, or the member gateway is unreachable)
+until every member gateway confirms its turns ended, then revokes each member's grant
+at that gateway before the room is removed. While a member gateway is down the room
+and its route are kept; run Disband again once it is back. A deferred turn with a known
+run receipt may first wait for its exact Stop request, up to the client's 30-second
+timeout per member.
 
 ### Transferring hosted room authority
 
