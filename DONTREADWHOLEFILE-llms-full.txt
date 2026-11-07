@@ -2474,6 +2474,24 @@ direnv allow    # one-time
 # Nix reuses its built Python environment; the pnpm hook checks JS inputs.
 ```
 
+### Updating the pnpm Lockfile
+
+The flake builds every JavaScript surface from one fixed-output pnpm store whose
+hash is in `nix/pnpm-deps-hash`. A `pnpm-lock.yaml` change that adds, removes or
+re-resolves a package changes that hash, and every frontend build fails with a
+hash mismatch until it is updated. `hermes pm update --pnpm`, a plain
+`pnpm install` and the `nix develop` shell hook rewrite the lockfile but not the
+hash. From the checkout, run:
+
+```bash
+nix run .#update-pnpm-lockfile
+```
+
+It brings `pnpm-lock.yaml` up to date with the manifests, rebuilds `.#pnpm-deps`
+to take the new hash, writes `nix/pnpm-deps-hash`, and builds `.#tui`, `.#web`,
+`.#webapp` and `.#desktop`. Without Nix, copy the hash the `nix` CI workflow's
+`pnpm-deps-hash` job prints.
+
 ### Flake Checks
 
 The flake includes build-time verification that runs in CI and locally:
@@ -17269,6 +17287,7 @@ Hooks, tools and injected turns of every chat and every local session (CLI, TUI,
 
 - `os.getcwd()` is the gateway's own directory, shared by every session; Hermes never changes it. Use `ctx.session_cwd()` for the working directory of the session the hook or tool runs for: the workspace a CLI/TUI/Desktop session was started in, or the profile's terminal cwd for a chat (`""` when there is none). Pass it as `cwd=` to subprocesses. It reads the session from the running turn, so it works in code that runs for a session: turn hooks, tool handlers and approval hooks. Ingress hooks such as `pre_gateway_dispatch` run before the message is admitted to any session; there it returns the profile's terminal cwd, or `""` when none is configured.
 - `ctx.session_surface()` names the calling session's client: `"cli"`, `"tui"`, `"desktop"`, `"acp"`, or the messaging platform (`"telegram"`, …); `""` outside a session.
+- `hermes_cli.plugin_session.session_client()` returns the client that created the calling local session, as it named itself on `session.create` (`{"name": "my-client", "version": "1.2.0"}`; `version` only when sent), or `None`: outside a session, for a messaging chat, and for a client that sent no name (the TUI, Desktop, the classic CLI and ACP send none today). Under `plugins.isolation: host` the plugin's process has no session context, so read `info["client"]` in a system prompt section instead. The name is a label the client chose, not an authentication: never grant anything, or skip a check, because of it.
 - `print()` output goes to the gateway's `gateway-stdio.log`, not to your terminal. Use `logging` instead.
 - `input()` gets end-of-file: the gateway has no terminal. Ask through a tool result or a slash command.
 
@@ -22772,7 +22791,10 @@ The contract is deliberately narrow:
   rendered after memory/profile context and before session metadata; plugins
   cannot reorder or replace core prompt content.
 - A callable receives a read-only mapping with `session_id`, `conversation_id`,
-  `model`, `provider`, `platform`, `profile_name`, and `cwd`. It runs **once for a new
+  `model`, `provider`, `platform`, `profile_name`, `cwd`, `client` and `client_version`
+  (`client`/`client_version`: the name and version the creating client declared on
+  `session.create`, `""` when it sent none; a self-declared label, so never grant
+  anything on it). It runs **once for a new
   session**. Its rendered bytes are frozen on compression and recovered from
   the already-persisted full system prompt after a process restart/resume;
   plugin state is not re-read for an existing session.
@@ -45440,7 +45462,7 @@ Choose the highest (least-footprint) rung that correctly solves the problem:
 | **Git**              | With the `git-lfs` extension installed                                                        |
 | **Python 3.14** | Current development uses PM's pinned interpreter. The broader `>=3.11,<3.15` package metadata keeps old updaters working, not the current runtime on older Python. |
 | **Node.js** | Use the PM pin or a version accepted by root `package.json` engines |
-| **pnpm** | Exactly the root `package.json` `devEngines` pin; `source ./activate` provides it |
+| **pnpm** | Exactly the `pm/lock.json` pin; `source ./activate` provides it |
 
 ### PM developer environment
 
@@ -45512,11 +45534,15 @@ than copying production credentials into the checkout.
 ### JavaScript workspaces and website
 
 From the repository root, run `pnpm install --frozen-lockfile` for the desktop,
-TUI, dashboard, and shared JS workspaces. Root `package.json` pins pnpm in
-`devEngines` (`source ./activate` provides that exact version). Hermes's builds and
-`hermes update` refuse any other pnpm version; a direct `pnpm install` does not check
-it. The root `preinstall` script refuses `npm install`. The website is a separate npm
-project:
+TUI, dashboard, and shared JS workspaces. `pm/lock.json` pins pnpm
+(`source ./activate`, or `. .\activate.ps1` in PowerShell, provides that exact
+version). An install that runs lifecycle scripts refuses any other pnpm, a direct or
+filtered `pnpm install` included: the root `preinstall` script requires the
+`pm/lock.json` pnpm (and refuses `npm install`), and pnpm 10 and 11 also refuse the
+root `engines.pnpm` range. pnpm 12 skips the root `preinstall` under
+`--ignore-scripts`, `--lockfile-only` (which writes `pnpm-lock.yaml`) and `pnpm fetch`,
+so another pnpm 12 is not refused there; CI installs every changed lockfile with the
+pinned pnpm under `--frozen-lockfile`. The website is a separate npm project:
 
 ```bash
 npm ci --prefix website
@@ -47618,7 +47644,8 @@ dispatch, native CLI/Desktop/ACP attach) resolves its authority from the routed
 profile's home, so recovery, FIFO order and exactly-once settlement hold per profile
 and a secondary's rows never land in the default's ledger. A served secondary's
 clients discover the multiplexer through the default home's descriptor
-(`served_profiles`) and attach to its control socket with their own `profile_id`.
+(`served_profiles`) and attach to its control socket with their own `profile_id`
+([Local control socket](#local-control-socket-public-client-contract)).
 
 ## Shared authority local slash commands
 
@@ -47728,6 +47755,35 @@ from the standalone protocol. Both parameters and successful results are checked
 ACP and finite CLI viewers detach with an explicit recovery notice if an accepted
 input becomes blocked behind an unknown execution. The accepted input remains
 queued: resolve the lost turn before continuing, rather than resending it.
+
+## Private control request workers
+
+The POSIX control listener owns two executors of its own: one for hosted producer
+requests and one for every other control request. A `hosted-producer` operation
+synchronously calls back through `hosted-attest` and `identify`, then waits for
+canonical session work on the owner loop, so its callbacks must not queue behind
+the producers waiting for them, and neither pool occupies the loop's default
+executor used by session work. Each pool's worker count is the
+`ThreadPoolExecutor` default and its queue is unbounded: enough simultaneous
+slow requests of one kind still queue behind each other; the split only removes
+the producer-to-callback dependency cycle. Request scheduling does not replace
+the existing peer and envelope checks.
+
+Stopping the listener cancels queued work and retires both pools. Already-running
+handlers retain their existing RPC deadlines; a restarted listener gets fresh
+pools. The Windows named-pipe listener retains its native worker lifecycle.
+
+Hosted-room recovery handles persisted stops before policy checkpoint work. An
+uncertain canonical attempt is resolved only for a saved Stop naming the exact
+task and execution generation, and only when the member reports it inactive.
+The member's canonical queue must acknowledge cancellation before the room task
+is marked cancelled; an inactive `unknown` attempt is not itself an acknowledgement.
+Resolving it reports the outcome the member's queue actually committed: when that
+owner still held the turn's finished answer (only its settlement write failed),
+the answer is committed and the room settles and publishes it once instead of
+cancelling the task. Discard of an indeterminate attempt follows the same rule.
+This preserves history and lets the next group input proceed without replaying
+the lost turn.
 
 ## Private native HTTP authentication
 
@@ -47919,6 +47975,111 @@ Service persistence is separately opt-in during setup. Imports and noninteractiv
 setup do not install a missing service based on an imported preference. See
 [optional service installation](#optional-service-installation).
 
+## Local control socket (public client contract)
+
+Each gateway listens on a local control socket. It is how a client on the same machine finds the
+gateway that serves its profile and gets a WebSocket ticket, without spawning Python. Three verbs
+are public: `identify` (read-only), `resolve-profile` and the public form of `session-ticket`.
+Every other verb, the `session-ticket` parameters `subject` and `scope`, and purposes other than
+`interactive` are internal to Hermes (Desktop, the dashboard, the updater) and may change.
+Starting or recovering a gateway stays `hermes gateway attach --start` / `--recover`
+([below](#hermes-gateway-attach)).
+
+**Envelope.** One connection carries one request: one UTF-8 JSON object plus `\n` (at most
+64 KiB), then one reply line (at most 512 KiB), then the server closes. A request is
+`{"protocol": 1, "id": 1, "verb": "<verb>", "params": {...}}`, with `protocol` the integer `1`
+and `id` an integer or a string of at most 128 characters. `resolve-profile` and `session-ticket`
+refuse any other top-level key and `params` that is not an object. The reply is `{"ok": true, "protocol": 1, "id": <your id>, "result": {...}}` or
+`{"ok": false, "protocol": 1, "id": <your id>, "error": "<text>"}`. The `error` strings below are
+part of the contract.
+
+**`resolve-profile`** takes `{"home": "<absolute profile home>"}` and answers with the verdict
+`hermes gateway attach` discovery gives for that home (a verdict that is not attachable is still
+`ok: true`). Send a plain absolute path: one with a `.` or `..` component, a repeated separator or
+a trailing separator is refused as invalid parameters. Symlinks in it are resolved.
+
+| Field | Meaning |
+|---|---|
+| `resolve_protocol` | `1` |
+| `state`, `reason_code`, `detail` | The discovery verdict: `ready`, `draining`, `starting`, `absent`, `inaccessible`, `incompatible` or `conflict`, with its bounded code and remedy |
+| `attachable` | `ready`, or a restart's after-turn wait (`draining`/`restart_wait`) |
+| `update_fenced` | An update owns the install. `hermes gateway attach --start` would not return this verdict as it is, so a client that wants to start goes through the CLI |
+| `control` | `self` (this is the profile's own socket), `host` (the multiplexer answering for a profile it may serve) or `null` (a home outside this gateway's root) |
+| `message` | When not attachable: the `gateway <state>: <reason>` lines `attach --json` prints |
+| `endpoint` | `null`, or `attach --json`'s `endpoint` plus `ws_url`, `ws_protocol` and `ticket_protocol_prefix` |
+| `install_code_sha` | The commit installed on disk now. When it differs from `endpoint.code_sha`, the gateway outlived `hermes update` |
+
+**`session-ticket`, public form:** `{"profile_id": <endpoint.profile_id>, "instance_id":
+<endpoint.instance_id>, "purpose": "interactive"}`, plus `"restart_wait": "refuse"` for machine
+pollers. Send `profile_id` exactly as `resolve-profile` returned it (the gateway compares it as a
+string) on the same socket that answered. Check that the reply echoes `profile_id`, `instance_id`
+and `runtime_protocol: 1`; its `ticket` expires after `expires_in_seconds` (30). Then dial
+`ws_url` with the subprotocols `[ws_protocol, ticket_protocol_prefix + ticket]`, from loopback,
+with no `Origin` header, and check that the server selected `ws_protocol`. Mint a new ticket for
+every connection and reconnect.
+
+| Case | `error` |
+|---|---|
+| `resolve-profile`: bad envelope | `PermissionError: invalid resolve envelope` |
+| `resolve-profile`: `params` other than one absolute `home` | `PermissionError: invalid resolve parameters` |
+| A gateway older than the verb | `unknown verb: 'resolve-profile'` (plus `supported_verbs`): use `hermes gateway attach --json` |
+| Peer not verified as your OS user | `PermissionError: authenticated runtime bootstrap unavailable` |
+| `session-ticket`: bad envelope | `PermissionError: invalid bootstrap envelope` |
+| Missing or unknown parameters, `restart_wait` other than `refuse` | `PermissionError: invalid bootstrap parameters` (an owner older than `restart_wait` answers this too: retry once without it) |
+| The owner restarted since `resolve-profile` | `PermissionError: stale runtime instance`: resolve again |
+| A profile this gateway does not serve, an unknown purpose | `PermissionError: bootstrap binding rejected` |
+| 1024 tickets outstanding | `PermissionError: bootstrap capacity exhausted` |
+
+**Rendezvous.** The socket node and its `gateway.sock.path` pointer are the only files in a
+profile home a client touches. They are a rendezvous, not Hermes data: read no lock, state file or
+config. Try the profile home, then, for a named profile `<root>/profiles/<name>` (name not starting
+with `.`), the root, whose multiplexer answers for the profiles it serves. For each candidate,
+canonicalized like Python's `Path.resolve`:
+
+- **POSIX (Linux, macOS):** the candidate must be a directory you own that others cannot write
+  (a group-writable home needs the group-privacy check Python does: use the CLI). Use
+  `<candidate>/gateway.sock` when it exists; it must be a socket you own with no group or other
+  access. Otherwise read `<candidate>/gateway.sock.path` (opened without following links: a
+  regular file you own, mode 0600, at most 4096 bytes). Its target must be absolute and end in
+  `hermes-gw-<sha256 of the canonical home, 16 hex>/control.sock`, inside a 0700 directory you own,
+  and be a 0600 socket you own. Do not compare the target's temp root with your own `TMPDIR`: a
+  gateway started by **launchd** has its own `$TMPDIR` (`/var/folders/…/T/`), and the pointer is
+  the authority. No node, or a refused connection (a crashed gateway's leftover), means try the
+  next candidate. Any other failed check is a refusal: stop, do not try the next candidate.
+- **Windows:** the pipe `\\.\pipe\hermes-gateway-<sha256 of the normcased canonical home, 16 hex>`.
+  A client must verify that the pipe server runs as your SID before trusting its answer; a client
+  that cannot (Node) uses `hermes gateway attach --json` on every connect.
+
+Ask the first candidate that answers `resolve-profile`. A `profile_mismatch` from the profile's
+own socket means try the next candidate; otherwise that answer is the verdict, and that socket
+mints the ticket. No candidate answering means no gateway runs.
+
+**Security model.** The boundary is the same OS user on the same machine; the socket is never a
+TCP port. On POSIX the socket is 0600 in a home others cannot write (or in a 0700 private
+directory), and the gateway reads the kernel's peer uid on every connection (`SO_PEERCRED` on
+Linux, `getpeereid` on macOS): it mints tickets only for its own uid, and none at all where the
+platform reports no peer credentials. On Windows the pipe has a protected DACL that grants only
+the user's SID, refuses remote clients, claims the first instance, and requires the client's token
+SID to equal the gateway's. A ticket is 256 random bits, stored only as a hash, valid for 30
+seconds, single-use, bound to the gateway instance, the profile and the purpose, and revoked when
+the gateway stops. It authenticates `/api/ws` only. The gateway never logs it; a client must not
+log it, the subprotocol list or the CLI's stdout, or put it in a URL. `resolve-profile` carries no
+credential and answers any peer that can connect, like `identify`. It checks the home against
+the answering gateway's root before it looks inside it: the resolved home must be the gateway's
+own home or a named profile `<root>/profiles/<name>` directly under it, so a symlink that leads
+out of the root resolves outside and is refused. Only then does it follow a private overlay's
+`gateway.lock` link, and only to an owner home that passes the same check. Any other home gets
+`profile_mismatch` with `control: null`, and nothing outside the root is opened, created or
+changed (the only calls that reach outside are resolving the home's path and an in-root
+`gateway.lock` link). For a home it accepts it does what discovery does: an unserved profile's
+same-user lock left at mode 0644 by an older Hermes is narrowed to 0600, as
+`hermes gateway attach` does. None of this protects against code already running as your user,
+or root.
+
+The contract is pinned by `apps/shared/src/node/control-socket.vectors.json`: request and reply
+pairs a client in any language can replay, run against the gateway by
+`tests/gateway/test_control_socket_vectors.py`.
+
 ## `hermes gateway attach`
 
 `hermes gateway attach --json` is the public attach step for a local client that has its own UI
@@ -47961,6 +48122,8 @@ SID-checked named pipe on Windows; a profile served by the default multiplexer g
 from the multiplexer's control socket. It is single-use, bound to the caller's profile and that
 owner's `instance_id`, and expires after 30 seconds. `attach` prints it to stdout for the calling
 process only; it never logs it. Run `attach` again for each new connection and each reconnect.
+A client that speaks the control socket itself gets the same verdict and ticket without the spawn:
+see [Local control socket](#local-control-socket-public-client-contract).
 
 With no owner to attach, the JSON adds `message` and has no `url` or `ticket`. `message` is
 the verdict Ink shows: `gateway <state>: <reason_code>` (`not ready` when there is no code),
@@ -51471,6 +51634,7 @@ The install also ships `hermes-agent`, a minimal runner that sends one query and
 | `hermes tools` | Configure enabled tools per platform. |
 | `hermes computer-use` | Install or check the Computer Use (cua-driver) backend (macOS/Windows/Linux). |
 | `hermes pets` | Browse, install, and select [petdex](../user-guide/features/pets.md) animated pets shown across the CLI, TUI, and desktop app. Subcommands: `list`, `install`, `select`, `show`, `off`, `scale`, `remove`, `doctor`. |
+| `hermes clipboard image` | Write this machine's clipboard image to a file (`--json` for scripts). Device-local: no gateway, no session store. |
 | `hermes sessions` | Browse, export, prune, rename, and delete sessions. |
 | `hermes insights` | Show token/cost/activity analytics. |
 | `hermes claw` | OpenClaw migration (`migrate`, `cleanup`), from the [`agent-importers`](../user-guide/import-from-other-agents.md) plugin; `hermes claw migrate` is the same as `hermes import-agent openclaw`. |
@@ -53138,6 +53302,42 @@ names label cursor and session state; they do not own or share the runtime.
 of the update if cua-driver is on PATH, so most users will not need to
 call `--upgrade` manually. Use it when upstream ships a fix you want
 right now without waiting for the next Hermes update.
+
+## `hermes clipboard`
+
+```bash
+hermes clipboard image --out PATH [--json]
+```
+
+Writes the clipboard image to `PATH` (created or overwritten) with the same extractor the CLI and
+TUI use for image paste: macOS `pngpaste`, then `osascript`; Windows PowerShell (`powershell`, then
+`pwsh`); Linux `powershell.exe` under WSL, then `wl-paste` on Wayland, then `xclip`. The result is a
+PNG, except that a copied image *file* (Windows/WSL file drop) is copied as it is. The command
+reads only this machine's clipboard: it needs no running gateway and reads no session store or
+profile file, so a client whose gateway runs on another machine calls it where the user is.
+Under NixOS container mode the command runs inside the managed container, like every `hermes`
+subcommand, so it cannot see the host's clipboard and `--out` is a path inside the container.
+
+| Option | Description |
+|--------|-------------|
+| `--out PATH` | File to write (required). Parent directories are created. The image is extracted into a temporary file in the same directory and then renamed onto `PATH`, so on any failure an existing `PATH` is left as it was. An existing file keeps its permission bits (a 0600 temp file stays private); a symlink at `PATH` is replaced by a regular file. |
+| `--json` | Print one JSON object on stdout. Without it, success prints the path and failure prints one stderr line. |
+
+| Exit code | `reason` | Meaning |
+|-----------|----------|---------|
+| `0` | (none, `ok: true`) | The image was written to `path`. |
+| `1` | `no_image` | The clipboard holds no image (or one that could not be converted to PNG). |
+| `3` | `no_tool` | None of this platform's clipboard tools is installed; `tools` lists them in the order tried. |
+| `4` | `write_failed` | `--out` cannot be written: its directory is not writable or cannot be created, an existing `PATH` is a directory or read-only, or the final rename failed. |
+| `2` | (no JSON) | Usage error from the argument parser. |
+
+`--json` replies (keys are stable; new keys may be added; read `path` only when `ok` is true):
+
+```json
+{"ok": true, "path": "/home/me/paste.png", "mime": "image/png", "bytes": 48213}
+{"ok": false, "reason": "no_image", "message": "the clipboard holds no image"}
+{"ok": false, "reason": "no_tool", "tools": ["wl-paste", "xclip"], "message": "no clipboard tool found; install one of: wl-paste, xclip"}
+```
 
 ## `hermes pets`
 
@@ -63649,6 +63849,23 @@ Repeating the request ID for the same principal and profile reuses that identity
 policy, including after daemon death. Omit the ID for a new session; clients that need
 lost-ACK retry protection must retain it. A failed transaction publishes no live session.
 
+### Naming the client
+
+A client may say who it is with an optional `client` object on `session.create`, for example
+`"client": {"name": "my-client", "version": "1.2.0"}`. `name` is 1-64 characters of `a-z`, `0-9`,
+`.`, `_` and `-`, starting with a letter or digit; `version` is optional, 1-64 printable ASCII
+characters without spaces. Anything else is refused with `invalid_params` (field `client`). Send it
+only to an owner whose `runtime.describe` lists `client` in `session_create.parameters` (capability
+`session-client-v1`); an older owner refuses the unknown key.
+
+The name is stored with the frozen creation request, so it is part of the exact-retry identity
+and survives a restart. `session.info` returns it as `client` (absent when none was sent), and
+plugins read it through `hermes_cli.plugin_session.session_client()` and the `client` /
+`client_version` keys of prompt-section session info. It is attribution only: `source` still
+picks the session policy (send `source: "tui"` for terminal-client behaviour), and no toolset,
+approval, permission, prompt text or telemetry reads `client`. Hermes does not verify the name,
+so any client can claim any name: never grant anything based on it.
+
 Attach another authenticated viewer with `session.resume({session_id})`, and submit
 through `prompt.submit({session_id, submission_id, text})`. The accepted receipt is durable
 admission, not inference completion. Closing every viewer leaves the execution and its
@@ -68387,37 +68604,88 @@ invocation. `allow_task_override: true` is an explicit operator grant for
 using Hermes built-in auxiliary tasks; it does not permit another plugin's
 tasks. Omit `task=` (or use `"auto"`) to keep the active main provider/model.
 
-#### From the plugin's frontend: `llm.oneshot`
+#### From the plugin's frontend: a plugin RPC method
 
-A plugin's frontend (a Desktop page, a chat frontend attached to the
-gateway) runs the same task over the gateway's `llm.oneshot` JSON-RPC
-method, without a Python subprocess:
+A plugin's frontend (a Desktop page, or a client attached to the shared
+gateway) does not call the model itself. It calls its own Python half
+through a [plugin RPC method](plugins/index.md#talk-to-your-own-frontend-plugin-rpc-methods-and-session-events),
+and the handler calls `ctx.llm` on the task the plugin registered. A plugin
+RPC call holds its client's request lane until the handler returns, so the
+handler starts the model call in a thread, answers with a job id at once,
+and delivers the result as a session event:
 
-```json
-{"method": "llm.oneshot", "params": {
-  "task": "classifier",
-  "instructions": "Classify the ticket.",
-  "input": "<ticket text>",
-  "schema": {"type": "object", "properties": {"label": {"type": "string"}}, "required": ["label"]},
-  "redact": true
-}}
+```python
+import contextvars
+import threading
+import uuid
+
+from agent.redact import redact_sensitive_text
+
+CHART = {"type": "object", "properties": {"kind": {"type": "string"}}, "required": ["kind"]}
+
+
+def register(ctx):
+    ctx.register_auxiliary_task("chart_writer", display_name="Charts", description="Pick chart kinds.")
+    slots = threading.BoundedSemaphore(4)  # model calls in flight
+
+    def write_chart(params, *, session_id, **kwargs):
+        if not session_id:
+            raise ValueError("chart.write needs a session_id")
+        job = uuid.uuid4().hex
+        text = redact_sensitive_text(str(params.get("text", "")), force=True)
+
+        def run():
+            try:
+                result = ctx.llm.complete_structured(
+                    instructions="Pick a chart kind for this data.",
+                    input=[{"type": "text", "text": text}],
+                    json_schema=CHART,
+                    task="chart_writer",
+                )
+                if result.parsed is None:
+                    raise ValueError("the model did not answer with JSON")
+                payload = {"job": job, "chart": result.parsed}
+            except Exception as exc:
+                payload = {"job": job, "error": str(exc)}
+            finally:
+                slots.release()
+            ctx.emit_to_session(session_id, "chart.written", payload)
+
+        if not slots.acquire(blocking=False):
+            raise RuntimeError("chart.write is busy: wait for a chart.written event")
+        try:
+            # copy_context: the thread keeps the call's profile scope, which ctx.llm reads.
+            threading.Thread(target=contextvars.copy_context().run, args=(run,), daemon=True).start()
+        except Exception:
+            slots.release()  # run() never started, so it never releases
+            raise
+        return {"job": job}
+
+    ctx.register_rpc("chart.write", write_chart)
 ```
 
-- `task` is a built-in auxiliary task or one a loaded plugin registered; it
-  resolves through `auxiliary.<task>` like `ctx.llm`. An unknown key is
-  refused (`invalid_params`, `field: task`) instead of running on the main
-  model. Omitted, it is `title_generation`.
-- `schema` (a JSON Schema object) asks for JSON through the prompt and the
-  provider's JSON mode. The reply is `{"text": ..., "parsed": <value>}`. An
-  answer that is not JSON, or does not match the schema, is an error. An
-  install without the `jsonschema` package (not a core dependency) refuses
-  a `schema` request before the model is called.
-- `redact: true` masks secrets in `input` with the agent's redactor before
-  the model sees it.
-- A `session_id` lends that session's model to a task that does not name
-  its own: when `auxiliary.<task>.provider` is `auto` (the default). A task
-  configured with an explicit provider or model keeps it; explicit settings
-  win over the session's route, as for `ctx.llm`.
+The frontend sends
+`{"method": "plugin.<plugin_id>.chart.write", "params": {"session_id": "…", "text": "…"}}`,
+gets `{"job": "…"}` back at once, and receives the chart (or an `error`) as
+the session event `plugin.<plugin_id>.chart.written` with the same `job`.
+Called inline, the model call would hold that client's next requests on the
+connection, an interrupt or an approval answer included, until the model
+answered. The semaphore stands in for `llm.oneshot`'s per-owner cap: a fifth
+call while four run is refused. An exception in the handler itself answers
+the call with reason `plugin_rpc_failed`.
+
+- **Redact at the boundary.** `agent.redact.redact_sensitive_text` is part
+  of the [public plugin API](plugins/public-api.md). Pass `force=True` where
+  secrets must never leave the machine, such as text sent to a model: it then
+  masks secrets even when the operator turned redaction off with
+  `security.redact_secrets: false`. Without `force=True` it follows that
+  setting.
+- **The task is the route.** `task=` must name a task your plugin registered,
+  so the operator's `auxiliary.<task>` setting picks the model, and a
+  frontend cannot pick a different route.
+- **Check `parsed`.** It is `None` when the reply is not JSON. A reply that
+  does not match `json_schema` raises `ValueError` when the optional
+  `jsonschema` package is installed; without it, the schema is not checked.
 
 #### Inheriting a built-in slot
 
@@ -70465,7 +70733,8 @@ def register(ctx):
 - Hermes calls `resolver(session_id)` each time it starts a local process for a session: a foreground or background `terminal` command, a `terminal()` call from `execute_code`, and the other subprocesses that get the session's `HERMES_SESSION_*` variables. The value is read at that moment, so a change (the conversation moves to another pane) applies to the next command.
 - `session_id` is the session the process runs for. A subagent's commands get the subagent's id; map it to its parent session in your resolver when the parent's values must apply.
 - Return a map of declared names to strings. A value of `None` removes the name from the process environment. A name you leave out keeps the gateway's own value. Names you did not declare are ignored.
-- The declared names are never saved in the shared shell snapshot, so one session's value cannot reach a later command of another session, and an `export` of one of these names does not carry to the next command.
+- The declared names are never saved in the shared shell snapshot, so one session's value cannot reach a later command of another session, and an `export` of one of these names does not carry to the next command. This applies to your plugin's own profile only: another profile served by the same gateway keeps its own exports of the name.
+- Each name has one plugin per profile. Declaring a name another loaded plugin of the same profile already declared raises `ValueError` naming that plugin. Unloading a plugin frees its names, and a reload of the same plugin declares them again. Your own plugin may declare a name in more than one call: the later registration's value wins, and disposing it brings back the earlier one's.
 - Names must be valid environment variable names. `HERMES_*` names are refused (they belong to core). Provider and Hermes credential names that the subprocess scrub removes are also removed from your values.
 - A resolver that raises is logged and contributes nothing; the command still runs. Keep it fast and local: it runs on every spawn.
 - Values apply on the local terminal backend only. Remote backends (Docker, SSH, Modal and other sandboxes) do not receive them.
@@ -70723,12 +70992,28 @@ listens for the event frame of type `plugin.<plugin_id>.pane.changed`:
   client that reconnects replays them. `session_id` may be the conversation's id or its agent's current
   id (compression gives the agent a new one), so a tool or hook can pass the `session_id` it received.
   `payload` is a JSON dict. The call returns `True` when a live viewer took the frame, `False` when no
-  client is viewing or this process holds no such session. `hermes_cli.plugin_events.emit_plugin_session_event(plugin_id, session_id, event, payload)`
-  is the same call for code without `ctx`.
+  client is viewing or this process holds no such session. `ctx.emit_to_session` looks the session up in
+  your plugin's own profile, also from a thread you started. `hermes_cli.plugin_events.emit_plugin_session_event(plugin_id, session_id, event, payload)`
+  is the same call for code without `ctx`; it uses the caller's profile scope, so from your own thread on
+  a gateway that serves several profiles, use `ctx.emit_to_session`.
+- **`plugins.isolation: host`:** handlers run in the plugin host process, and both emit calls are
+  forwarded to the gateway process, looked up in the host's profile. There `emit_plugin_session_event`
+  is sent as the plugin whose code made the call: it returns `False` and sends nothing when `plugin_id`
+  is not that plugin's own or the code is from a load that has since unloaded (a task left running
+  across a reload too), and it may do the same from a thread you
+  started (the host may not know which plugin it belongs to), so use `ctx.emit_to_session` there. In-process the helper takes
+  `plugin_id` as given.
 - **Where it works:** on a gateway that owns sessions (its session authority, as on the shared
   `hermes gateway run` gateway that attached frontends use). A backend without one answers the method
   with `-32601`. In a process without one (`hermes chat`, cron, a
   `dashboard.turn_isolation` compute child) `emit_to_session` returns `False`.
+- **Detect it first.** An owner that serves plugin methods lists `plugin-rpc-v1` in
+  `runtime.describe`'s `capabilities`. With it, `-32601` means that plugin method is not loaded (the
+  plugin is disabled, not installed, or has no such method). Without `plugin-rpc-v1`, clients must not
+  assume plugin RPC is supported (an older owner may still serve it without listing the capability). The contract declares the namespace once as
+  `plugin.{plugin_id}.{name}` (`CanonicalRpcNamespaces` in the generated TypeScript,
+  `x-canonical-namespaces` in the OpenRPC document): params are an open object with an optional
+  `session_id`, and the result is whatever JSON your handler returns.
 
 **Security.** A plugin method gets the same gate as a plugin slash command on that gateway: the connection
 needs the `session:control` capability, and a call that names a `session_id` must pass that session's
@@ -71952,6 +72237,8 @@ with a name allows that one name only.
 | `tools.skills_sync` | `dir_hash` | plugins/index.md § Read the skill catalog |
 | `tools.skill_usage` | `read_skill_name` | plugins/index.md § Read the skill catalog |
 | `gateway.session_context` | `get_session_env` | plugins/index.md § platform plugins: read session identity through the task-local context |
+| `agent.redact` | `redact_sensitive_text` | plugin-llm-access.md § From the plugin's frontend: a plugin RPC method (`force=True` where secrets must never leave) |
+| `hermes_cli.plugin_session` | `session_client` | user-guide/features/plugins.md § Plugin code inside the gateway: which client created the session |
 
 ---
 
@@ -72210,7 +72497,7 @@ hermes acp --setup          # interactive provider/model setup for ACP terminal 
 
 The Ink TUI's gateway client lives in `apps/shared` (`@hermes/shared`), so another Node frontend can use it without compiling Ink's source. It dials the owner with a ticket, reads `runtime.describe` before `session.create`, translates requests and results for `hermes-gateway-v1` (`@hermes/shared/gateway-canonical`), reconnects with backoff, re-ensures a gone owner a bounded number of times per minute, and emits typed events (`@hermes/shared/gateway-types`).
 
-The client does not know where its connection comes from. The caller passes `connect(start, recover)`, which returns `{url, protocols, profile_id, instance_id}` and runs again for every reconnect (tickets are single-use). Ink passes its `gateway_bootstrap.py` helper; any other local client can run `hermes gateway attach --json` (added with this client's split, #142159) (with `--start` on the first call and `--recover` when asked to recover) and pass its `url` and `protocols`:
+The client does not know where its connection comes from. The caller passes `connect(start, recover)`, which returns `{url, protocols, profile_id, instance_id}` and runs again for every reconnect (tickets are single-use). Ink passes its `gateway_bootstrap.py` helper; any other local client can run [`hermes gateway attach --json`](./gateway-internals.md#hermes-gateway-attach), with `--start` on the first call and `--recover` when asked to recover, and pass its `url` and `protocols`:
 
 ```ts
 import { execFile } from 'node:child_process'
@@ -72235,7 +72522,19 @@ gw.drain()
 const session = await gw.request('session.create', {})
 ```
 
-`hermes gateway attach` exits non-zero with the verdict on stdout when there is no owner to attach, so `execFile` rejects and the client retries on its backoff. Sessions are created with `source: "tui"`, the gateway's terminal-client policy, and `session.create` refuses an owner whose `runtime.describe` does not offer it. Other options (`terminalConnectFailure`, `attachUrl`, `sidecarUrl`, timeouts, `toolProgress`, `onLifecycle`, `text`, `fallbackWebSocket`) are documented on `GatewayClientOptions`. Browser-safe modules stay in `apps/shared/src/`; Node-only ones (the client, `prompt-history`) are in `apps/shared/src/node/`, and `apps/shared/src/node/boundary.test.ts` fails if the package's program ever includes a file from another workspace.
+`hermes gateway attach` exits non-zero with the verdict on stdout when there is no owner to attach, so `execFile` rejects and the client retries on its backoff. Sessions are created with `source: "tui"`, the gateway's terminal-client policy, and `session.create` refuses an owner whose `runtime.describe` does not offer it.
+
+Two options say who is launching. `source` picks another policy label from `runtime.describe`'s `session_create.sources` (`session.create` is refused if the owner does not list it). `client` is your client's own name, sent on `session.create` only when the owner lists `client` in `session_create.parameters`; an older owner gets the request without it. `name` is 1-64 characters of `a-z`, `0-9`, `.`, `_` and `-`, starting with a letter or digit (`my-client`, not `My Client` or `@acme/client`), and the optional `version` is 1-64 printable ASCII characters without spaces, with no other keys: an owner that takes `client` refuses `session.create` for anything else. The name is a label for attribution: Hermes never grants anything because of it.
+
+```ts
+const gw = new GatewayClient({
+  connect,                                           // as above
+  source: 'tui',                                     // the default: the terminal-client policy
+  client: { name: 'my-client', version: '1.4.0' }    // version is optional
+})
+```
+
+Other options (`terminalConnectFailure`, `attachUrl`, `sidecarUrl`, timeouts, `toolProgress`, `onLifecycle`, `text`, `fallbackWebSocket`) are documented on `GatewayClientOptions`. Browser-safe modules stay in `apps/shared/src/`; Node-only ones (the client, `prompt-history`) are in `apps/shared/src/node/`, and `apps/shared/src/node/boundary.test.ts` fails if the package's program ever includes a file from another workspace.
 
 ### Method catalog (selected)
 
@@ -72254,7 +72553,7 @@ spawn_tree.save / list / load
 terminal.resize         clipboard.paste         image.attach
 ```
 
-Plugins add `plugin.<plugin_id>.<name>` methods (`ctx.register_rpc`) and session events of type `plugin.<plugin_id>.<event>` (`ctx.emit_to_session`); see [plugin RPC methods and session events](./plugins/index.md#talk-to-your-own-frontend-plugin-rpc-methods-and-session-events).
+Plugins add `plugin.<plugin_id>.<name>` methods (`ctx.register_rpc`) and session events of type `plugin.<plugin_id>.<event>` (`ctx.emit_to_session`); an owner serving them lists `plugin-rpc-v1` in `runtime.describe`'s `capabilities`. See [plugin RPC methods and session events](./plugins/index.md#talk-to-your-own-frontend-plugin-rpc-methods-and-session-events).
 
 `session.active_list`, `session.activate`, and `session.close` are the process-local live-session controls used by the TUI session switcher. Use `session.list` / `/resume` for saved transcript discovery; use the active-session methods only for sessions that are currently open in the TUI gateway process.
 
@@ -72425,6 +72724,7 @@ databases, so this endpoint does not provide a global exactly-once guarantee.
 - **You're writing a custom desktop / web / TUI host and want every Hermes feature** (slash commands, approvals, clarify, multi-agent, session branching) → TUI gateway JSON-RPC.
 - **You want any OpenAI-compatible frontend, a language-agnostic HTTP client, or curl-driven automation** → API server.
 - **You want a Python in-process embed without a subprocess** → import `run_agent.AIAgent` directly. See [Agent Loop](./agent-loop).
+- **Your client needs the user's clipboard image** (image paste) → run `hermes clipboard image --out PATH --json` on the user's machine. It is device-local, never a gateway call, because the gateway may be remote. See [`hermes clipboard`](../reference/cli-commands.md#hermes-clipboard).
 
 ---
 
@@ -84306,10 +84606,18 @@ pnpm --dir ui-tui run build
 pnpm --dir apps/desktop run dev
 ```
 
-Activation provides the pnpm version root `package.json` pins in `devEngines`.
-Hermes's builds and `hermes update` refuse any other pnpm version (a direct
-`pnpm install` does not check it), and the root `preinstall` script refuses
-`npm install` (npx and other npm commands only warn).
+Activation provides the pnpm version `pm/lock.json` pins. An install that runs
+lifecycle scripts refuses any other pnpm, a direct or filtered `pnpm install`
+included: the root `preinstall` script requires the `pm/lock.json` pnpm and refuses
+`npm install`, and pnpm 10 and 11 also refuse the root `engines.pnpm` range (`^12`;
+pnpm 12 does not compare `engines.pnpm` with itself). pnpm 12 runs no root
+`preinstall` under `--ignore-scripts`, `--lockfile-only` (install, add, remove and
+update) or `pnpm fetch`, so another pnpm 12 passes those. The backstop for a
+lockfile written that way is CI: every change to `pnpm-lock.yaml` runs the JS checks,
+which install it with the pinned pnpm under `--frozen-lockfile` (with
+`--lockfile-only` when the installed tree is cached). That proves the lockfile matches
+the manifests and the release-age policy, not which pnpm wrote it. A user agent
+overridden through `pnpm_config_user_agent` is refused as well.
 
 The website is a separate npm project: `npm ci --prefix website`, then
 `npm run build:fast --prefix website`. PM activation supplies tools, not these
@@ -84483,6 +84791,12 @@ not substitutes for an installed application's update mechanism.
 | `pm install --target TARGET NAME...` | Stage explicit cross-target packages without recording them as the host's installed runtime. The win32 `git` target pins a self-extracting PortableGit archive: staging it runs the vendor extractor and therefore requires a Windows host. |
 | `pm bundle --out DIR [--ref REF]` | Stage a source snapshot, native tools, facts, and Python dependencies. It does not produce a signed desktop installer. |
 
+The Nix flake pins the pnpm store that `pnpm-lock.yaml` resolves to with one
+fixed-output hash, `nix/pnpm-deps-hash`. `pm update --pnpm` does not refresh it:
+after any change to `pnpm-lock.yaml`, run `nix run .#update-pnpm-lockfile`
+([Nix setup](../getting-started/nix-setup.md#updating-the-pnpm-lockfile)) or
+copy the hash the `nix` workflow's `pnpm-deps-hash` job reports.
+
 The complete desktop builder also builds the JavaScript surfaces, generates
 launchers, and invokes native packaging. Maintainers can read
 [Building the Desktop Installers](https://github.com/NousResearch/hermes-agent/blob/main/apps/desktop/BUILDING.md).
@@ -84527,10 +84841,29 @@ without upload times, it stops with `has no publish time`; use
 `https://pypi.org/simple` for that step.
 
 JavaScript workspace dependencies follow the same rule through
-`minimumReleaseAge` in `pnpm-workspace.yaml` (in minutes: `20160` is 14 days),
-with exemptions listed in `minimumReleaseAgeExclude`. CI enforces it when it
-installs `pnpm-lock.yaml`; source, bundle and Docker installs trust the
-committed lock.
+`minimumReleaseAge` in `pnpm-workspace.yaml` (in minutes: `20160` is 14 days).
+When a range's only matches are younger than that, `hermes pm update --pnpm`
+stops and prints the entries that would let it through, for example
+`- pele@1.13.0  # <why it cannot wait>` (it lists them by repeating the update
+on a scratch copy of the manifests and lock). To exempt one, add it to
+`minimumReleaseAgeExclude` as that exact `name@version` (never a bare name or a
+glob, which would exempt every future release), with the reason as an inline
+comment on the same line, then run the update again. The update drops an entry
+once the lockfile no longer holds that version, in the same change as the lock.
+pnpm's own `minimumReleaseAgeExcludePrune` stays off, because it would rewrite
+`pnpm-workspace.yaml` on every install, users' builds included. CI enforces the
+policy when it installs `pnpm-lock.yaml`; source, bundle and Docker installs
+trust the committed lock.
+
+PM's own npm-hosted tools (pnpm and npm) are pinned to `registry.npmjs.org`
+URLs in `pm/lock.json`, but PM downloads them from your npm registry:
+`npm_config_registry`, else `registry=` in the npmrc that `npm_config_userconfig`
+names, else `$HERMES_HOME/npmrc` when it exists, else `~/.npmrc`. That registry may be plain `http://` (a LAN Verdaccio or
+Nexus). The bytes must match the lock's SHA256 before PM uses them, a plain-http
+download over 256 MiB is abandoned, and a plain-http redirect must stay on the
+registry's host. When the registry is unreachable, lacks the file, sends too much
+or redirects elsewhere, PM falls back to its own pinned HTTPS archive. Every other
+download stays HTTPS-only.
 
 ## Diagnostics
 
@@ -86014,7 +86347,7 @@ ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ \
   bash -c 'cd "$HOME/.hermes/hermes-agent/apps/desktop" && CSC_IDENTITY_AUTO_DISCOVERY=false pnpm run pack'
 ```
 
-**Other native downloads (e.g. the `get-windows` prebuilt on Windows) that need a mirror:** put the npm keys in `$HERMES_HOME/npmrc` (`%LOCALAPPDATA%\hermes\npmrc` on Windows, `~/.hermes/npmrc` elsewhere) — for example `node_get_windows_binary_host_mirror=https://<mirror>/sindresorhus/get-windows/releases/download/`. Every dependency install and build the updater spawns (desktop, web and TUI builds) points `NPM_CONFIG_USERCONFIG` at that file when it exists (pnpm reads its registry and auth from it) and hands its other keys to dependency install scripts as `npm_config_<key>` environment variables, so the config survives `hermes update`; `~/.npmrc` may be missed because the desktop hand-off inherits the GUI's environment. An `NPM_CONFIG_USERCONFIG` you set yourself is never overridden.
+**Other native downloads (e.g. the `get-windows` prebuilt on Windows) that need a mirror:** put the npm keys in `$HERMES_HOME/npmrc` (`%LOCALAPPDATA%\hermes\npmrc` on Windows, `~/.hermes/npmrc` elsewhere) — for example `node_get_windows_binary_host_mirror=https://<mirror>/sindresorhus/get-windows/releases/download/`. Every dependency install and build the updater spawns (desktop, web and TUI builds) points `NPM_CONFIG_USERCONFIG` at that file when it exists (pnpm reads its registry and auth from it) and hands its other keys to the build's child processes as `npm_config_<key>` environment variables (the `get-windows` prebuilt is fetched by node-pre-gyp, which `stage-native-deps.mjs` runs during the build), so the config survives `hermes update`. Credentials (`_authToken`, `_auth`, `_password` and any other `_`-key or `//host/:` key), scoped keys (`@scope:registry`), `otp`, `key`, `cert` and `key[]=` array lines are never handed to install scripts. Hermes's own npm downloads (pinned tool archives, `hermes pm update` lookups) use the `registry=` from the same file. When this file exists it replaces `~/.npmrc` for those builds and downloads (npm's userconfig rule; the two are not merged), so copy any `registry=` or auth line you need from `~/.npmrc` into it; `~/.npmrc` may be missed because the desktop hand-off inherits the GUI's environment. An `NPM_CONFIG_USERCONFIG` you set yourself is never overridden. The pnpm and npm executables that Hermes installs for those builds come from the same `registry=` (or `npm_config_registry`), which may be a plain-`http://` LAN mirror; see [Release age and package mirrors](../reference/package-management.md#release-age-and-package-mirrors).
 
 **If `get-windows` is missing or half-installed:** the build no longer fails — it prints `[stage-native-deps] get-windows not installed ... read_window_below will be unavailable in this build` and ships without the `read_window_below` tool. When the package directory exists but is not loadable (a Windows in-place update interrupted by a running Hermes window, `TAR_ENTRY_ERROR` in the install log), the same warning names the directory, and the next `hermes desktop --force-build` or update removes it before its pnpm install so the package is re-extracted — close every Hermes window and gateway first so the extract is not interrupted again. A package whose native binding or macOS helper is missing is likewise shipped without window enumeration rather than failing the build.
 
@@ -86034,6 +86367,8 @@ pnpm install         # from repo root — links apps/desktop, web, apps/shared
 cd apps/desktop
 pnpm run dev         # Vite renderer + Electron, which boots the Python backend
 ```
+
+On Windows x64, the first `pnpm run dev` (and `profile:main`) fetches `get-windows`' native binding into `node_modules`, because the dependency install skips its script; if that fails or takes over two minutes, dev starts without `read_window_below` and retries next time. That fetch reads a mirror or proxy only from the environment (`npm_config_node_get_windows_binary_host_mirror`, `HTTP_PROXY` or `npm_config_proxy`), not from `.npmrc`.
 
 Point the app at a specific checkout, or sandbox it from your real config:
 
