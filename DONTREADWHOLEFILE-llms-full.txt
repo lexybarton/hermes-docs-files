@@ -980,11 +980,11 @@ For an admitted source checkout, `hermes update` runs these phases:
 
 1. **Pre-update snapshot** — Hermes saves selected state files for every profile in that profile's `state-snapshots/` directory. These include pairing data, cron jobs, `config.yaml`, `.env`, and `auth.json`. Automatic quick snapshots skip individual files larger than 1 GiB. `updates.pre_update_backup` selects `quick`, `full`, or `off`. Full archives use the [backup exclusions](../reference/faq.md#hermes-backup-vs-hermes-profile-export). Recovery uses [Snapshots and rollback](../user-guide/checkpoints-and-rollback.md). Quick snapshots recover state files, not application code. The snapshot is best-effort: if it fails, the update prints a `⚠ Pre-update snapshot FAILED` warning and continues, and the receipt records `pre_update_backup` as a failed step (a deliberate `off`/`--no-backup` lands in the receipt's skips with its reason instead).
 2. **Code update** — applies the configured source branch or stable release tag and updates submodules. On Linux and macOS every gateway running from this install is paused immediately before the first change to the checkout (see [Gateway downtime during an update](#gateway-downtime-during-an-update)); an update that has nothing to apply, or that fails before it changes the checkout, stops nothing.
-3. **Post-pull syntax validation + auto-rollback** — after the pull, Hermes compiles the nine critical files every `hermes` invocation imports at startup. If any fails to parse (e.g. an orphan merge-conflict marker, an accidentally truncated file), Hermes rolls the install back so your shell stays bootable: it resets the checkout to the commit it ran before the pull (`git reset --hard <pre-pull-sha>`), or, when the update switched away from a detached checkout or a parked feature branch, returns there with `git checkout --detach <sha>` / `git checkout <branch>` (a branch it cannot check out again is restored detached at the same commit). Re-run `hermes update` once the upstream fix lands.
+3. **Syntax validation before and after the move + auto-rollback** — before moving the checkout, Hermes compiles the startup files the target lists in its `pyproject.toml` (`[tool.hermes] update-startup-files`: the files every `hermes` invocation imports at startup), and refuses the update if one is missing or fails to parse. After the pull it checks them again. If any fails (e.g. an orphan merge-conflict marker, an accidentally truncated file, a file a refactor dropped), Hermes rolls the install back so your shell stays bootable: it resets the checkout to the commit it ran before the pull (`git reset --hard <pre-pull-sha>`), or, when the update switched away from a detached checkout or a parked feature branch, returns there with `git checkout --detach <sha>` / `git checkout <branch>` (a branch it cannot check out again is restored detached at the same commit). Re-run `hermes update` once the upstream fix lands. Releases from before that list existed are checked against the running updater's own list, skipping files they do not have.
 4. **Dependency preparation** — PM provisions required tools and prepares a complete Python environment from the new lock, existing extras, and enabled plugin requirements. It validates that environment before publishing its selection. A plugin never fails the update. A plugin that no longer fits the new core is moved from `plugins.enabled` to `plugins.disabled` in every profile that enables it. A memory provider keeps its `memory.provider` selection; while the plugin is disabled, Hermes uses built-in memory and says so at startup, in `hermes memory status` and in `hermes doctor`. That covers a `requires-python` that excludes Hermes's Python, a `manifest_version` newer than this Hermes supports, and dependencies that the resolver proves can't resolve alongside core and earlier plugins in config order, or that fail their own build. A download or network failure gets one retry and is disabled if it fails again. The update prints `⚠ Disabled plugin '<name>' in <home>: <reason>`, records it in the receipt's warnings and under `plugins.disabled_by_update` in that profile's config, and continues. The next update retries a plugin disabled by a download failure; one the resolver or its own build rejected is retried by the first update where the plugin or Hermes's dependencies have changed. Retries run after the enabled plugins have built, and turns it back on (memory provider included) once it fits, for example after the plugin ships a compatible release or Hermes fixes what broke it. A retried plugin never displaces an enabled one. A provider-only record is retried only while `memory.provider` still names it. To turn it back on sooner, run `hermes plugins enable <name>`. To keep it off, run `hermes plugins disable <name>`, which stops the retries. Updates before this behaviour could leave a plugin listed in both `plugins.enabled` and `plugins.disabled`, where it loads nowhere; `hermes doctor` reports that state, and `hermes plugins enable <name>` or `hermes plugins disable <name>` settles it. A `requires_hermes` range, or a plugin requirement on `hermes-agent`, that the running version misses never disables a plugin, because a source checkout without release tags can read as an older release. That plugin sits out instead (`⚠ Left plugin '<name>' … out of this update`), stays enabled, and rejoins once Hermes reports a version it accepts. A secondary profile whose config cannot be read sits out the same way until the config is fixed. Only a core that cannot build on its own fails this step.
 5. **Config migration** — detects new config options added since your version and prompts you to set them
 6. **Desktop rebuild (stage-and-swap)** — if the Hermes Desktop app was built from this checkout, it is rebuilt so the GUI matches the new code. The rebuild packs into a temporary staging directory next to `apps/desktop/release/`, verifies the staged app, and only then renames it over the previous build (on Windows a real-time scanner briefly holding `release/win-unpacked` is ridden out with a few short retries). A rebuild that fails at any point — corrupt Electron download, missing dependency, disk full — leaves the previous app untouched and launchable; the update prints a `⚠` line, still finishes the remaining steps (config migration, gateway restart) and exits 0 with a `build` follow-up in its receipt, and the next launch, `hermes update` or `hermes desktop --build-only --force-build` retries the rebuild. On macOS the rebuilt bundle is then copied (with `ditto`, signature intact) over a stale `/Applications/Hermes.app` or `~/Applications/Hermes.app`, so the copy Finder and the Dock launch matches the backend; an installed copy that is currently running is left alone and the update tells you to quit it and run `hermes update` again. If a copy an earlier update installed has since been removed (including dragged to the Trash), the update rebuilds it if needed, puts it back and says so, so Finder, the Dock and Spotlight find Hermes again; `hermes uninstall` removes the app for good. On Windows, when the update finishes from inside the Desktop app it would rebuild (the app completing an interrupted update at launch), the rebuild is skipped with a notice instead: Windows locks a running app's files, and stopping the app would end the update with it. The rest of the update completes; quit Hermes Desktop and run `hermes desktop` from a terminal, or use **Update now** in **Settings → About**, to rebuild and reopen it.
-7. **Gateway auto-restart**: on Linux and macOS, gateways paused for the update are started again as soon as the dependencies are prepared and the launchers refreshed, before the product builds; on Windows they restart after the builds. Any other running gateway is refreshed after the update completes. Service-managed gateways (systemd on Linux, launchd on macOS) restart through the service manager. Manual gateways are relaunched when Hermes can map their PID to a profile. Manually launched `hermes serve` / `hermes dashboard` backends are different: the updater leaves them running and asks their owner to restart them. See [Manual backend restart reminders](#manual-backend-restart-reminders). Backends owned by a running Desktop app remain the app's responsibility.
+7. **Gateway auto-restart**: before any gateway starts, the update rewrites each profile's gateway service definition (systemd unit, stopped launchd job's plist, Windows launcher scripts) that no longer matches the updated install. On Linux and macOS, gateways paused for the update are started again as soon as the dependencies are prepared and those definitions rewritten, before the product builds; on Windows they restart after the builds. Any other running gateway is refreshed after the update completes. Service-managed gateways (systemd on Linux, launchd on macOS) restart through the service manager. Manual gateways are relaunched when Hermes can map their PID to a profile. Manually launched `hermes serve` / `hermes dashboard` backends are different: the updater leaves them running and asks their owner to restart them. See [Manual backend restart reminders](#manual-backend-restart-reminders). Backends owned by a running Desktop app remain the app's responsibility.
 8. **Multiplex migration (multi-profile installs)** — once the fleet is verified on the new code, an install with two or more profiles that still run **one gateway per profile** is folded into a single multiplexed default gateway when nothing blocks it (same as `hermes gateway migrate --multiplex --yes`); if a blocker exists (a bot token shared by two profiles, a secondary profile binding a port with no `/p/<profile>/` ingress) the update prints the blockers with their fixes and changes nothing. Single-profile installs are never touched. See [Migrating from per-profile gateways](../user-guide/multi-profile-gateways.md#migrating-from-per-profile-gateways).
 
 ### Gateway downtime during an update
@@ -27687,7 +27687,7 @@ connected. An enabled platform can correctly show **Messaging gateway stopped**.
 | BlueBubbles | — | ✅ | ✅ | — | ✅ | ✅ | — |
 | Photon (iMessage) | ✅ | ✅ | ✅ | — | ✅ | ✅ | — |
 | QQ | ✅ | ✅ | ✅ | — | — | ✅ | — |
-| Yuanbao | ✅ | ✅ | ✅ | — | — | ✅ | ✅ |
+| Yuanbao (Labs plugin) | ✅ | ✅ | ✅ | — | — | ✅ | ✅ |
 | Microsoft Teams | — | ✅ | — | ✅ | — | ✅ | — |
 | LINE | — | ✅ | ✅ | — | — | ✅ | — |
 | ntfy | — | — | — | — | — | — | — |
@@ -27726,7 +27726,7 @@ flowchart TB
     wx[Weixin]
     bb[BlueBubbles]
     qq[QQ]
-    yb[Yuanbao]
+    yb["Yuanbao (plugin)"]
     ms[Microsoft Teams]
     api["API Server<br/>(OpenAI-compatible)"]
     wh[Webhooks]
@@ -28427,7 +28427,7 @@ Each platform has its own toolset:
 | Weixin | `hermes-weixin` | Full tools including terminal |
 | BlueBubbles | `hermes-bluebubbles` | Full tools including terminal |
 | QQBot | `hermes-qqbot` | Full tools including terminal |
-| Yuanbao | `hermes-yuanbao` | Full tools including terminal |
+| Yuanbao (Labs plugin) | `hermes-yuanbao` | Full tools + the `yb_*` group/DM/sticker tools from the `yuanbao` Hermes Labs plugin |
 | Microsoft Teams | `hermes-teams` | Full tools including terminal |
 | API Server | `hermes-api-server` | Full tools (drops `clarify`, `text_to_speech` — programmatic access doesn't have an interactive user) |
 | Webhooks | `hermes-webhook` | Full tools including terminal |
@@ -28670,7 +28670,7 @@ Defaults to `false`. Only platforms whose adapter implements `delete_message` ho
 - [BlueBubbles Setup (iMessage)](bluebubbles.md)
 - [Photon Setup (iMessage)](photon.md)
 - [QQBot Setup](qqbot.md)
-- [Yuanbao Setup](yuanbao.md)
+- [Yuanbao](yuanbao.md) (Hermes Labs plugin)
 - [Microsoft Teams Setup](teams.md)
 - [Teams Meetings Pipeline](teams-meetings.md)
 - [Microsoft Graph Webhook Listener](msgraph-webhook.md)
@@ -45873,8 +45873,9 @@ hermes-agent/
 │                             #   whatsapp, matrix, mattermost, email, sms, dingtalk,
 │                             #   feishu, wecom, irc, line, teams, google_chat,
 │                             #   buzz, ntfy, photon, raft, simplex, whatsapp_cloud,
-│                             #   signal, weixin, bluebubbles, qqbot, yuanbao
-│                             #   (Home Assistant: `homeassistant` catalog plugin)
+│                             #   signal, weixin, bluebubbles, qqbot
+│                             #   (Home Assistant: `homeassistant` catalog plugin;
+│                             #    Yuanbao: `yuanbao` Hermes Labs plugin)
 │
 ├── acp_adapter/              # ACP server (VS Code / Zed / JetBrains)
 ├── cron/                     # Scheduler (jobs.py, scheduler.py)
@@ -47567,6 +47568,10 @@ Subagent reads require the current parent's live object ancestry, not merely equ
 session IDs; tails are bounded to 16 KiB. Missing or retired children return
 `available: false`. These are reads, not child steering or stop controls.
 
+`subagent.list` rows also carry `child_session_id`: the child's own stored session
+(`null` until it has one). A child's stored transcript, live or finished, is
+`session.transcript` with `subagent_id` (see [Gateway local sessions](./gateway-local-sessions.md)).
+
 Managed-worker policies return `unsupported_projection` for process/subagent reads:
 the owner's process-local registry cannot truthfully describe another interpreter.
 Control mutations (`session.control`), process mutations and subagent steering are
@@ -48275,7 +48280,6 @@ plugins/platforms/                  # plugin-packaged adapters (one dir each)
 ├── bluebubbles/adapter.py  # Apple iMessage via BlueBubbles macOS server
 ├── weixin/adapter.py       # Weixin (personal WeChat) via iLink Bot API
 ├── qqbot/                  # QQ Bot (Tencent QQ) via Official API v2
-├── yuanbao/adapter.py      # Yuanbao (Tencent) DM/group WebSocket
 └── …                       # google_chat, ntfy, photon, raft, simplex, …
 
 gateway/platforms/                  # core base + HTTP ingress adapters
@@ -55621,7 +55625,7 @@ Use `hermes config set` to set environment variables — every `UPPER_SNAKE` nam
 
 This page documents Hermes' built-in tools, grouped by toolset. Availability varies by platform, credentials, and enabled toolsets.
 
-**Quick counts (current registry):** ~85 tools — 4 browser tools (`browser_exec`, `browser_cdp`, `browser_dialog`, `browser_vault`), 4 file tools, 2 terminal tools (`terminal`, `process_manage`), 11 desktop-GUI tools (`read_terminal`, `close_terminal`, `desktop_preview`, `drive_preview`, `annotate_preview`, `read_window_below`, `focus_pane`, `react_to_message`, `gui_tour`, `show_tip`, `set_theme` — desktop-app sessions only), 2 web tools, 5 Feishu tools, 5 Yuanbao tools, 14 kanban tools (registered when the kanban dispatcher spawns the agent), 1 project tool (`desktop_project`; desktop/GUI sessions), 2 Discord tools, 3 video tools (`video_generate`, `xai_video_edit`, `xai_video_extend`), and a handful of standalone tools (`memory`, `clarify`, `delegate_task`, `execute_code`, `cronjob_manage`, `session_search`, `skill_view`/`skill_manage`/`skills_list`, `text_to_speech`, `image_generate`, `vision_analyze`, `video_analyze`, `todo_list`, `computer_use`, `x_search`).
+**Quick counts (current registry):** ~85 tools — 4 browser tools (`browser_exec`, `browser_cdp`, `browser_dialog`, `browser_vault`), 4 file tools, 2 terminal tools (`terminal`, `process_manage`), 11 desktop-GUI tools (`read_terminal`, `close_terminal`, `desktop_preview`, `drive_preview`, `annotate_preview`, `read_window_below`, `focus_pane`, `react_to_message`, `gui_tour`, `show_tip`, `set_theme` — desktop-app sessions only), 2 web tools, 5 Feishu tools, 14 kanban tools (registered when the kanban dispatcher spawns the agent), 1 project tool (`desktop_project`; desktop/GUI sessions), 2 Discord tools, 3 video tools (`video_generate`, `xai_video_edit`, `xai_video_extend`), and a handful of standalone tools (`memory`, `clarify`, `delegate_task`, `execute_code`, `cronjob_manage`, `session_search`, `skill_view`/`skill_manage`/`skills_list`, `text_to_speech`, `image_generate`, `vision_analyze`, `video_analyze`, `todo_list`, `computer_use`, `x_search`).
 
 :::tip MCP Tools
 In addition to built-in tools, Hermes can load tools dynamically from MCP servers. MCP tools appear with the prefix `mcp__<server>__` (e.g., `mcp__github__create_issue` for the `github` MCP server). See [MCP Integration](../user-guide/features/mcp.md) for configuration.
@@ -55732,6 +55736,8 @@ For local files, a full unredacted read (including all pages of the same file ve
 **Home Assistant tools** (`ha_list_entities`, `ha_get_state`, `ha_list_services`, `ha_call_service`, toolset `homeassistant`) are no longer built-in. They come from the `homeassistant` catalog plugin (`hermes plugins install homeassistant`). See [Home Assistant](../user-guide/messaging/homeassistant.md).
 
 **Spotify tools** (`spotify_playback`, `spotify_devices`, `spotify_queue`, `spotify_search`, `spotify_playlists`, `spotify_albums`, `spotify_library`, toolset `spotify`) are no longer built-in. They come from the `spotify` catalog plugin (`hermes plugins install spotify`, then `hermes spotify login`). See [Spotify](../user-guide/features/spotify.md).
+
+**Yuanbao tools** (`yb_query_group_info`, `yb_query_group_members`, `yb_send_dm`, `yb_search_sticker`, `yb_send_sticker`, toolset `yuanbao`) are no longer built-in. They come from the `yuanbao` Hermes Labs plugin (`hermes plugins install yuanbao`). See [Yuanbao](../user-guide/messaging/yuanbao.md).
 :::
 
 ## `image_gen` toolset
@@ -55974,18 +55980,6 @@ Registered on the `hermes-discord` platform toolset. Moderation actions require 
 |------|-------------|----------------------|
 | `discord_admin` | Manage a Discord server via the REST API: list guilds/channels/roles, create/edit/delete channels, manage role grants, timeouts, kicks, and bans. | `DISCORD_BOT_TOKEN` + bot permissions |
 
-## `hermes-yuanbao` toolset
-
-Registered only on the `hermes-yuanbao` platform toolset. Yuanbao is Tencent's chat app; these tools drive its DM/group/sticker APIs.
-
-| Tool | Description | Requires environment |
-|------|-------------|----------------------|
-| `yb_query_group_info` | Query basic info about a group (called "派/Pai" in the app): name, owner, member count. | Yuanbao credentials |
-| `yb_query_group_members` | Query members of a group (for `@`-mentions, finding a user by name, listing bots). | Yuanbao credentials |
-| `yb_send_dm` | Send a private/direct message to a user in a group, with optional media files. | Yuanbao credentials |
-| `yb_search_sticker` | Search the built-in Yuanbao sticker (TIM face) catalogue by keyword. | Yuanbao credentials |
-| `yb_send_sticker` | Send a built-in sticker to the current Yuanbao chat. | Yuanbao credentials |
-
 ---
 
 <!-- source: website/docs/reference/toolsets-reference.md -->
@@ -56072,7 +56066,6 @@ Or in-session:
 | `video` | `video_analyze` | Video analysis and understanding tools (opt-in, not in the default toolset — add explicitly via `--toolsets`). |
 | `web` | `web_extract`, `web_search` | Web search and page content extraction. |
 | `x_search` | `x_search` | Read-only public X discovery via xAI's built-in `x_search` Responses tool. Use the `xurl` skill for authenticated X API reads and account actions. Off by default; opt in via `hermes tools`. Schema only registered when xAI credentials (SuperGrok OAuth or `XAI_API_KEY`) are configured. |
-| `yuanbao` | `yb_query_group_info`, `yb_query_group_members`, `yb_search_sticker`, `yb_send_dm`, `yb_send_sticker` | Yuanbao DM/group actions and sticker search. Registered only on `hermes-yuanbao`. |
 
 ## Platform Toolsets
 
@@ -56100,11 +56093,10 @@ Platform toolsets define the complete tool configuration for a deployment target
 | `hermes-wecom` | Same as `hermes-cli`. |
 | `hermes-wecom-callback` | Same as `hermes-cli`. |
 | `hermes-weixin` | Same as `hermes-cli`. |
-| `hermes-yuanbao` | Adds the five `yb_*` tools (DM/group/sticker) on top of `hermes-cli`. |
 | `hermes-webhook` | Restricted safe subset — only `web_search`, `web_extract`, `vision_analyze`, and `clarify`. Webhook-triggered runs get no terminal, file, or browser access. |
 | `hermes-gateway` | Internal gateway orchestrator toolset — union of every `hermes-<platform>` toolset; used when the gateway needs to accept any message source. |
 
-Platforms provided by plugins get an implicit `hermes-<platform>` bundle that is not part of `hermes-gateway`. For example, `hermes-homeassistant` still resolves once the `homeassistant` catalog plugin is installed, but it is no longer a built-in toolset.
+Platforms provided by plugins get an implicit `hermes-<platform>` bundle that is not part of `hermes-gateway`. For example, `hermes-homeassistant` and `hermes-yuanbao` still resolve once the `homeassistant` / `yuanbao` catalog plugin is installed, but they are no longer built-in toolsets.
 
 ## Dynamic Toolsets
 
@@ -57132,12 +57124,6 @@ hermes skills uninstall <skill-name>
 | [**page-agent**](../user-guide/skills/optional/web-development/web-development-page-agent.md) | Embed an in-page natural-language GUI copilot in web apps. |
 | [**publish-site**](../user-guide/skills/optional/web-development/web-development-publish-site.md) | Versioned site deploys to GitHub/Cloudflare/Netlify Pages. |
 | [**scrollcraft**](../user-guide/skills/optional/web-development/web-development-scrollcraft.md) | Premium scroll-driven landing pages; scroll = timeline. |
-
-## yuanbao
-
-| Skill | Description |
-|-------|-------------|
-| [**yuanbao**](../user-guide/skills/optional/yuanbao/yuanbao-yuanbao.md) | Yuanbao (元宝) groups: @mention users, query info/members. |
 
 ---
 
@@ -63965,6 +63951,75 @@ listener keeps working.
   CLI/TUI/GUI history. This read-only feed uses the native legacy-resume ownership checks,
   excludes hidden/archived/internal and foreign-owned rows, and never adopts a session merely
   by listing it. Explicit resume performs adoption; the default live feed is unchanged.
+  Both scopes take `workspace`: only conversations whose first row is in that folder, by
+  `hermes -c`'s rule (`hermes_state_sessions.workspace_key`): the row's git repo root equals it, or
+  (no root recorded) its cwd is the folder or under it. Pass the caller's repo root (else its cwd).
+  With `picker: true` each row also carries what a picker shows (`gateway/session_picker_fields.py`):
+  `cwd` and `workspace` from the same first row the filter reads, and from the conversation's current
+  segment (the compression tip, as the stored listing projects it) `preview` (the first prompt
+  there), `last_reply` (its newest reply, shortened as `preview` is; a pure compaction handoff is no
+  reply, a carrier shows the reply it wraps), `git_branch`, `last_active_at` and `pinned`. Off by
+  default, so the 1.5 s live-list poll pays nothing; on, a page is one batched store read.
+- `session.transcript({session_id, subagent_id?, cursor?, limit?, order?, inline_images?})` reads a
+  conversation without attaching to it (`gateway/session_stored_reads.py`). It is authorized as
+  `session.resume`'s read (`SessionAuthority.authorize`, `session:read`: profile, owner or operator).
+  Like `session.info` that check publishes the conversation's route entry in `authority.sessions`
+  when it is not there; it builds no agent, subscribes nobody, and an ended local conversation stays
+  out of the live list. An old CLI/TUI/GUI row (no receipt or route) is judged at its compression tip
+  by the stored feed's own rule, whichever lineage id is asked, and never adopted. It runs on the
+  socket's concurrent read lane, so a prompt or interrupt never queues behind it. Runtimes that serve
+  it advertise `session-transcript-v1` (and `session-list-picker-v1` for the `session.list` options
+  above) in `runtime.describe.capabilities`.
+  It returns `{session_id, rows, next_cursor, reset}`: display rows across the compression lineage
+  (live and compaction-archived, each logical message once), oldest first within a page. Every row
+  carries `row_kind` (`gateway/session_transcript_rows.py`): `"message"` is `session.resume`'s
+  `display_messages` row; `"compaction"` is a compaction handoff at its position, with `role:
+  "system"`, `text` the summary a reader sees (without the preamble, end marker, re-quoted user
+  messages, recovery footer and ranking line written for the model), `compacted_messages` (the count
+  the footer named, else null), `timestamp` and the stored `row_id`. A later compaction that carries,
+  re-wraps or unwraps a summary carrier still shows the older handoff, each once, before the first row
+  in the whole transcript that holds it, wherever a page starts.
+  A page holds at most `limit` (1-500, default 100) rows, compaction rows included, plus up to 64 tool
+  results of the call at its edge (a row's handoffs and the row itself can fall on two pages, each sent
+  once), and at most 2 MiB of JSON, cut between tool groups (a tool result whose call sits on another
+  page is still labelled from it); a single larger row keeps only its role, kind, time, ids and the
+  head of its text and carries `truncated: true`. Images read `[image]` unless `inline_images: true`.
+  The cursor is opaque and bound to the session, the child and the order.
+  `order: "oldest"` (the default) is also the poll: `next_cursor` is never null; read until a page is
+  empty, then keep that cursor and pass it again for the rows written since. The cursor holds the
+  segment it read and `SessionDB.transcript_cursor_state` of the rows it covered (the segment's live
+  rows up to the newest row read plus every live row of its earlier segments, the lineage's inactive
+  rows, its summed `transcript_revision`). While both hold only appends happened, and the page
+  continues after the cursor (`reset: false`). Anything else (an in-place compaction, a rotation to a
+  new segment, a rewind, a rewrite or deletion of a covered row or of an earlier segment's row,
+  including rows appended and compacted between two polls) answers `reset: true` from the first page:
+  the caller replaces what it holds. The check, the page and the state the next cursor holds are read
+  in one read transaction (`SessionDB.transcript_read_snapshot`), so a cursor vouches for exactly the
+  rows its page holds. A store without a pooled reader (not WAL, read-only, or at the pool's ceiling)
+  holds no transaction across the reads: there the read counts only when no write landed in the
+  database meanwhile, else it is read once more; when that read also overlaps a write, the reply is
+  `reset: true` from the first page with a cursor whose next poll resets again. A reply without a cursor
+  is `reset: true` too.
+  `order: "latest"` starts at the newest rows and pages older until `next_cursor` is null; its cursor
+  is keyed by each message's first durable row, so a page boundary holds across later compactions.
+  A single-segment conversation is paged in SQL on its display index, in one read transaction, with
+  the resume's conversation normalization (only the page's bodies are read, and a read backfills that
+  index outside the transaction when a row lacks its slot, as REST `/messages` does, then reads again);
+  a rotated lineage is deduplicated whole, and past `sessions.max_resume_messages` only its current
+  segment is paged. A cursor also holds which of the two its page read: when appends take the lineage
+  past that guard, a reply in either order is `reset: true` from its first page. A newest-first cursor
+  of that current segment also holds the segment: once a compaction rotates it to a new one, the next
+  reply is `reset: true` from the newest page.
+  With `subagent_id` it reads a delegated child of `session_id` instead
+  (`gateway/session_transcript_subagent.py`); the reply adds `subagent_id`, `available`, `running`
+  and `child_session_id`. The session must be live on this owner (else `not_found`) and readable by
+  the caller. A running child must be in the parent's live roster (the `subagent.list` rule, nested
+  children included). A finished child is found through the `_subagent_id` stamped on its row at
+  spawn, and only when its `parent_session_id` chain reaches this conversation through delegate-child
+  or compression-continuation hops; a branch of the conversation does not lend its children. A
+  foreign or unknown child answers `available: false`, `rows: []`, `next_cursor: null`,
+  `reset: true`. A child's lineage is its own (a queued child never shows its delegator's rows), and
+  every read uses the owning profile's own store under `owner_scope`.
   `session.info({session_id})` is a lightweight,
   authorized view of source, current model, lazy-agent status, and profile ID.
 - `ping({})` returns `{pong: true}`. `runtime.describe({})` exposes only authority identity,
@@ -72557,6 +72612,8 @@ Plugins add `plugin.<plugin_id>.<name>` methods (`ctx.register_rpc`) and session
 
 `session.active_list`, `session.activate`, and `session.close` are the process-local live-session controls used by the TUI session switcher. Use `session.list` / `/resume` for saved transcript discovery; use the active-session methods only for sessions that are currently open in the TUI gateway process.
 
+On the shared gateway's `hermes-gateway-v1` socket, a session picker reads stored conversations without attaching: `session.list` takes a `workspace` folder filter and, with `picker: true`, returns each row's `preview`, `last_reply`, `cwd`, `git_branch`, `workspace`, `last_active_at` and `pinned`; `session.transcript({session_id, subagent_id?, cursor?, limit?, order?})` pages a conversation's display rows across its compression lineage from the oldest or the newest, each compaction handoff a `row_kind: "compaction"` row at its position (`{rows, next_cursor, reset}`, opaque cursor, at most 2 MiB a page); an oldest-order cursor also polls for rows written since (`reset: true` when the rows it covered changed shape), and `subagent_id` reads a delegated child of the session. None of them subscribes the caller or starts an agent. Details: [Gateway local sessions](./gateway-local-sessions.md).
+
 Within one authenticated gateway, resuming or activating a live session attaches another event subscriber rather than replacing the previous connection. Streaming and terminal events go to all attached clients; disconnecting one client does not end a session another client is viewing. Existing submit exclusivity and configured busy-input policy remain in force. Attached clients can steer the session's subagents. This does not enable independent gateway processes to write the same session, nor does it imply durable prompt admission across an owner restart.
 
 ### Model overrides on `session.create`
@@ -75268,7 +75325,12 @@ receipt's `outcome` stays `"success"`. The step's own obligation stays armed:
 the host fleet-restart obligation for gateways (the CLI startup warning keeps naming it; an
 owed restart records the pre-update gateways on the obligation, so a gateway that died at boot
 stays owed until it serves the checkout instead of being settled by the gateway-less discharge),
-the unstamped bytecode fingerprint for the sweep. The next launch or `hermes update` —
+the unstamped bytecode fingerprint for the sweep. The sweep also removes each directory left empty by
+files the new commit dropped (diffed against the commit the fingerprint recorded): git keeps a
+dropped package's directory while `__pycache__` is in it, and once that is cleared the empty
+directory imports as an empty namespace package that hides the package's new location. Only empty
+directories go; one that still holds any file is kept. The launch-time sweep does the same after a
+manual pull. The next launch or `hermes update` —
 including the "Already up to date" path, which runs the same completion — retries it. A host
 stamped "restarted" for this commit whose fleet is still off the checkout restarts again
 instead of dead-ending. Exit 2 (refused / concurrent) and exit 1 (nothing committed, or
@@ -75372,7 +75434,11 @@ Intended differences from the pre-transactional updater, for release notes:
   compiled at the target commit before the move, by an interpreter the target's
   `requires-python` admits (`uv python find`, then `python3.N`). With none
   installed the refusal names the Python to install. The preflight is one
-  `git cat-file --batch`.
+  `git cat-file --batch`. The target names its startup files in
+  `pyproject.toml` (`[tool.hermes] update-startup-files`), so a commit that
+  moves one is judged by its new path, and a listed file the target lacks
+  refuses the update. A target without that list is judged by the running
+  updater's `_UPDATE_CRITICAL_FILES`, absent files skipped (older releases).
 - Every move names the resolved commit id, not a ref, and its marker is dropped
   only once HEAD is that commit. A branch that moves during the switch is
   reported as a failed switch. The restart is owed for the HEAD the switch
@@ -88963,6 +89029,21 @@ fills the password through Hermes. The tool result it sees is
 `{filled_fields: 1, origin: "https://github.com"}`; the password is also
 registered with the redactor so a later page read cannot echo it back.
 
+### Desktop preview or managed browser
+
+The Desktop preview and the managed automation browser are separate pages.
+For a login open in the preview, the agent calls `browser_vault` (`fill`,
+`save_login`, `enter_code`) with `target: "preview"`; in a Desktop session
+with the in-app browser available an omitted target means the preview. This
+uses the preview already open beside the chat and does not require a separate
+browser runtime. `target: "browser"` uses the managed browser.
+
+Keep the chat and its preview page selected while filling. Hermes binds each
+operation to that window and page, and refuses if the target changes or navigates.
+Vault requests are live-only and are not replayed after a reconnect. A failed
+preview fill never switches to a different browser. Filling does not submit
+the login form.
+
 ## Two-factor codes
 
 Sites that ask for a code after the password are handled the same way:
@@ -89096,7 +89177,9 @@ refused unless the page origin exactly matches the saved origin, checked again
 inside the page immediately before the write. With the Camofox browser plugin,
 which has no CDP endpoint, the same checks run and the fill goes to the Camofox
 tab through its REST evaluate endpoint, only when `CAMOFOX_URL` is loopback or
-HTTPS.
+HTTPS. In the Hermes Desktop in-app Browser the fill goes to that exact tab
+through the Desktop's authenticated preview request channel, with the same
+origin checks; saved authenticator codes are bound to the login's origins too.
 
 **Does not:** protect against the page itself. Once a password is typed into a
 site, that site (and any script it runs) has it, exactly as when you type it
@@ -94249,8 +94332,8 @@ onboards Telegram/Discord/etc. users to a paired gateway. Full parity with
 Connect Hermes to any messaging platform from the browser — full parity with
 `hermes setup gateway`. The page lists every supported channel (Telegram,
 Discord, Slack, Matrix, Mattermost, WhatsApp, Signal, BlueBubbles/iMessage,
-Email, SMS/Twilio, DingTalk, Feishu/Lark, WeCom, WeChat, QQ Bot, Yuanbao, plus
-the API server and webhook endpoints) with its live connection status.
+Email, SMS/Twilio, DingTalk, Feishu/Lark, WeCom, WeChat, QQ Bot, plus
+the API server and webhook endpoints) with its live connection status; platforms from installed plugins (Yuanbao, Home Assistant, ...) appear too.
 
 - **Configure** — open a per-platform form with exactly the fields that channel needs (bot token, app token, server URL, allowlist, etc.). Secrets render as password inputs and are stored redacted; leaving a field blank keeps the existing value. Required fields are marked and validated. A "Setup guide" link points to the platform's credential docs.
 - **Enable / disable** — toggle a channel on or off. The credential stays on disk; only the active state changes.
@@ -101774,339 +101857,25 @@ Most users running Hermes for personal projects prefer Baileys. Most users runni
 
 # Yuanbao
 
-Connect Hermes to [Yuanbao](https://yuanbao.tencent.com/), Tencent's enterprise messaging platform. The adapter uses a WebSocket gateway for real-time message delivery and supports both direct (C2C) and group conversations.
-
-:::info
-Yuanbao is an enterprise messaging platform primarily used within Tencent and enterprise environments. It uses WebSocket for real-time communication, HMAC-based authentication, and supports rich media including images, files, and voice messages.
+:::warning Hermes Labs plugin
+Yuanbao is now a Hermes Labs plugin: built by Nous Research, not supported, and likely not maintained going forward. Fixes from the community are welcome.
 :::
 
-## Prerequisites
+The [Yuanbao](https://yuanbao.tencent.com/) gateway platform and its `yb_*` tools (`yb_query_group_info`, `yb_query_group_members`, `yb_send_dm`, `yb_search_sticker`, `yb_send_sticker`) are no longer part of Hermes core. They ship as the `yuanbao` plugin in [NousResearch/hermes-labs-plugins](https://github.com/NousResearch/hermes-labs-plugins/tree/main/yuanbao), which carries the full setup guide.
 
-- A Yuanbao account with bot creation permissions
-- Yuanbao APP_ID and APP_SECRET (from platform admin)
-- Python packages: `websockets` and `httpx`, both core Hermes dependencies
-
-If these core dependencies are damaged, repair the selected environment:
+## Install
 
 ```bash
-hermes pm repair
+hermes plugins install yuanbao
 ```
 
-## Setup
+Plugins are installed per profile; use `hermes -p <profile> plugins install yuanbao` for another profile. Restart the gateway afterwards so it serves the platform.
 
-### 1. Create a Bot in Yuanbao
+Every name stays the same: the `YUANBAO_*` environment variables (`YUANBAO_APP_ID` or the legacy `YUANBAO_APP_KEY`, `YUANBAO_APP_SECRET`, `YUANBAO_HOME_CHANNEL`, ...), the `platforms.yuanbao` block (and the legacy `gateway.yuanbao` block) in `config.yaml`, the `yuanbao` toolset and the tool names.
 
-1. Download the Yuanbao app from [https://yuanbao.tencent.com/](https://yuanbao.tencent.com/)
-2. In the app, go to **PAI → My Bot** and create a new bot
-3. After the bot is created, copy the **APP_ID** and **APP_SECRET**
-
-### 2. Run the Setup Wizard
-
-The easiest way to configure Yuanbao is through the interactive setup:
-
-```bash
-hermes gateway setup
-```
-
-Select **Yuanbao** when prompted. The wizard will:
-
-1. Ask for your APP_ID
-2. Ask for your APP_SECRET
-3. Save the configuration automatically
-
-:::tip
-The WebSocket URL and API Domain have sensible defaults built in. You only need to provide APP_ID and APP_SECRET to get started.
+:::info Upgrading from a release that bundled Yuanbao
+Nothing to do. Every profile that was already using Yuanbao (`YUANBAO_APP_ID` or `YUANBAO_APP_KEY` plus `YUANBAO_APP_SECRET` in its `.env`, `platforms.yuanbao` enabled in `config.yaml`, or the `yuanbao` / `hermes-yuanbao` toolset listed for another platform) gets the plugin installed automatically from the catalog by `hermes update`, or the first time the profile starts (agent or gateway start; this honours `security.allow_lazy_installs`). A failed attempt is retried with a backoff; `hermes update` always retries. This happens once per profile: if you later remove the plugin (`hermes plugins remove yuanbao`), it stays removed.
 :::
-
-### 3. Configure Environment Variables
-
-After initial setup, verify these variables in `~/.hermes/.env`:
-
-```bash
-# Required
-YUANBAO_APP_ID=your-app-id
-YUANBAO_APP_SECRET=your-app-secret
-YUANBAO_WS_URL=wss://api.yuanbao.example.com/ws
-YUANBAO_API_DOMAIN=https://api.yuanbao.example.com
-
-# Optional: bot account ID (normally obtained automatically from sign-token)
-# YUANBAO_BOT_ID=your-bot-id
-
-# Optional: internal routing environment (e.g. test/staging/production)
-# YUANBAO_ROUTE_ENV=production
-
-# Optional: home channel for cron/notifications (format: direct:<account> or group:<group_code>)
-YUANBAO_HOME_CHANNEL=direct:bot_account_id
-YUANBAO_HOME_CHANNEL_NAME="Bot Notifications"
-
-# Optional: restrict access (legacy, see Access Control below for fine-grained policies)
-YUANBAO_ALLOWED_USERS=user_account_1,user_account_2
-```
-
-### 4. Start the Gateway
-
-```bash
-hermes gateway
-```
-
-The adapter will connect to the Yuanbao WebSocket gateway, authenticate using HMAC signatures, and begin processing messages.
-
-## Features
-
-- **WebSocket gateway** — real-time bidirectional communication
-- **HMAC authentication** — secure request signing with APP_ID/APP_SECRET
-- **C2C messaging** — direct user-to-bot conversations
-- **Group messaging** — conversations in group chats
-- **Media support** — images, files, and voice messages via COS (Cloud Object Storage)
-- **Markdown formatting** — messages are automatically chunked for Yuanbao's size limits
-- **Message deduplication** — prevents duplicate processing of the same message
-- **Heartbeat/keep-alive** — maintains WebSocket connection stability
-- **Typing indicators** — shows "typing…" status while the agent processes
-- **Automatic reconnection** — handles WebSocket disconnections with exponential backoff
-- **Group information queries** — retrieve group details and member lists
-- **Sticker/Emoji support** — send TIMFaceElem stickers and emoji in conversations
-- **WeChat forwarded chat-history support** — when a user forwards a WeChat chat-history bundle into Yuanbao, the adapter decodes the forwarded records (sender nicknames, text, and multimedia entries, including nested forwards) and injects them into the conversation so the agent can read the full forwarded thread
-- **Auto-sethome** — first user to message the bot is automatically set as the home channel owner
-- **Slow-response notification** — sends a waiting message when the agent takes longer than expected
-
-## Configuration Options
-
-### Chat ID Formats
-
-Yuanbao uses prefixed identifiers depending on conversation type:
-
-| Chat Type | Format | Example |
-|-----------|--------|---------|
-| Direct message (C2C) | `direct:<account>` | `direct:user123` |
-| Group message | `group:<group_code>` | `group:grp456` |
-
-### Media Uploads
-
-The Yuanbao adapter automatically handles media uploads via COS (Tencent Cloud Object Storage):
-
-- **Images**: Supports JPEG, PNG, GIF, WebP
-- **Files**: Supports all common document types
-- **Voice**: Supports WAV, MP3, OGG
-
-Media URLs are automatically validated and downloaded before upload to prevent SSRF attacks.
-
-## Home Channel
-
-Use the `/sethome` command in any Yuanbao chat (DM or group) to designate it as the **home channel**. Scheduled tasks (cron jobs) deliver their results to this channel.
-
-:::tip Auto-sethome
-If no home channel is configured, the first user to message the bot will be automatically set as the home channel owner. If the current home channel is a group chat, the first DM will upgrade it to a direct channel.
-:::
-
-You can also set it manually in `~/.hermes/.env`:
-
-```bash
-YUANBAO_HOME_CHANNEL=direct:user_account_id
-# or for a group:
-# YUANBAO_HOME_CHANNEL=group:group_code
-YUANBAO_HOME_CHANNEL_NAME="My Bot Updates"
-```
-
-### Example: Set Home Channel
-
-1. Start a conversation with the bot in Yuanbao
-2. Send the command: `/sethome`
-3. The bot responds: "Home channel set to [chat_name] with ID [chat_id]. Cron jobs will deliver to this location."
-4. Future cron jobs and notifications will be sent to this channel
-
-### Example: Cron Job Delivery
-
-Create a cron job:
-
-```bash
-/cron "0 9 * * *" Check server status
-```
-
-The scheduled output will be delivered to your Yuanbao home channel every day at 9 AM.
-
-## Usage Tips
-
-### Starting a Conversation
-
-Send any message to the bot in Yuanbao:
-
-```
-hello
-```
-
-The bot responds in the same conversation thread.
-
-### Available Commands
-
-All standard Hermes commands work on Yuanbao:
-
-| Command | Description |
-|---------|-------------|
-| `/new` | Start a fresh conversation |
-| `/model [provider:model]` | Show or change the model |
-| `/sethome` | Set this chat as the home channel |
-| `/status` | Show session info |
-| `/help` | Show available commands |
-
-### Sending Files
-
-To send a file to the bot, simply attach it directly in the Yuanbao chat. The bot will automatically download and process the file attachment.
-
-You can also include a message with the attachment:
-
-```
-Please analyze this document
-```
-
-### Receiving Files
-
-When you ask the bot to create or export a file, it sends the file directly to your Yuanbao chat.
-
-## Troubleshooting
-
-### Bot is online but not responding to messages
-
-**Cause**: Authentication failed during WebSocket handshake.
-
-**Fix**:
-1. Verify APP_ID and APP_SECRET are correct
-2. Check that the WebSocket URL is accessible
-3. Ensure the bot account has proper permissions
-4. Review gateway logs: `tail -f ~/.hermes/logs/gateway.log`
-
-### "Connection refused" error
-
-**Cause**: WebSocket URL is unreachable or incorrect.
-
-**Fix**:
-1. Verify the WebSocket URL format (should start with `wss://`)
-2. Check network connectivity to the Yuanbao API domain
-3. Confirm firewall allows WebSocket connections
-4. Test URL with: `curl -I https://[YUANBAO_API_DOMAIN]`
-
-### Media uploads fail
-
-**Cause**: COS credentials are invalid or media server is unreachable.
-
-**Fix**:
-1. Verify API_DOMAIN is correct
-2. Check that media upload permissions are enabled for your bot
-3. Ensure the media file is accessible and not corrupted
-4. Check COS bucket configuration with platform admin
-
-### Messages not delivered to home channel
-
-**Cause**: Home channel ID format is incorrect or cron job hasn't triggered.
-
-**Fix**:
-1. Verify YUANBAO_HOME_CHANNEL is in correct format
-2. Test with `/sethome` command to auto-detect correct format
-3. Check cron job schedule with `/status`
-4. Verify bot has send permissions in the target chat
-
-### Frequent disconnections
-
-**Cause**: WebSocket connection is unstable or network is unreliable.
-
-**Fix**:
-1. Check gateway logs for error patterns
-2. Increase heartbeat timeout in connection settings
-3. Ensure stable network connection to Yuanbao API
-4. Consider enabling verbose logging: `hermes gateway run -vv`
-
-## Access Control
-
-Yuanbao supports fine-grained access control for both DM and group conversations:
-
-```bash
-# DM policy: open (default) | allowlist | disabled
-YUANBAO_DM_POLICY=open
-# Comma-separated user IDs allowed to DM the bot (only used when DM_POLICY=allowlist)
-YUANBAO_DM_ALLOW_FROM=user_id_1,user_id_2
-
-# Group policy: open (default) | allowlist | disabled
-YUANBAO_GROUP_POLICY=open
-# Comma-separated group codes allowed (only used when GROUP_POLICY=allowlist)
-YUANBAO_GROUP_ALLOW_FROM=group_code_1,group_code_2
-```
-
-These can also be set in `config.yaml`:
-
-```yaml
-platforms:
-  yuanbao:
-    extra:
-      dm_policy: allowlist
-      dm_allow_from: "user1,user2"
-      group_policy: open
-      group_allow_from: ""
-```
-
-## Advanced Configuration
-
-### Message Chunking
-
-Yuanbao has a maximum message size. Hermes automatically chunks large responses with Markdown-aware splitting (respects code fences, tables, and paragraph boundaries).
-
-### Connection Parameters
-
-The following connection parameters are built into the adapter with sensible defaults:
-
-| Parameter | Default Value | Description |
-|-----------|---------------|-------------|
-| WebSocket connect timeout | 15 seconds | Time to wait for WS handshake |
-| Heartbeat interval | 30 seconds | Ping frequency to keep connection alive |
-| Max reconnect attempts | 100 | Maximum number of reconnection tries |
-| Reconnect backoff | 1s → 60s (exponential) | Wait time between reconnect attempts |
-| Reply heartbeat interval | 2 seconds | RUNNING status send frequency |
-| Send timeout | 30 seconds | Timeout for outbound WS messages |
-
-:::note
-These values are currently not configurable via environment variables. They are optimized for typical Yuanbao deployments.
-:::
-
-### Verbose Logging
-
-Enable debug logging to troubleshoot connection issues:
-
-```bash
-hermes gateway run -vv
-```
-
-## Integration with Other Features
-
-### Cron Jobs
-
-Schedule tasks that run on Yuanbao:
-
-```
-/cron "0 */4 * * *" Report system health
-```
-
-Results are delivered to your home channel.
-
-### Background Tasks
-
-Run long operations without blocking the conversation:
-
-```
-/bg Analyze all files in the archive
-```
-
-### Cross-Platform Messages
-
-Send a message from CLI to Yuanbao:
-
-```bash
-hermes chat -q "Send 'Hello from CLI' to yuanbao:group:group_code"
-```
-
-## Related Documentation
-
-- [Messaging Gateway Overview](./index.md)
-- [Slash Commands Reference](../../reference/slash-commands.md)
-- [Cron Jobs](../features/cron.md)
-- [Background Sessions](../cli.md#background-sessions)
 
 ---
 
@@ -103113,8 +102882,8 @@ per-bot behaviour written in a profile's `config.yaml` (`require_mention`,
 `ignored_channels`, Matrix `session_scope`, …): a secondary profile's YAML never
 lands in the shared process environment, so it cannot become the default
 profile's policy, and the default profile's YAML never governs a secondary
-bot. The `terminal.env_passthrough` allowlist, the Yuanbao auto-designated
-home channel, and the write guards protecting each profile's own `config.yaml`
+bot. The `terminal.env_passthrough` allowlist, auto-designated
+home channels, and the write guards protecting each profile's own `config.yaml`
 are resolved per profile as well. Kanban, profile-scoped skills/memory/SOUL, and
 model routing all behave per-profile exactly as they do with separate gateways.
 

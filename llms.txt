@@ -146,7 +146,7 @@ Repo: https://github.com/NousResearch/hermes-agent
 - [WeCom Callback (Self-Built App)](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/wecom-callback)
 - [Weixin (WeChat)](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/weixin): Connect Hermes Agent to personal WeChat accounts via the iLink Bot API
 - [WhatsApp Business (Cloud API)](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/whatsapp-cloud): Set up Hermes Agent as a WhatsApp bot via Meta's official Business Cloud API
-- [Yuanbao](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/yuanbao): Connect Hermes Agent to the Yuanbao enterprise messaging platform via WebSocket gateway
+- [Yuanbao](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/yuanbao): Yuanbao moved out of Hermes core into the yuanbao Hermes Labs plugin
 
 ## Integrations
 
