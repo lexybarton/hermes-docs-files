@@ -7043,14 +7043,14 @@ The delegation provider uses the same credential resolution as CLI/gateway start
 
 ## Clarify
 
-Configure how long Hermes waits for a response to a clarifying question. One value covers every surface — the classic CLI modal, the TUI/Desktop card, and the messaging gateway. The canonical key is `agent.clarify_timeout` (default `3600` seconds; `0` or less = unlimited); a legacy top-level `clarify.timeout` is still honored if explicitly set:
+Configure how long Hermes waits for a response to a clarifying question. One value covers every surface — the classic CLI modal, the TUI/Desktop card, and the messaging gateway. The canonical key is `agent.clarify_timeout` (default `90` seconds; `0` or less = unlimited); a legacy top-level `clarify.timeout` is still honored if explicitly set:
 
 ```yaml
 agent:
-  clarify_timeout: 3600        # Seconds to wait for user clarification response (0 or less = unlimited)
+  clarify_timeout: 90          # Seconds to wait for user clarification response (0 or less = unlimited)
 ```
 
-When the timeout expires, the agent unblocks with `"outcome": "timed_out"` (answers the user already locked are kept) and continues on its own. A clarify prompt is never cut by the generic per-tool deadline (`timeouts.tools.sequential_call`); only `agent.clarify_timeout` bounds the wait.
+When the timeout expires, the agent unblocks with `"outcome": "timed_out"` (answers the user already locked are kept) and continues on its own. On a messaging platform, sending any other message instead of an answer cancels the question at once, and the agent carries on with that message. A clarify prompt is never cut by the generic per-tool deadline (`timeouts.tools.sequential_call`); only `agent.clarify_timeout` bounds the wait.
 
 ## Context Files (SOUL.md, AGENTS.md)
 
@@ -30144,7 +30144,7 @@ When the agent calls the `clarify` tool — to ask which approach you prefer, ge
 
 Tap a button to answer, or tap **Other** to type a free-form response (the next message you send becomes the answer). Open-ended `clarify` calls (no preset choices) skip the buttons and just capture your next message.
 
-Configure the response timeout via `agent.clarify_timeout` in `~/.hermes/config.yaml` (default `3600` seconds). If you don't respond within the timeout, the agent unblocks with `"outcome": "timed_out"` and adapts rather than hanging. Reply `skip` to skip a question.
+Configure the response timeout via `agent.clarify_timeout` in `~/.hermes/config.yaml` (default `90` seconds). If you don't respond within the timeout, the agent unblocks with `"outcome": "timed_out"` and adapts rather than hanging. Reply `skip` to skip a question.
 
 If Telegram cannot render the button card (the Bot API rejects it, or the send fails after its 15-second acknowledgement window), Hermes re-asks the same question as a plain numbered-list message and your typed reply (a number or the option text) is taken as the answer. When even that cannot be delivered, the agent is released at once with `[clarify prompt could not be delivered]` instead of waiting out the timeout and mistaking the silence for you not answering.
 
@@ -30971,7 +30971,7 @@ When the agent calls the `clarify` tool — to ask which approach you prefer, ge
 
 Click a numbered button to answer, or click **Other** to type a free-form response (the next message you send in that channel becomes the answer). Open-ended `clarify` calls (no preset choices) skip the buttons and just capture your next message.
 
-The buttons disable themselves once a choice is made so duplicate clicks don't double-resolve the prompt. Configure the response timeout via `agent.clarify_timeout` in `~/.hermes/config.yaml` (default `3600` seconds; `0` or less = unlimited). If you don't respond within the timeout, the agent unblocks with `"outcome": "timed_out"` and adapts rather than hanging. Reply `skip` to skip a question.
+The buttons disable themselves once a choice is made so duplicate clicks don't double-resolve the prompt. Configure the response timeout via `agent.clarify_timeout` in `~/.hermes/config.yaml` (default `90` seconds; `0` or less = unlimited). If you don't respond within the timeout, the agent unblocks with `"outcome": "timed_out"` and adapts rather than hanging. Reply `skip` to skip a question.
 
 ### Prompt layout
 
@@ -45548,6 +45548,21 @@ pinned pnpm under `--frozen-lockfile`. The website is a separate npm project:
 npm ci --prefix website
 npm run build:fast --prefix website
 ```
+
+In the repository root and the JS workspace folders, npm refuses every command that
+installs or resolves dependencies (`npm install` with or without `--ignore-scripts`,
+`--package-lock-only` or `--force`, `npm ci`, `update`, `dedupe`, `uninstall`,
+`link`): each of these folders has an `.npmrc` with `engine-strict=true`, and its
+`package.json` declares an `engines.npm` that no npm satisfies. `npm rebuild` and
+`npm pkg set` are not refused. An explicit `--engine-strict=false` overrides the
+refusal.
+
+`npx`, `npm exec` and `npm run` keep working, so MCP servers and tools still start.
+But `engine-strict` applies anywhere in the checkout: in these folders, and through
+the root `.npmrc` in every folder without a `package.json` of its own (`agent/`,
+`tools/`, the Docker image's `/opt/hermes`). There `npx` refuses to install a package
+when it or any non-optional dependency it pulls in declares `engines` the current Node
+or npm does not satisfy, where it would only warn outside the checkout.
 
 Use a Node version accepted by the corresponding `package.json` engines.
 Native desktop dependencies can also require the platform build toolchain.
@@ -77963,6 +77978,7 @@ The steps below use `stable`. To follow prereleases, replace `stable` with
 channels are signed with the same key.
 
 The package includes Python, Node.js, npm, uv, ripgrep, ffmpeg, and their runtime libraries.
+The first `hermes dashboard` downloads pnpm and installs the web UI's JavaScript dependencies.
 CI builds the native Python wheels and the TUI before it creates the package.
 The device does not compile core dependencies or assemble its base Python
 environment during installation. The package uses Python 3.14 with the bionic
@@ -84699,6 +84715,21 @@ which install it with the pinned pnpm under `--frozen-lockfile` (with
 the manifests and the release-age policy, not which pnpm wrote it. A user agent
 overridden through `pnpm_config_user_agent` is refused as well.
 
+In the repository root and the JS workspace folders, npm refuses every command that
+installs or resolves dependencies (`npm install` with or without `--ignore-scripts`,
+`--package-lock-only` or `--force`, `npm ci`, `update`, `dedupe`, `uninstall`,
+`link`): each of these folders has an `.npmrc` with `engine-strict=true`, and its
+`package.json` declares an `engines.npm` that no npm satisfies. `npm rebuild` and
+`npm pkg set` are not refused. An explicit `--engine-strict=false` overrides the
+refusal.
+
+`npx`, `npm exec` and `npm run` keep working, so MCP servers and tools still start.
+But `engine-strict` applies anywhere in the checkout: in these folders, and through
+the root `.npmrc` in every folder without a `package.json` of its own (`agent/`,
+`tools/`, the Docker image's `/opt/hermes`). There `npx` refuses to install a package
+when it or any non-optional dependency it pulls in declares `engines` the current Node
+or npm does not satisfy, where it would only warn outside the checkout.
+
 The website is a separate npm project: `npm ci --prefix website`, then
 `npm run build:fast --prefix website`. PM activation supplies tools, not these
 `node_modules` directories or built assets. Native desktop builds have additional
@@ -85711,6 +85742,14 @@ Detached shells are kept for **15 minutes** while the gateway runs, up to **16 h
 including detached ones. A gateway restart or update ends them. Reconnecting replays up to **1 MiB** of
 recent output; full-screen programs may need their own redraw command.
 
+A terminal opened on a saved SSH gateway runs a login shell over that connection's SSH
+transport, like the native app. The serving Webapp retains the SSH terminal across browser
+disconnects; its selected gateway and profile remain the attachment scope. The shell uses the
+remote SSH login environment, not a same-named profile on the Webapp host. Removing or
+re-pointing the saved connection ends its terminals. The remote `serve --isolated` does not
+need Webapp enabled. For an HTTP gateway connection, the remote must itself provide the
+Webapp host-terminal service; a plain `serve` or gateway listener does not expose host shells.
+
 The bundle's npm dependencies install into `.build/webapp-workspace` in the checkout, separately from
 the native Desktop, and reinstall only when the lockfile changes. With lazy installs disabled, a plain
 `hermes webapp` does not install them; `--build-only` or `--force-build` does.
@@ -86158,9 +86197,9 @@ Further down the same **Settings → Gateways** page, **Registered gateways** ma
 - **Choose what opens after a restart.** **Open on launch** keeps the backward-compatible **Primary gateway** default, or can resume the **Last used** gateway after it connects successfully. This preference is stored outside the application bundle and survives Desktop updates.
 - **Add / edit / remove / test** connections from the panel. The **Add** flow offers all four kinds — **Local**, **Hermes Cloud**, **Remote gateway**, and **SSH** (the Local button is disabled while the app-managed local entry exists, and a hint points cloud adds at the sign-in/discovery flow above). The local entry is managed by the app and cannot be removed. **Test** probes the connection's own HTTP and WebSocket legs directly.
 - **Duplicates are rejected at save time**: only one **local** entry ever; remote and cloud entries are deduplicated on the normalized URL (trimmed, trailing slashes stripped, lowercased — across both kinds); SSH entries on the normalized `user@host:port` plus remote profile.
-- Existing settings are **imported automatically** the first time you run a build with the registry: your current global connection and any legacy per-profile overrides become named entries. The legacy settings file is left untouched, so older builds keep working.
+- Existing settings are **imported automatically, once**, the first time you run a build with the shared list: your current global connection, any legacy per-profile overrides and your saved connections become named entries. The old files in the app's user-data directory are left untouched, so older builds keep working, and they are never read again after that import: a connection you remove stays removed after a restart, in the native app and in the Webapp.
 - Cloud entries come from the Hermes Cloud sign-in/discovery flow above, not from a hand-typed URL.
-- Tokens are stored encrypted with the OS keyring (with an explicit plain-text opt-in on keyring-less Linux).
+- The list and its credentials live in your Hermes home, shared by the native app and the [Webapp](#reach-your-other-gateways-from-one-webapp): `gateway-connections.json` (connections, including session tokens and extra headers) and `gateway-connection-tokens.json` (sign-in credentials). Both are owner-only (0600) files holding the secrets as plain text, so the Webapp's server can read them; the OS keychain option does not apply to them. See [Security notes](./multi-connection-desktop.md#security-notes).
 
 Side-by-side routing is live: each registered gateway dials its own backends and sockets on demand (keyed per connection + profile), the plugin SDK exposes the union agent roster (`host.agents()` / `host.ensureAgent()`), and **Update all instances** on the Gateways page dispatches `hermes update` to every eligible gateway at once — Hermes Cloud entries are skipped (the platform updates them), and each instance reports its own result.
 
@@ -102023,7 +102062,12 @@ Rules worth knowing:
   removed or unavailable saved gateway falls back to Primary.
 - **Test** probes the connection's own HTTP *and* WebSocket legs, so a pass
   (the *"Reachable"* toast) means chat will actually work — not just that the
-  host pinged.
+  host pinged. In the Webapp, **Test** on an SSH row opens the same managed
+  tunnel the gateway uses to reach that host, which starts (or reuses)
+  `hermes serve` on the remote machine without cleaning it up afterwards. It
+  stops when you remove the connection or stop the gateway, or on its own after
+  the remote idle timeout (`dashboard.ssh_isolated_idle_grace_s`, 15 minutes by
+  default) while no client is connected and no work is running.
 - **Duplicates are rejected when you save**: there is only ever one **local**
   entry; **remote** and **cloud** entries are deduplicated on the normalized
   URL (trimmed, trailing slashes stripped, lowercased — and across both
@@ -102286,21 +102330,25 @@ the desktop app itself last. See
 
 ## Security notes
 
-- **Where tokens live.** Remote-gateway session tokens (and native sign-in
-  OAuth tokens, keyed by gateway base URL) are stored in the app's user-data
-  directory as owner-only (0600) files, in the Electron main process; the
-  renderer and plugins never see token bytes.
-- **Optional keychain encryption.** By default the tokens are **not** run
-  through the OS keychain — on macOS in particular, Electron's `safeStorage`
-  parks a per-app key in the login keychain, and a locked or broken keychain
-  turns that into a password prompt on every launch. If you want at-rest
-  encryption on top of the file permissions, turn on **Settings → Gateway →
-  "Encrypt saved secrets with the OS keychain"**; existing stored secrets are
-  re-encrypted in place (Keychain on macOS, DPAPI on Windows, the session
-  keyring backend on Linux). Turning it back off decrypts them again.
-- **The registry file** (`connections.json` under the app's user-data
-  directory) holds labels, URLs, and hosts — secrets only ever appear inside
-  encrypted envelopes.
+- **Where connections and tokens live.** The saved list is
+  `gateway-connections.json` in your Hermes home (beside `ui-preferences.json`):
+  labels, URLs, SSH hosts, and each connection's session token and extra
+  headers. Sign-in (OAuth) credentials, keyed by connection, are in
+  `gateway-connection-tokens.json` next to it. Both are owner-only (0600)
+  files, written by the Electron main process and by the Webapp's server,
+  which share them; the renderer and plugins never see token bytes.
+- **Secrets are plain text inside those files.** File permissions are the
+  protection: the Webapp's server has to read the credentials, so they are not
+  run through the OS keychain. A secret an older build encrypted with the
+  keychain is decrypted once when it is copied in; one that will not decrypt
+  is kept as it was and listed in the file's `importNotices`, never dropped.
+- **One-time import from the old files.** The first launch of a build with
+  the shared list copies `connections.json`, `connection.json` and
+  `native-oauth-tokens.json` from the app's user-data directory into the
+  shared files. The old files are left untouched (older builds keep working)
+  and are not read again, so removing a connection here or in the Webapp
+  sticks across restarts. Removing a connection also clears its sign-in
+  credentials and its cookie session.
 - The plugin SDK's `host.connections()` deliberately returns labels, kinds,
   and the primary id — never token material.
 
