@@ -1610,7 +1610,7 @@ The `default` package adds ~700 MB to the closure. If you only need messaging pl
 git clone https://github.com/NousResearch/hermes-agent.git
 cd hermes-agent
 nix develop
-hermes setup
+hermes-checkout setup
 ```
 
 </details>
@@ -2456,12 +2456,17 @@ and it needs no `PYTHONPATH`. It does not install
 Python dependencies into a repository-local `.venv`. The shell also provides
 Node.js and runtime tools. Its pnpm hook refreshes JS workspaces when their inputs change.
 
+The shell does not change which `hermes` runs. `hermes` stays your installed Hermes, so you
+can keep using it while you work on the checkout. `hermes-checkout` runs this checkout's code
+and takes the same arguments. Give it a separate `HERMES_HOME` when a change touches stored
+state, because both commands read the same one by default.
+
 ```bash
 cd hermes-agent
 nix develop
 "$HERMES_PYTHON" -c "import sys; print(sys.executable); print(sys.version)"
-hermes setup
-hermes chat
+hermes-checkout --version
+HERMES_HOME="$PWD/.scratch/home" hermes-checkout chat
 ```
 
 ### direnv (Recommended)
@@ -9115,7 +9120,7 @@ never start adapters on a half-copied tree. A symlinked source `.env`/`config.ya
 materialized as a private copy first — the clone never writes through to the source.
 
 :::tip Honcho memory + profiles
-When Honcho is enabled, clone operations automatically create a dedicated AI peer for the new profile while sharing the same user workspace. Each profile builds its own observations and identity. See [Honcho -- Multi-agent / Profiles](./features/memory-providers.md#honcho) for details.
+Memory providers get a hook when a profile that selects them is created or renamed. Honcho (1.2.0 and later) uses it to give a cloned profile its own AI peer in the same user workspace, and keeps that peer on rename; for an imported profile, run `hermes honcho sync`. Each profile builds its own observations and identity. See [Honcho -- Multi-agent / Profiles](./features/memory-providers.md#honcho) for details.
 :::
 
 ## Using profiles
@@ -14818,7 +14823,7 @@ The mapping:
 hermes profile create coder --clone
 ```
 
-`--clone` creates a `hermes.coder` host block in `honcho.json` with `aiPeer: "coder"`, shared `workspace`, inherited `peerName`, `recallMode`, `writeFrequency`, `observation`, etc. The AI peer is eagerly created in Honcho so it exists before the first message.
+`--clone` (which carries `memory.provider: honcho`) lets the Honcho plugin create a `hermes_coder` host block in `honcho.json` with `aiPeer: "coder"`, shared `workspace`, inherited `peerName`, `recallMode`, `writeFrequency`, `observation`, etc. The AI peer is eagerly created in Honcho so it exists before the first message. `hermes profile rename` lets the plugin re-key that host block, keeping its peers. Both need a Honcho plugin version with the profile hooks.
 
 ### Existing profiles, backfill Honcho peers
 
@@ -14826,7 +14831,7 @@ hermes profile create coder --clone
 hermes honcho sync
 ```
 
-Scans every Hermes profile, creates host blocks for any profile without one, inherits settings from the default `hermes` block, and creates the new AI peers eagerly. Idempotent — skips profiles that already have a host block.
+Scans every Hermes profile, creates host blocks for any profile without one, inherits settings from the default `hermes` block, and creates the new AI peers eagerly. Idempotent — skips profiles that already have a host block. `hermes update` no longer does this for you: run it once for profiles created before Honcho was set up.
 
 ### Per-profile observation
 
@@ -27946,6 +27951,12 @@ only while its event loop is making timely progress; systemd restarts the
 process when they stop. The default `0` keeps the existing `Type=simple`
 behavior. This setting is Linux/systemd-only and does not treat an ordinary
 platform network disconnect as an event-loop failure.
+
+Under `Type=notify` the gateway reports ready only after every served profile's
+adapters connect, one profile at a time. Before each secondary profile's
+connect it sends systemd `EXTEND_TIMEOUT_USEC` for that connect's budget plus
+a margin. A large multi-profile boot can therefore run past systemd's default
+90 s start timeout, while a boot that stops making progress is still killed.
 
 ## Chat Commands (Inside Messaging)
 
@@ -45628,6 +45639,29 @@ worktree, so it hides a global `hermes` alias and refuses outside the worktree.
 PM activation syncs tools and Python dependencies before adding them to the shell. It does
 not install JS workspaces or rewrite launchers and shell configuration. `deactivate` restores the prior shell environment and removes the function.
 
+### Developer commands (`just`) {#developer-commands}
+
+`just` with no arguments lists every developer command. Each recipe calls one
+script or tool in this repository, so the commands below also work without
+`just`. The lefthook pre-commit hook calls the same recipes.
+
+| Recipe | Runs |
+|---|---|
+| `just setup` | `setup-hermes.sh --runtime-only --test-environment` (PowerShell: `setup-hermes.ps1 -RuntimeOnly`) |
+| `just check` | `scripts/check`, every blocking lint check; `just check --only health` selects checks |
+| `just fix` | the pinned ruff with `--fix`, then `pnpm -r fix` |
+| `just test <paths>` | `scripts/run_tests.sh <paths>`; refuses to start without a path, even with flags |
+| `just test-all` | the full Python suite |
+| `just js-install`, `just check-js`, `just test-js` | `pnpm install --frozen-lockfile`, `pnpm -r check`, `pnpm -r test` (after building `@hermes/ink`) |
+| `just desktop`, `just tui` | the desktop and TUI dev servers |
+| `just docs-install`, `just docs-build` | the website's `npm ci` and `build:fast` |
+| `just docs-generate`, `just docs-check` | regenerate the skill docs pages; then every docs check CI runs (committed pages match, links, diagrams) |
+| `just lock` | `scripts/relock.sh`: refreshes `uv.lock` after a `pyproject.toml` change, then re-syncs |
+
+Recipes that run Python go through `scripts/run-in-hermes-env`, so they work in
+a shell that was never activated. A new developer command is a script under
+`scripts/` plus a recipe that calls it; the recipe holds no logic.
+
 ### Manual development and test environment {#manual-development-and-test-environment}
 
 Use the [PM developer workflow](../reference/package-management.md#developer-workflow) to prepare Python 3.14 first.
@@ -45669,7 +45703,7 @@ than copying production credentials into the checkout.
 
 ### JavaScript workspaces and website
 
-From the repository root, run `pnpm install --frozen-lockfile` for the desktop,
+From the repository root, run `pnpm install --frozen-lockfile` (`just js-install`) for the desktop,
 TUI, dashboard, and shared JS workspaces. `pm/lock.json` pins pnpm
 (`source ./activate`, or `. .\activate.ps1` in PowerShell, provides that exact
 version). An install that runs lifecycle scripts refuses any other pnpm, a direct or
@@ -45678,7 +45712,8 @@ filtered `pnpm install` included: the root `preinstall` script requires the
 root `engines.pnpm` range. pnpm 12 skips the root `preinstall` under
 `--ignore-scripts`, `--lockfile-only` (which writes `pnpm-lock.yaml`) and `pnpm fetch`,
 so another pnpm 12 is not refused there; CI installs every changed lockfile with the
-pinned pnpm under `--frozen-lockfile`. The website is a separate npm project:
+pinned pnpm under `--frozen-lockfile`. The website is a separate npm project
+(`just docs-install`, `just docs-build`):
 
 ```bash
 npm ci --prefix website
@@ -45704,7 +45739,7 @@ Use a Node version accepted by the corresponding `package.json` engines.
 Native desktop dependencies can also require the platform build toolchain.
 
 Logos and icons are generated from `assets/nous-girl-*.svg` and
-`assets/backgrounds/`. `node scripts/generate-icons.mjs` renders them with the
+`assets/backgrounds/`. `node scripts/generate-icons.mjs` (`just icons`) renders them with the
 Hermes runtime Python (`HERMES_PYTHON`, else `python` on PATH): Pillow and
 resvg-py are core dependencies. Do not commit generated PNG/ICO/ICNS outputs.
 
@@ -45716,6 +45751,9 @@ Use the canonical runner on every host:
 scripts/run_tests.sh
 scripts/run_tests.sh tests/agent/ -v
 ```
+
+`just test tests/agent/ -v` is the same run; `just test` refuses to start
+without a path, and `just test-all` runs the full suite.
 
 On Windows, run the script through Bash. When no local `.venv` or `venv`
 contains pytest, the runner accepts the explicit `HERMES_PYTHON` above. It
@@ -84848,6 +84886,10 @@ pnpm --dir ui-tui run build
 pnpm --dir apps/desktop run dev
 ```
 
+`just` lists these developer commands as recipes (`just js-install`, `just desktop`,
+`just tui`, `just check`, `just test <paths>`); each recipe calls the command shown
+here. See [Developer commands](../developer-guide/contributing.md#developer-commands).
+
 Activation provides the pnpm version `pm/lock.json` pins. An install that runs
 lifecycle scripts refuses any other pnpm, a direct or filtered `pnpm install`
 included: the root `preinstall` script requires the `pm/lock.json` pnpm and refuses
@@ -84877,7 +84919,7 @@ when it or any non-optional dependency it pulls in declares `engines` the curren
 or npm does not satisfy, where it would only warn outside the checkout.
 
 The website is a separate npm project: `npm ci --prefix website`, then
-`npm run build:fast --prefix website`. PM activation supplies tools, not these
+`npm run build:fast --prefix website` (`just docs-install`, `just docs-build`). PM activation supplies tools, not these
 `node_modules` directories or built assets. Native desktop builds have additional
 requirements in the [desktop build guide](https://github.com/NousResearch/hermes-agent/blob/main/apps/desktop/BUILDING.md).
 
