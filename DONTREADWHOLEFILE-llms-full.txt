@@ -4581,7 +4581,7 @@ Anything listed in `docker_forward_env` becomes visible to commands run inside t
 
 ### Running the Container as Your Host User
 
-By default Docker containers run as `root` (UID 0). Files created inside `/workspace` or other bind-mounts end up owned by root on the host, so after a session you have to `sudo chown` them before you can edit them from your host editor. On Linux, when Hermes stops and removes a root container, it first hands the files in its own sandbox bind mounts (`/root` and `/workspace` under `TERMINAL_SANDBOX_DIR`) back to your user (not your `docker_volumes` or mounted host directory; skipped on rootless Docker and userns-remap). Those sandbox files also lose setuid/setgid bits and file capabilities, whatever their owner, so nothing the container left there runs with elevated rights when you execute it on the host; a long-lived container that is never removed gets that strip (without any owner change) whenever a session detaches from it or reattaches, and before the stale-container sweep removes it. The `terminal.docker_run_as_host_user` flag fixes this for every mount and for long-lived containers that are never removed:
+By default Docker containers run as `root` (UID 0). Files created inside `/workspace` or other bind-mounts end up owned by root on the host, so after a session you have to `sudo chown` them before you can edit them from your host editor. On Linux, when Hermes stops and removes a root container, it first hands the files in its own sandbox bind mounts (`/root` and `/workspace` under `TERMINAL_SANDBOX_DIR`) back to your user (not your `docker_volumes` or mounted host directory; skipped on rootless Docker and userns-remap). Those sandbox files also lose setuid/setgid bits and file capabilities, whatever their owner, so nothing the container left there runs with elevated rights when you execute it on the host; a long-lived container that is never removed gets that strip (without any owner change) whenever a session detaches from it or reattaches, and before the stale-container sweep removes it. A file the agent sends with `MEDIA:` that the gateway cannot read (a root-owned `chmod 600` deliverable in a live container) is handed back to your user on its own just before delivery, through that container, so it arrives without waiting for teardown; its mode stays as the agent set it. The `terminal.docker_run_as_host_user` flag fixes this for every mount and for long-lived containers that are never removed:
 
 ```yaml
 terminal:
@@ -6551,7 +6551,7 @@ For separate natural mid-turn assistant updates without progressive token editin
 **Fresh final (Telegram):** Telegram's `editMessageText` preserves the original message timestamp, so a long-running streamed reply would keep the first-token timestamp even after completion. Set `fresh_final_after_seconds > 0` to opt in to delivering old previews as brand-new final messages with best-effort preview deletion. The default is `0`, which always finalizes streamed replies in place and avoids the brief duplicate-message/delete sequence on clients that show both operations.
 
 :::note Per-platform streaming defaults
-The master `streaming.enabled` switch is `false` by default — nothing streams until you flip it. Once enabled, streaming is decided **per platform**: Telegram ships with `display.platforms.telegram.streaming: true` (streams) and Discord with `display.platforms.discord.streaming: false` (does not). So after enabling streaming, Telegram streams out of the box and Discord stays on whole-message replies until you change its toggle. You can adjust these per-platform switches from the dashboard's **Channels** toggles or directly in `~/.hermes/config.yaml`.
+The master `streaming.enabled` switch is `false` by default — nothing streams until you flip it. Once enabled, streaming is decided **per platform**: Telegram ships with `display.platforms.telegram.streaming: true` (streams) and Discord with `display.platforms.discord.streaming: false` (does not). So after enabling streaming, Telegram streams out of the box and Discord stays on whole-message replies until you change its toggle. You can adjust these per-platform switches from the dashboard's **Channels** toggles or directly in `~/.hermes/config.yaml`; those per-platform toggles are re-read on every message, so they apply without a restart. The `streaming:` block itself (`enabled`, `transport`, `edit_interval`, `buffer_threshold`, `cursor`, `fresh_final_after_seconds`) is captured once when the gateway starts: after changing any of those keys, restart the gateway for the change to take effect. Note that a per-platform switch can only narrow the master switch, never enable streaming on its own.
 :::
 
 ## Group Chat Session Isolation
@@ -7935,7 +7935,7 @@ What happens:
 
 6. From that point, the conversation lives on the platform. Reply in the new thread — anyone authorized in that channel shares the same session, and any later real user message in the thread joins seamlessly because thread sessions key without `user_id`.
 
-**Resume back to CLI:** when you want to come back to a desktop, just run `/resume <title>` (or `hermes -r "<title>"` from the shell) and pick up where the platform left off.
+**Resume back to CLI:** when you want to come back to a desktop, just run `/resume <title>` (or `hermes -r "<title>"` from the shell) and pick up where the platform left off. Handing off again moves the conversation to the new Telegram topic; the earlier topic starts a fresh conversation at its next message.
 
 **Failure modes:**
 - No home channel configured → CLI refuses with a `/sethome` hint.
@@ -11047,6 +11047,20 @@ Identical commands raised at the same time by two different requesters get one p
 When anyone else clicks a button, adds a reaction, or sends `/approve`, `/deny` or a bare "yes", they get *Only &lt;name&gt; can answer this approval.* The command stays pending, so the requester can still answer it. Where the platform supports a private reply, only the clicker sees that note: a Slack ephemeral message, a Discord ephemeral reply, a Telegram callback alert, a Feishu toast or a Teams card response. Matrix, WhatsApp and the relay post it in the chat instead.
 
 The same rule covers the other prompts a member can answer for someone else: a slash-command confirmation (`/reload-mcp`'s Approve Once / Always / Cancel) and the agent's clarify question (a choice button, "Other", or a typed answer). Another member's tap gets the same note and the prompt stays pending; another member's typed message is handled as their own message, never as the answer.
+
+**With slash admin gating (`allow_admin_from` / `group_allow_admin_from`) set for the chat's scope**, the default `approvers: ["*"]` no longer means "any admitted member": answering an approval is `/approve` or `/deny`, and answering a slash-command confirmation runs that command, so only someone allowed to run that command in the chat can answer, on every path (button, reaction, typed `/approve`, bare `yes` / `always`, typed confirm reply). That is the scope's admins, plus members whose `user_allowed_commands` lists `approve` (who may then also deny) or `deny` (deny only), or the confirmed command. Anyone else, the member whose message raised the approval included, can answer neither way: they get *⛔ /approve is admin-only here* and the prompt stays pending for an admin, or is denied when it times out.
+
+When both are set, a narrowed `approvers` takes precedence: it is the explicit answer to "who approves", so the requester, the listed ids and the scope's admins answer with a button, reaction or bare "yes", as described above, whatever `user_allowed_commands` says. Typing `/approve` or `/deny` is itself a slash command, so it still needs that command's permission.
+
+| Config for the chat's scope | Who can answer |
+|---|---|
+| neither | any admitted member |
+| `allow_admin_from` only | admins, plus members with `approve` (approve or deny) / `deny` (deny only) or the confirmed command in `user_allowed_commands` |
+| `approvers` narrowed (with or without `allow_admin_from`) | the requester, the listed ids, the scope's admins |
+
+A DM with the bot's owner keeps working when the owner is on the DM admin list. Clarify questions are not commands and only follow `approvers`.
+
+Picker cards (`/model`, `/reasoning`, `/fast` and the usage-limit switch offer) and the `/update` Yes/No prompt always belong to the member who opened them, whatever `approvers` says: only that member and the chat scope's admins can tap them or, for `/update`, answer by typing. Anyone else gets the same private note and the card stays open; their typed text is an ordinary message. A member refused an admin-only command therefore cannot apply an admin's open card instead.
 
 The setting is read when the approval is raised, so with multiplexed profiles each profile's own `config.yaml` decides. Host surfaces (CLI, TUI, Desktop, the API server) answer as the host and are not affected. Matrix keeps its own stricter `MATRIX_APPROVAL_REQUIRE_SENDER` (default on). QQBot already accepts clicks only from the session's own user.
 
@@ -18651,7 +18665,7 @@ cron:
   media_send_timeout_seconds: 600   # 10 minutes per attachment
 ```
 
-Or set the `HERMES_CRON_MEDIA_SEND_TIMEOUT` environment variable. The resolution order is: env var → config.yaml → 300s default. A timed-out attachment is recorded in the job's run status as a partial delivery failure (the text still delivers).
+Or set the `HERMES_CRON_MEDIA_SEND_TIMEOUT` environment variable. The resolution order is: env var → config.yaml → 300s default. Each attachment's timeout then grows by 1.5x the time the file takes to upload at 128 KB/s (at most one hour), because a platform answers an upload only once the whole file has arrived. A timed-out attachment is recorded in the job's run status as a partial delivery failure (the text still delivers).
 
 ## Bot Chat delivery completion
 
@@ -18666,6 +18680,8 @@ When the live gateway adapter cannot deliver (or no gateway is running), a targe
 cron:
   standalone_send_timeout_seconds: 120
 ```
+
+A delivery that carries attachments gets that timeout plus 1.5x the time its files take to upload at 128 KB/s (at most one hour), so a large file on a slow link is not reported as failed while it is still uploading. Text-only sends keep the configured value.
 
 A timed-out send is recorded in `last_delivery_error` as `standalone send to <target> timed out after Ns`; the message may still land if the adapter had already accepted it.
 
@@ -19863,7 +19879,7 @@ Top-level model-facing `delegate_task` calls run in the background automatically
 
 - Normal follow-up messages do not cancel background children, and neither does stopping the current turn: Ctrl+C, Esc, the Desktop/TUI Stop button and an ACP cancel end only the turn. The `/stop` command (gateway `/stop` — also when the session is idle after the dispatching turn ended — or CLI `/stop`) ends the session's running background delegations, and closing or resetting the owning session does the same.
 - Explicit session close/reset interrupts that session's background children. In the CLI and TUI, the gateway owns the session and the client only views it: when the last viewer exits or runs `/new` (a TUI resume switch counts too), the gateway interrupts that session's background children at once and refuses new ones for it until a viewer opens the session again. A plain detach cancels nothing: closing Desktop, a dropped connection, or exiting while another viewer is still attached leaves the work running. Background processes (`terminal(background=True)`) keep running either way.
-- A completion for a CLI or TUI session — a background child's result (including an interrupted one), or a `notify_on_complete` process exit or watch-pattern notice — that reaches the head of the session's queue while no viewer is attached does not start a turn. It is written into the session as a note, and the next turn reads it (for example after `hermes chat --resume`). If a viewer is attached by then, including one that came back after the completion arrived, the completion runs as a turn as before. Messaging chats have no viewers and are unchanged: their completions still start a turn.
+- A completion for a CLI or TUI session — a background child's result (including an interrupted one), or a `notify_on_complete` process exit or watch-pattern notice — that reaches the head of the session's queue while no viewer is attached does not start a turn. It is written into the session as a note, and the next turn reads it (for example after `hermes chat --resume`). If a viewer is attached by then, including one that came back after the completion arrived, the completion runs as a turn as before. One exception: a background delegation whose final result includes a failed child (an error, a timeout, a provider refusal, a stuck child a stall watchdog had to stop, or an unknown outcome after a restart, but not a child you or the parent stopped) runs as a turn, so the parent can re-dispatch the work or report the failure without waiting for you to come back. This happens at most three times in a row while nobody is watching: a further failure is written as a note until you attach or send a message, so a parent that keeps re-dispatching into the same failure cannot loop. It does not happen in a chat you closed (exit or `/new`), and a manual cron run's result (`cronjob(action='run')`) stays a note. When a child failed for a reason that repeats on the same model (a safety-filter refusal `content_policy_blocked`, billing, authentication, an unknown model), the result tells the parent not to re-dispatch it unchanged: use a different model, or report it. Messaging chats have no viewers and are unchanged: their completions still start a turn.
 - A Hermes process restart does **not** resume a running child. Its attempt becomes `unknown` because Hermes cannot prove which side effects happened.
 - A child that completed before restart but whose result was not delivered is restored and routed back through the owning session's normal checks.
 - Stopped children return a structured result (`status="interrupted"`, `exit_reason="interrupted"`) whose `summary` is the last text the child produced before the stop (the interrupt placeholder moves to `error`). The stop recurses down the spawn tree — an orchestrator child's synchronous workers are interrupted first and their partial results roll up into the child's own interrupted result — and each background unit's result re-enters the conversation right away as its normal completion notice (`Subagent Task Interrupted: …`), so nothing waits for the child to exhaust its budget.
@@ -28197,6 +28213,8 @@ gateway:
 
 **Backward compat:** if `allow_admin_from` is not set for a scope, the tier split is disabled for that scope and every allowed user has full access. Existing installs keep working with no changes — opt in when you want the distinction.
 
+**Answering prompts counts as running the command.** Answering a dangerous-command approval is `/approve` or `/deny`, and answering a slash-command confirmation (`/reset`, `/reload-mcp`, …) runs that command. So in a gated scope a non-admin cannot answer them any other way either: typing a bare `yes` / `always`, a typed confirm reply, or tapping a native button (Telegram, Discord, Slack, Matrix, Feishu, Teams, WhatsApp Cloud, QQ Bot, relay) gets the same *⛔ /approve is admin-only here* note and the prompt stays pending for an admin. Adding `approve` (or `deny`, or the confirmed command) to `user_allowed_commands` lets members answer, exactly as it lets them type it. Clarify questions are not commands and are unaffected. A narrowed [`approvals.approvers`](../security.md#who-can-answer-an-approval-in-a-shared-chat-approvalsapprovers) takes precedence over this: then the requester, the listed ids and the admins answer.
+
 #### Inspecting your access
 
 Use `/whoami` from any platform to see the active scope, your tier (admin / user / unrestricted), and which slash commands you can run. When an admin list is configured, `/help` and `/commands` show a non-admin only the commands they can actually run (`/help`, `/whoami`, plus `user_allowed_commands`); admins see the full catalog. See the [Telegram](./telegram.md#slash-command-access-control) and [Discord](./discord.md#slash-command-access-control) pages for platform-specific examples.
@@ -28615,14 +28633,20 @@ Once upstream is healthy, `/platform resume <name>` clears the breaker and re-ar
 
 When the gateway restarts (or is shut down with in-flight sessions), it can send a one-shot "the agent is back" / "the agent was interrupted" message to each platform's home channel. This is controlled per-platform by the `gateway_restart_notification` flag in `config.yaml`, which defaults to `true`:
 
+Configure the destination with a `home_channel` object containing both `platform` and `chat_id`:
+
 ```yaml
 gateway:
   platforms:
     telegram:
-      home_chat_id: "123456789"
+      home_channel:
+        platform: telegram
+        chat_id: "123456789"
       gateway_restart_notification: false   # opt out for this platform
     discord:
-      home_chat_id: "987654321"
+      home_channel:
+        platform: discord
+        chat_id: "987654321"
       # gateway_restart_notification omitted → defaults to true
 ```
 
@@ -28939,6 +28963,10 @@ platforms:
       media_group_wait_seconds: 3.0
 ```
 
+A short text followed right away by a photo (a question, then the screenshot it is about) also
+reaches the agent as one message. If the photo starts arriving before the text has been sent on,
+the text waits up to 8 seconds for the photo's download and joins it.
+
 ### Repeated inbound updates
 
 Hermes suppresses repeated Telegram `update_id` values before message batching,
@@ -29063,6 +29091,8 @@ telegram:
 ```
 
 With this mode enabled, unmentioned group messages from explicitly allowlisted chats/topics are appended to the shared chat/topic session transcript as observed context, but they do not dispatch the agent. `allowed_chats` gates where the bot responds; `group_allowed_chats` authorizes the shared group session used for observed context, so use the same chat IDs for this mode. A later `@botname` mention, reply to the bot, or configured mention pattern in that same allowlisted chat/topic can use that observed context. The triggered message is also tagged with `[nickname|user_id]` and gets a per-turn safety prompt so the model treats prior observed lines as context, not instructions addressed to the bot. Slash commands sent in that chat/topic (`/new`, `/model`, `/undo`, skill commands) act on the same shared session, while admin-only commands are still checked against the sender.
+
+Observed context is text only. A photo, video or file sent without a trigger is cached, and the observed line gives its saved path; the next addressed turn does not attach it inline. When a later message asks about it, the agent opens the cached file itself (`vision_analyze` for images; `video_analyze` for videos when the opt-in `video` toolset is enabled, otherwise its file tools), so image tokens are only spent when someone asks.
 
 Equivalent environment variable:
 
@@ -29975,8 +30005,6 @@ The same setting applies to sends made outside the gateway process: `hermes send
 
 CJK text (Chinese, Japanese, Korean, and rare Han extensions) stays on the legacy MarkdownV2 path by default because affected Telegram Desktop/macOS clients have rendered Bot API rich messages with overlapping CJK glyph artifacts. If you use an unaffected client and prefer native rich tables/task lists/details/math for CJK payloads, set `allow_cjk_rich_messages: true` alongside `rich_messages: true` to opt in to that client-side risk.
 
-If you only want the legacy "always code-block" table behavior while keeping rich messages enabled, disable table normalization by setting `telegram.pretty_tables: false` in `config.yaml` (default: `true`).
-
 **Link previews.** Telegram auto-generates link previews for URLs in bot messages. If you'd rather suppress those (long `/tools` output, agent reply that mentions ten links, etc.):
 
 ```yaml
@@ -30142,7 +30170,9 @@ In some restricted networks, `api.telegram.org` may resolve to an IP that is unr
 5. Once a path succeeds, it becomes "sticky" — subsequent requests use it directly. The hostname is kept as a last resort for IPv6-only networks.
 6. One request's walk across these paths shares a 15s connect budget, half the 30s send deadline. The first path keeps its full connect timeout and later paths split the rest. If every path hangs, the send fails with a connect timeout before the deadline. The gateway retries it, because the message never left.
 
-Sends made outside the gateway process (`hermes send`, the `send_message` tool, standalone cron delivery) use the same transport with your configured IPs or the seed list. They skip DoH discovery so a one-shot send stays fast. They also use the gateway's `HERMES_TELEGRAM_HTTP_*` timeouts and its 60s media-upload write timeout. A connect or pool timeout is retried there, because the request never left. Any other timeout is not retried: Telegram may already have delivered the message.
+Sends made outside the gateway process (`hermes send`, the `send_message` tool, standalone cron delivery) use the same transport with your configured IPs or the seed list. They skip DoH discovery so a one-shot send stays fast. They also use the gateway's `HERMES_TELEGRAM_HTTP_*` timeouts and its media-upload budgets. A connect or pool timeout is retried there, because the request never left. Any other timeout is not retried: Telegram may already have delivered the message, and `hermes send` says so in its warning instead of inviting a resend.
+
+A media upload from a file on disk (gateway or standalone) gets read and write timeouts of 60s plus the time the file takes at 128 KB/s. Gateway uploads also get a wall-clock cap of 300s plus 1.5x that time (at most one hour). `hermes send` and the `send_message` tool are bounded only by those per-request timeouts. Standalone cron delivery keeps its `cron.standalone_send_timeout_seconds` cap (60s by default), widened by 1.5x the upload time when the delivery carries files, and a cron delivery through the live gateway widens `cron.media_send_timeout_seconds` the same way. A large file on a slow uplink, or through a self-hosted Bot API server that only answers once it has forwarded the file, then waits for Telegram's answer instead of reporting a failure for a file that lands minutes later.
 
 ### Configuration
 
@@ -30260,6 +30290,7 @@ Numeric YAML keys are automatically normalized to strings.
 | Bot ignores group messages | Privacy mode is likely on. Disable it (Step 3) or make the bot a group admin. **Remember to remove and re-add the bot after changing privacy.** |
 | Voice messages not transcribed | Verify STT is available: install `faster-whisper` for local transcription, or set `GROQ_API_KEY` / `VOICE_TOOLS_OPENAI_KEY` in `~/.hermes/.env`. |
 | Voice replies are files, not bubbles | Install `ffmpeg` (needed for Edge TTS Opus conversion). |
+| Logs show `Telegram polling conflict` (409) | Another poller holds the bot's `getUpdates` session. This is usually the gateway's own previous long poll, which Telegram expires on its own: the adapter retries for about 200 s, then the gateway reconnects it again about 2, 5 and 10 minutes later (every profile in a multiplexed gateway does this). If the token is still in use after that, `hermes status` shows the platform as `fatal` with `token_in_use_elsewhere` and needs-attention, and the gateway stops retrying. Stop the other poller (another machine, a leftover process, or another bot framework using this token), then run `hermes gateway restart`. Two of your own profiles set up with the same token never get this far: the second one is refused at startup with `duplicate_credential` (or `telegram-bot-token_lock` when the other is a separate local gateway). |
 | Bot token revoked/invalid | Generate a new token via `/revoke` then `/newbot` or `/token` in BotFather. Update your `.env` file. |
 | Webhook not receiving updates | Verify `TELEGRAM_WEBHOOK_URL` is publicly reachable (test with `curl`). Ensure your platform/reverse proxy routes inbound HTTPS traffic from the URL's port to the local listen port configured by `TELEGRAM_WEBHOOK_PORT` (they do not need to be the same number). Ensure SSL/TLS is active — Telegram only sends to HTTPS URLs. Check firewall rules. |
 
@@ -37273,6 +37304,8 @@ providers:
 ```
 
 Each entry accepts: `api` (the endpoint base URL — `base_url`/`url` are accepted aliases), `name` (optional display name; defaults to the dict key), `key_env` or inline `api_key` or `key_cmd` (see below), `transport` (`chat_completions` / `anthropic_messages` / `codex_responses`), `default_model`, `models`, `context_length`, `discover_models`, `extra_body`, `extra_headers`, `session_affinity_header` (name of a header that carries the conversation id, for session-aware proxies; off unless set), `ssl_ca_cert` / `ssl_verify`, `catalog_provider` (see below), and `enabled: false` to hide an entry without deleting it.
+
+An entry keyed like a built-in provider (`openrouter:`, `Anthropic:`, `deepseek:`, in any case) that sets its own `api`/`base_url` **is** what that name means: `--provider openrouter`, `/model`, `hermes model` and the dashboard save it as `custom:openrouter` and every turn goes to your endpoint. When the entry declares a key (`api_key` or `key_env`), that key is used and the built-in's env key is never sent; an entry with no key falls back to the built-in's env key, the same as `custom:<name>`. A same-named block without an endpoint (for example `providers.openrouter: {request_timeout_seconds: 300}`) only tunes the built-in. `hermes doctor` warns when `model.provider` names a built-in that such an entry takes over.
 
 #### Command-minted credentials (`key_cmd`)
 
@@ -50563,7 +50596,8 @@ lists each import of it.
 | The pieces of that client, to build your own | `gateway.platforms.base.ssrf_redirect_guard` (httpx `response` hook), `tools.url_safety.create_ssrf_safe_async_client`, `tools.url_safety.is_safe_url`, `gateway.platforms._http_client_limits.platform_httpx_limits` |
 | Own DM/group policy (`dm_policy` / `group_policy` / allowlists) | `from gateway.platforms.access_policy_mixin import OwnAccessPolicyMixin` |
 | Resolve an approval from a native button | `from tools.approval import resolve_gateway_approval_card` (pass the card's request id; a call without one resolves nothing. Every request starts Deny-only: render through `_send_exec_approval_prompt` so the base `send_exec_approval` can lift the mark once the card shows the whole command. `resolve_gateway_approval` answers the oldest pending request) |
-| Refuse a click from someone other than the approval's requester (when `approvals.approvers` is narrowed) | `from gateway.approval_actor import approval_refusal, refusal_text`: call `approval_refusal(session_key, clicker_id, extra=self.config.extra, request_id=...)` before resolving; a non-`None` result is the requester's name, reply privately with `refusal_text(name)` and leave the approval pending. Then settle with `resolve_gateway_approval_card(session_key, choice, request_id, actor_id=clicker_id, extra=self.config.extra)`, which rechecks the clicker against the entry it settles in the same critical section. Slash-confirm and clarify taps use `slash_confirm_refusal(session_key, confirm_id, clicker_id, extra=...)` and `clarify_refusal(clarify_id, clicker_id, extra=...)` the same way, before `slash_confirm.resolve` / `resolve_gateway_clarify` / `mark_awaiting_text` |
+| Refuse a click from someone who may not answer the approval (not its requester when `approvals.approvers` is narrowed; not allowed `/approve` / `/deny` when the chat sets `allow_admin_from`) | `from gateway.approval_actor import approval_refusal, refusal_text`: call `approval_refusal(session_key, clicker_id, extra=self.config.extra, request_id=..., choice=choice)` before resolving (the `choice` lets the chat's slash admin gate check the answer's own `/approve` or `/deny`); a non-`None` result is the requester's name, reply privately with `refusal_text(name)` and leave the approval pending. Then settle with `resolve_gateway_approval_card(session_key, choice, request_id, actor_id=clicker_id, extra=self.config.extra)`, which rechecks the clicker against the entry it settles in the same critical section. Slash-confirm and clarify taps use `slash_confirm_refusal(session_key, confirm_id, clicker_id, extra=...)` and `clarify_refusal(clarify_id, clicker_id, extra=...)` the same way, before `slash_confirm.resolve` / `resolve_gateway_clarify` / `mark_awaiting_text` |
+| Refuse a picker-card (`send_model_picker` / `send_choice_picker`) or `/update` prompt click from someone other than its opener | `from gateway.approval_actor import picker_refusal, update_prompt_refusal, refusal_text`: `picker_refusal(on_selected, clicker_id, extra=self.config.extra)` with the callback the picker was sent with, or `update_prompt_refusal(clicker_id, extra=self.config.extra)`; a non-`None` result is the opener's name: reply privately with `refusal_text(name)` and leave the card open. The opener and the chat scope's admins always pass |
 | Native clarify buttons | `tools.clarify_gateway`: `get_pending(clarify_id)` (the pending entry or `None`; read `session_key`, `choices`, `multi_select`), `resolve_gateway_clarify(clarify_id, text)`, `mark_awaiting_text(clarify_id)`, `SKIPPED` |
 | `setup_fn` wizard steps | `hermes_cli.gateway_setup_wizard`: `print_setup_header(title)`, `confirm_reconfigure(label, *env_vars)`, `offer_home_channel(home_var, user_id, what)`, `save_env_values(**values)`, `prompt_csv(text, default)`; prompts from `hermes_cli.setup` (`prompt`, `prompt_choice`, `prompt_yes_no`); output from `hermes_cli.cli_output` (`print_info`, `print_success`, `print_warning`, `print_error`); `.env` access through `hermes_cli.config` (`save_env_value`, `get_env_value`) |
 
@@ -72695,6 +72729,8 @@ with a name allows that one name only.
 | `gateway.approval_actor` | `refusal_text` | adding-platform-adapters.md § Public helpers for platform plugins |
 | `gateway.approval_actor` | `slash_confirm_refusal` | adding-platform-adapters.md § Public helpers for platform plugins |
 | `gateway.approval_actor` | `clarify_refusal` | adding-platform-adapters.md § Public helpers for platform plugins |
+| `gateway.approval_actor` | `picker_refusal` | adding-platform-adapters.md § Public helpers for platform plugins |
+| `gateway.approval_actor` | `update_prompt_refusal` | adding-platform-adapters.md § Public helpers for platform plugins |
 | `tools.clarify_gateway` | `get_pending` | adding-platform-adapters.md § Public helpers for platform plugins |
 | `tools.clarify_gateway` | `resolve_gateway_clarify` | adding-platform-adapters.md § Public helpers for platform plugins |
 | `tools.clarify_gateway` | `mark_awaiting_text` | adding-platform-adapters.md § Public helpers for platform plugins |
@@ -80465,7 +80501,7 @@ The relevant endpoints (all public, pre-auth bootstrap, same as the existing
 
 # Google Gemini
 
-Hermes Agent supports Google Gemini as a native provider using the **Google AI Studio / Gemini API** — not the OpenAI-compatible endpoint. This lets Hermes translate its internal OpenAI-shaped message and tool loop into Gemini's native `generateContent` API while preserving tool calling, streaming, multimodal inputs, and Gemini-specific response metadata.
+Hermes Agent supports Google Gemini as a native provider using the **Google AI Studio / Gemini API** — not the OpenAI-compatible endpoint. This lets Hermes translate its internal OpenAI-shaped message and tool loop into Gemini's native APIs (the [Interactions API](#interactions-api) for Gemini 3 and later, `generateContent` for older models) while preserving tool calling, streaming, multimodal inputs, and Gemini-specific response metadata.
 
 ## Prerequisites
 
@@ -80554,7 +80590,7 @@ Google also exposes an OpenAI-compatible endpoint:
 https://generativelanguage.googleapis.com/v1beta/openai/
 ```
 
-For Hermes agent sessions, prefer the native Gemini endpoint above. Hermes includes a native Gemini adapter so it can map multi-turn tool use, tool-call results, streaming, multimodal inputs, and Gemini response metadata directly onto Gemini's `generateContent` API. The OpenAI-compatible endpoint is still useful when you specifically need OpenAI API compatibility.
+For Hermes agent sessions, prefer the native Gemini endpoint above. Hermes includes a native Gemini adapter so it can map multi-turn tool use, tool-call results, streaming, multimodal inputs, and Gemini response metadata directly onto Gemini's native APIs. The OpenAI-compatible endpoint is still useful when you specifically need OpenAI API compatibility.
 
 If you previously set `GEMINI_BASE_URL` to the `/openai` URL, remove it or change it:
 
@@ -80571,6 +80607,39 @@ take the native Gemini path when the base URL points at
 `generativelanguage.googleapis.com` or the Vertex AI express host below; a proxy on
 another host is treated as an OpenAI-compatible endpoint, so configure it with its
 `/openai`-style URL.
+
+### Interactions API
+
+On Google AI Studio, Hermes sends Gemini 3 and later models (and the `gemini-*-latest`
+aliases) through Google's
+[Interactions API](https://aistudio.google.com/docs/interactions-overview), the API Google
+recommends for them. Gemini 2.x and Gemma models use `generateContent`.
+
+You can choose the API yourself, for every model or per model:
+
+```yaml
+providers:
+  gemini:
+    gemini_api: generate_content    # every Gemini model
+    models:
+      gemini-3.8-flash:
+        gemini_api: interactions    # except this one
+```
+
+Each setting takes `interactions`, `generate_content` or `auto` (the default, described
+above). A per-model setting wins over the provider-wide one. A change applies to the next
+request; no restart is needed. Gemini 2.x steers thinking with a token budget, which the
+Interactions API has no setting for, so forcing a 2.x model onto `interactions` drops that
+budget.
+
+Hermes calls Interactions statelessly (`store: false`): it sends the whole conversation on
+every request, the same as `generateContent`, so Google keeps no copy of the conversation
+and prompt caching works the same way. The exception is long decode (Gemini 4 at `xhigh`
+effort and above): Google continues those multi-request answers only from a stored
+interaction, so those requests set `store: true`, and Google retains them for its standard
+period (55 days on the paid tier, 1 day on the free tier). Interactions is only available on
+the AI Studio host (`generativelanguage.googleapis.com`). A Vertex AI express or proxy base
+URL always uses `generateContent`.
 
 ### Vertex AI Express Mode Keys
 
@@ -80609,6 +80678,7 @@ The `hermes model` picker shows Gemini models maintained in Hermes' provider reg
 
 | Model | ID | Notes |
 |-------|----|-------|
+| Gemini 4 Carbon | `gemini-4-carbon` | Strongest reasoning model; spends more thinking per turn than Argon, with the same window, long decode and price. Paid tier only |
 | Gemini 4 Argon | `gemini-4-argon` | Flagship reasoning model; shared 1M input+output window, long decode up to 1M output tokens |
 | Gemini 3.8 Flash | `gemini-3.8-flash` | Most capable Flash model for long-horizon agentic and coding work |
 | Gemini 3.7 Flash | `gemini-3.7-flash` | Recommended default balance of speed, capability, and multimodal understanding |
@@ -80625,7 +80695,7 @@ Use Gemini's native model IDs such as `gemini-3.7-flash`, not OpenRouter-style I
 
 ### Gemini 4 Argon: Reasoning Effort and Long Decode
 
-Gemini 4 Argon always thinks; Hermes maps the reasoning effort (`/reasoning`,
+Gemini 4 Carbon works the same way as Argon in everything below. Gemini 4 Argon always thinks; Hermes maps the reasoning effort (`/reasoning`,
 `agent.reasoning_effort`) onto its `thinkingLevel`:
 
 | Hermes effort | `thinkingLevel` | Total output budget |
