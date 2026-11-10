@@ -8996,8 +8996,7 @@ These terms describe different parts of Hermes:
 
 ```bash
 hermes profile create coder       # creates profile + "coder" command alias
-coder setup                       # configure API keys and model
-coder chat                        # start chatting
+coder chat                        # start chatting (keys and model come from the current profile)
 ```
 
 That's it. `coder` is now its own Hermes profile with its own config, memory, and state.
@@ -9014,7 +9013,10 @@ Quickest setup: run `hermes setup --portal` inside the new profile to wire up mo
 hermes profile create mybot
 ```
 
-Creates a fresh profile with bundled skills seeded. Run `mybot setup` to configure API keys, model, and gateway tokens.
+Creates a fresh profile with bundled skills seeded. It gets the current profile's API keys (bot tokens and allowlists left out) and model, and shares the default profile's logins, the same as the Desktop bot page's "Share keys & accounts" default. Run `mybot setup` for its gateway tokens.
+
+- `--isolated-auth` copies the logins (`auth.json`) once instead of sharing them. A profile created from a named profile always gets a copy of that profile's logins; its subscription (single-use OAuth) logins can't be copied, so for those providers the new profile reads the default profile's and `profile create` says so.
+- `--no-credentials` copies no keys, logins or model; run `mybot setup` afterwards.
 
 If you plan to use this profile as a kanban worker (or want the kanban orchestrator to route work to it), pass `--description "<role>"` at create time so the orchestrator knows what it's good at:
 
@@ -9052,7 +9054,7 @@ hermes profile create backup --clone-all
 Copies **everything** — config, API keys, personality, all memories, skills, plugins. A complete working snapshot. Per-profile history is excluded (session history, `state.db`, `backups/`, `state-snapshots/`, `checkpoints/`) — these belong to the source profile and can reach tens of GB. When cloning from the default profile, the local-model runtime trees (`models/`, `runtimes/`, `node/` — downloaded weights and managed binaries, re-fetched on demand) are skipped too, as `hermes backup` already does. **Cron jobs are not cloned** either: they are scheduled work bound to the source profile and its delivery channel, and a clone that inherited them would run every job twice (two gateways, same job ids). The new profile starts with an empty `cron/`. For a full backup including history and cron jobs, use `hermes profile export` or `hermes backup` instead.
 
 :::note OAuth logins are shared, not copied
-Anthropic (Claude Pro/Max), OpenAI Codex, and xAI OAuth logins use **single-use refresh tokens** — a copy of one is not a second credential, it is the same credential with two owners, and the first profile to refresh it revokes it for every other copy. `--clone-all` (and the dashboard's credential mirroring) therefore drops those OAuth rows from the clone. The new profile keeps reading the login from the root `~/.hermes/auth.json`, and a token refresh performed inside any profile is written back to root, so all profiles stay signed in. Static API keys are copied as usual. To give a profile its own separate OAuth login, run `hermes -p <name> auth add <provider>` inside it. That login is saved in the profile's own `auth.json`, also when root has no login for the provider yet, and from then on the profile uses it instead of the root login; root's `auth.json` is not changed. If the login cannot be saved, the command fails with an error instead of printing `Added`.
+Anthropic (Claude Pro/Max), OpenAI Codex, and xAI OAuth logins use **single-use refresh tokens** — a copy of one is not a second credential, it is the same credential with two owners, and the first profile to refresh it revokes it for every other copy. `--clone-all` (and a logins copy made by `--isolated-auth` or from a named profile) therefore drops those OAuth rows from the copy. The new profile keeps reading the login from the root `~/.hermes/auth.json`, and a token refresh performed inside any profile is written back to root, so all profiles stay signed in. Static API keys are copied as usual. To give a profile its own separate OAuth login, run `hermes -p <name> auth add <provider>` inside it. That login is saved in the profile's own `auth.json`, also when root has no login for the provider yet, and from then on the profile uses it instead of the root login; root's `auth.json` is not changed. If the login cannot be saved, the command fails with an error instead of printing `Added`.
 :::
 
 ### Clone from a specific profile
@@ -11043,6 +11045,8 @@ With `approvers` narrowed from `["*"]`, only these people can approve or deny a 
 Identical commands raised at the same time by two different requesters get one prompt each, so one requester's answer never decides the other's. A turn that carries messages from two members (follow-ups merged while the agent was busy) has no single requester: its approvals go to the listed approvers and admins only.
 
 When anyone else clicks a button, adds a reaction, or sends `/approve`, `/deny` or a bare "yes", they get *Only &lt;name&gt; can answer this approval.* The command stays pending, so the requester can still answer it. Where the platform supports a private reply, only the clicker sees that note: a Slack ephemeral message, a Discord ephemeral reply, a Telegram callback alert, a Feishu toast or a Teams card response. Matrix, WhatsApp and the relay post it in the chat instead.
+
+The same rule covers the other prompts a member can answer for someone else: a slash-command confirmation (`/reload-mcp`'s Approve Once / Always / Cancel) and the agent's clarify question (a choice button, "Other", or a typed answer). Another member's tap gets the same note and the prompt stays pending; another member's typed message is handled as their own message, never as the answer.
 
 The setting is read when the approval is raised, so with multiplexed profiles each profile's own `config.yaml` decides. Host surfaces (CLI, TUI, Desktop, the API server) answer as the host and are not affected. Matrix keeps its own stricter `MATRIX_APPROVAL_REQUIRE_SENDER` (default on). QQBot already accepts clicks only from the session's own user.
 
@@ -19363,9 +19367,10 @@ Set `delegation.independent_completions: true` to have results land **per comple
 
 When independent completions are enabled:
 
-- Omit `group` when each result is useful to act on separately. Each task reports as soon as it finishes.
-- Use the same `group` string when you want to review outputs together: comparison, synthesis, or one coordinated decision. The group returns **one** consolidated message after all its tasks finish. Even independently executable tasks can belong in one group when their results inform the same decision.
-- Different groups report independently; grouped and ungrouped tasks can share one call.
+- The schema marks `group` as required on every task, so the model states the delivery choice in each call instead of falling into per-task delivery by leaving a field out.
+- The same `group` string on every task is the choice when the parent will respond only once all of them are done: comparison, synthesis, or one coordinated decision. The group returns **one** consolidated message after all its tasks finish. Even independently executable tasks belong in one group when their results inform the same decision.
+- A task gets its own `group` only when the parent will act on that result as soon as it lands. Each such result re-enters alone and costs the parent a turn.
+- Different groups report independently and can share one call. A task that arrives without a `group` (an older transcript, a model that ignores `required`) is still accepted and reports alone, as before.
 
 This is off by default because every unit is a new turn for the orchestrator: a 15-task call becomes up to 15 wake-ups, which fragmented long campaigns. Grouping controls **result delivery, not execution order**: all tasks still run in parallel. If task B needs task A's output to do its work, dispatch A first, then dispatch B with that output after A returns.
 
@@ -30133,8 +30138,9 @@ In some restricted networks, `api.telegram.org` may resolve to an IP that is unr
 1. If `TELEGRAM_FALLBACK_IPS` is set, those IPs are used directly.
 2. Otherwise, the adapter automatically queries **Google DNS** and **Cloudflare DNS** via DNS-over-HTTPS (DoH) to discover alternative IPs for `api.telegram.org`.
 3. Known IPv4 Telegram API IPs are tried **before** the dual-stack `api.telegram.org` hostname. A blackholed IPv6 path can sit in `connect()` without erroring, which used to pin the event loop so the 30s init deadline never fired.
-4. If DoH is also blocked or times out, a hardcoded IPv4 seed list (`149.154.166.110`, `149.154.167.220`) is used as that IPv4-first list. The hostname remains last resort.
+4. A hardcoded IPv4 seed list (`149.154.166.110`, `149.154.167.220`) always follows the DoH answers (DoH often returns a single edge, which would otherwise be the only fallback), and is the whole list when DoH is blocked or times out. The hostname remains last resort.
 5. Once a path succeeds, it becomes "sticky" — subsequent requests use it directly. The hostname is kept as a last resort for IPv6-only networks.
+6. One request's walk across these paths shares a 15s connect budget, half the 30s send deadline. The first path keeps its full connect timeout and later paths split the rest. If every path hangs, the send fails with a connect timeout before the deadline. The gateway retries it, because the message never left.
 
 Sends made outside the gateway process (`hermes send`, the `send_message` tool, standalone cron delivery) use the same transport with your configured IPs or the seed list. They skip DoH discovery so a one-shot send stays fast. They also use the gateway's `HERMES_TELEGRAM_HTTP_*` timeouts and its 60s media-upload write timeout. A connect or pool timeout is retried there, because the request never left. Any other timeout is not retried: Telegram may already have delivered the message.
 
@@ -40700,7 +40706,7 @@ The easiest path is the interactive manager:
 hermes fallback
 ```
 
-`hermes fallback` reuses the provider picker from `hermes model` — same provider list, same credential prompts, same validation. Use the subcommands `add`, `list` (alias `ls`), `remove` (alias `rm`), and `clear` to manage the chain. Changes persist under the top-level `fallback_providers:` list in `config.yaml`.
+`hermes fallback` reuses the provider picker from `hermes model` — same provider list, same credential prompts, same validation. Use the subcommands `add`, `list` (alias `ls`), `remove` (alias `rm`), and `clear` to manage the chain, and `check` to verify it (see [Checking the chain](#checking-the-chain)). Changes persist under the top-level `fallback_providers:` list in `config.yaml`.
 
 If you'd rather edit the YAML directly, add a top-level `fallback_providers` list to `~/.hermes/config.yaml`:
 
@@ -40731,6 +40737,20 @@ OpenAI-compatible base URL continues to use the compatible client instead.
 :::note `fallback_model` vs `fallback_providers`
 `fallback_providers` (plural, list) is the current config shape and supports multiple fallbacks tried in order. `fallback_model` (singular) is the legacy single-fallback key — Hermes still honors it for back-compat, but `hermes fallback` writes the current `fallback_providers` key and migrates legacy config on write. When both are set, `fallback_providers` takes priority.
 :::
+
+### Checking the chain
+
+`hermes fallback check` reports whether each entry would work if the fallback switch reached it, without starting an agent session:
+
+```bash
+hermes fallback check            # static: resolve each entry and its credentials, no inference
+hermes fallback check --live     # also send one minimal request per entry, in parallel
+hermes fallback check --live --json
+```
+
+Each entry resolves exactly as the fallback switch resolves it (its `provider`, `model`, `base_url` and `api_key`/`key_env`), and the chain is never walked, so one entry can't hide another. `--live` sends one short completion per statically ready entry over that provider's own API (OpenAI-compatible, Anthropic Messages, Codex Responses, Bedrock, ACP). It is not retried (SDK retries are off; an Anthropic endpoint that refuses streaming gets the one non-streaming resend the adapter always makes) and never answered by another provider. An empty or malformed answer, one with a `failed`/`cancelled` status, or one that reports an error on the choice (OpenRouter's `finish_reason: "error"`) counts as a failure (`incomplete`, a token cap, still counts as answered); a provider error relayed in an HTTP 200 body is reported like the request error it describes. An entry fails as `model_mismatch` when the provider reports a different model (a dated snapshot of the requested model, such as `gpt-4o-2024-08-06` for `gpt-4o`, still counts as a match). The model check is skipped where the reported model proves nothing: Anthropic Messages and Codex Responses adapters don't expose the serving model, Azure reports the base model rather than your deployment name, router meta-models (`openrouter/auto`, `@preset/...`, `<model>@preset/...`) answer under the model they picked, Bedrock ARNs aren't echoed back, and local or private-network servers (llama.cpp, LM Studio, Ollama, a LAN box) often report a placeholder. The live request uses the provider's `request_timeout_seconds` when set (as the switch does), else 30 seconds; on a streamed request the timeout applies to each read, not the whole answer. A static pass for Bedrock (AWS SDK credential chain) or an external-process provider only means the route resolves; use `--live` to prove it. Static mode sends no inference request, but it resolves credentials the way a session does, so an expiring OAuth token may be refreshed and saved. Entries with `provider: auto` (backend picked per call) or `provider: moa` (a fan-out preset) are not one fixed route, so they are never sent a live request and keep their static verdict. The live request goes to the client the fallback switch would build; for Nous and Codex entries that client uses your stored login, as the switch does.
+
+The command exits with status 1 when any entry is not ready, so cron jobs and CI can gate on it. `--json` prints `profile`, `live`, `ready`, `checked_at` and one result per entry (`provider`, `model`, `base_url`, `api_mode`, `auth_source`, `configured`, `auth_ready`, `inference_ready`, `latency_ms`, `model_returned`, `error_class`, `error`, `ready`, `status`). `status` is `ready`, `ready (static)`, `config`, `auth`, `model_mismatch`, `live_response` (an answer with no usable completion) or `live_<reason>` for a failed request (`live_auth`, `live_timeout`, `live_rate_limit`, `live_model_not_found`, ...). Credentials are never printed, and provider error text is redacted. Use `hermes -p <profile> fallback check` to check another profile's chain.
 
 ### Supported Providers
 
@@ -47004,8 +47024,18 @@ inflation, real-over-threshold controls, reload/restore anchors, and local HTTP
 overflow/usage-less recovery with real compression but fixed local summary text.
 These are scripted control-flow checks, not vendor tokenizer or billing evidence.
 
-Opaque provider blobs (`encrypted_content` on Codex reasoning / compaction
-items) contribute 0 to every local estimate; only real usage ever prices them.
+Opaque provider blobs are never priced by their bytes (a native compaction
+checkpoint alone can be 5 million characters). Replayed **reasoning** is priced
+at the reasoning-token count the provider reported for the turn that produced it:
+each assistant row carries that count (`display_metadata.reasoning_tokens`), and
+every local estimate (preflight trigger, tail-budget walk, gateway hygiene)
+charges it. Providers bill the replay as input at that count: in a live A/B with
+the same request sent with and without the reasoning, gpt-5.6-sol reported 2,765
+and billed +2,767, grok-4.7 reported 73 and billed +76, and claude-opus-5.5
+reported 3,959 and billed +3,959 while its readable summary was about 1,016.
+Compaction checkpoints still contribute 0; only real usage prices them. Rows
+saved before the count existed fall back to a per-provider estimate from the
+ciphertext length.
 
 Images are priced at the per-image cost **learned from the provider's usage**
 (`agent/image_token_cost.py`), not a vendor formula: on a response whose delta
@@ -50528,7 +50558,7 @@ lists each import of it.
 | The pieces of that client, to build your own | `gateway.platforms.base.ssrf_redirect_guard` (httpx `response` hook), `tools.url_safety.create_ssrf_safe_async_client`, `tools.url_safety.is_safe_url`, `gateway.platforms._http_client_limits.platform_httpx_limits` |
 | Own DM/group policy (`dm_policy` / `group_policy` / allowlists) | `from gateway.platforms.access_policy_mixin import OwnAccessPolicyMixin` |
 | Resolve an approval from a native button | `from tools.approval import resolve_gateway_approval_card` (pass the card's request id; a call without one resolves nothing. Every request starts Deny-only: render through `_send_exec_approval_prompt` so the base `send_exec_approval` can lift the mark once the card shows the whole command. `resolve_gateway_approval` answers the oldest pending request) |
-| Refuse a click from someone other than the approval's requester (when `approvals.approvers` is narrowed) | `from gateway.approval_actor import approval_refusal, refusal_text`: call `approval_refusal(session_key, clicker_id, extra=self.config.extra, request_id=...)` before resolving; a non-`None` result is the requester's name, reply privately with `refusal_text(name)` and leave the approval pending. Then settle with `resolve_gateway_approval_card(session_key, choice, request_id, actor_id=clicker_id, extra=self.config.extra)`, which rechecks the clicker against the entry it settles in the same critical section |
+| Refuse a click from someone other than the approval's requester (when `approvals.approvers` is narrowed) | `from gateway.approval_actor import approval_refusal, refusal_text`: call `approval_refusal(session_key, clicker_id, extra=self.config.extra, request_id=...)` before resolving; a non-`None` result is the requester's name, reply privately with `refusal_text(name)` and leave the approval pending. Then settle with `resolve_gateway_approval_card(session_key, choice, request_id, actor_id=clicker_id, extra=self.config.extra)`, which rechecks the clicker against the entry it settles in the same critical section. Slash-confirm and clarify taps use `slash_confirm_refusal(session_key, confirm_id, clicker_id, extra=...)` and `clarify_refusal(clarify_id, clicker_id, extra=...)` the same way, before `slash_confirm.resolve` / `resolve_gateway_clarify` / `mark_awaiting_text` |
 | Native clarify buttons | `tools.clarify_gateway`: `get_pending(clarify_id)` (the pending entry or `None`; read `session_key`, `choices`, `multi_select`), `resolve_gateway_clarify(clarify_id, text)`, `mark_awaiting_text(clarify_id)`, `SKIPPED` |
 | `setup_fn` wizard steps | `hermes_cli.gateway_setup_wizard`: `print_setup_header(title)`, `confirm_reconfigure(label, *env_vars)`, `offer_home_channel(home_var, user_id, what)`, `save_env_values(**values)`, `prompt_csv(text, default)`; prompts from `hermes_cli.setup` (`prompt`, `prompt_choice`, `prompt_yes_no`); output from `hermes_cli.cli_output` (`print_info`, `print_success`, `print_warning`, `print_error`); `.env` access through `hermes_cli.config` (`save_env_value`, `get_env_value`) |
 
@@ -53315,6 +53345,7 @@ Manage the fallback provider chain. Fallback providers are tried in order when t
 | `add` | Pick a provider + model (same picker as `hermes model`) and append to the chain |
 | `remove` (alias: `rm`) | Pick an entry to delete from the chain |
 | `clear` | Remove all fallback entries |
+| `check [--live] [--json]` | Check each entry resolves with usable credentials (`--live`: one minimal request per statically ready fixed-route entry, on that entry's own provider/model, never another). Exits 1 when any entry is not ready. No agent session is created |
 
 See [Fallback Providers](../user-guide/features/fallback-providers.md).
 
@@ -53791,7 +53822,7 @@ Manage profiles — multiple isolated Hermes instances, each with its own config
 |------------|-------------|
 | `list` | List all profiles. |
 | `use <name>` | Set a sticky default profile. |
-| `create <name> [--clone] [--clone-all] [--clone-from <source>] [--no-alias]` | Create a new profile. `--clone` copies config, `.env`, `SOUL.md`, skills, and the curated `MEMORY.md`/`USER.md` memory files from the active profile. `--clone-all` copies all state. `--clone-from` specifies a source profile and implies config clone unless paired with `--clone-all`. |
+| `create <name> [--clone] [--clone-all] [--clone-from <source>] [--no-alias] [--isolated-auth] [--no-credentials]` | Create a new profile. By default it gets the active profile's API keys (bot tokens left out) and model and shares the default profile's logins (from a named profile, that profile's logins are copied instead). `--isolated-auth` copies the logins instead; `--no-credentials` copies none of these. `--clone` copies config, `.env`, `SOUL.md`, skills, and the curated `MEMORY.md`/`USER.md` memory files from the active profile. `--clone-all` copies all state. `--clone-from` specifies a source profile and implies config clone unless paired with `--clone-all`. |
 | `delete <name> [-y]` | Delete a profile. |
 | `show <name>` | Show profile details (home directory, config, etc.). |
 | `alias <name> [--remove] [--name NAME]` | Manage wrapper scripts for quick profile access. |
@@ -65070,7 +65101,7 @@ adapter._pending_messages: Dict[session_key, MessageEvent]
     └── Single "next-up" slot per session. Overwritten on repeat sends
         (burst collapse). Shared with photo-burst follow-ups.
 
-self._queued_events: Dict[session_key, List[MessageEvent]]
+SessionState.conversation.queued_events: List[MessageEvent]  (one per session_key)
     └── Overflow buffer. Each /queue invocation appends here when the
         slot is occupied. Promoted one-at-a-time after each drain.
 ```
@@ -65087,7 +65118,7 @@ _enqueue_fifo(session_key, event, adapter)
 └───────────────────────────────────────┘
        │ No
        ▼
-Append to _queued_events[session_key] (overflow tail)
+Append to the session's queued_events (overflow tail)
 ```
 
 ### Dequeue / Promotion (`_promote_queued_event`)
@@ -65096,7 +65127,7 @@ Called at the drain site after the slot was consumed. If there's an overflow ite
 
 - When `pending_event is None` (slot was empty), return overflow head as the new event.
 - When `pending_event` exists, stage overflow head in the slot for the next recursion.
-- If no adapter available, push back to `_queued_events` (don't silently drop).
+- If no adapter available, push back to the session's `queued_events` (don't silently drop).
 
 ### Queue Depth
 
@@ -65127,7 +65158,7 @@ requested twice is one stop).
 ### FIFO Invariant
 
 Each `/queue` invocation produces exactly one full agent turn, in FIFO order, with no
-merging. The single-slot `_pending_messages` + overflow `_queued_events` design ensures
+merging. The single-slot `_pending_messages` + overflow `queued_events` design ensures
 that repeated sends during an active turn don't cause out-of-order processing.
 
 ---
@@ -70826,7 +70857,7 @@ Each hook is documented in full on the **[Event Hooks reference](../../user-guid
 | [`on_session_delete`](../../user-guide/features/hooks.md#on_session_delete) | A session delete or deliberate archive commits (every surface, sweeps, prune) | `session_id: str, reason: str, profile: str \| None`, optional `deleted_ids: list[str]`, `sessions_dir: str` | ignored |
 | [`post_compaction`](../../user-guide/features/hooks.md#post_compaction) | A compaction committed (any path: auto, `/compress`, gateway, Codex, micro, prune) | `session_id: str, old_session_id: str, kind: str, reason: str, before_tokens: int \| None, after_tokens: int \| None, messages_removed: int \| None` | ignored |
 | [`post_curator_run`](../../user-guide/features/hooks.md#post_curator_run) | A curator pass wrote its report directory | `run_dir: str, run_json_path: str, report_md_path: str, dry_run: bool` | ignored |
-| [`gateway_platform_event`](../../user-guide/features/hooks.md#gateway_platform_event) | An authorized platform-native event is normalized at the gateway boundary (Telegram reactions currently) | `platform: str, event_type: str, payload: dict` | ignored |
+| [`gateway_platform_event`](../../user-guide/features/hooks.md#gateway_platform_event) | An authorized platform-native event is normalized at the gateway boundary (Telegram reactions and message edits; Discord message edits and deletes, thread create and rename; see the [per-event contracts](../../user-guide/features/hooks.md#gateway_platform_event)) | `platform: str, event_type: str, payload: dict` | ignored |
 | `kanban_task_claimed` | A kanban task is claimed (dispatcher process, before the worker spawns) | `task_id: str, board: str \| None, assignee: str \| None, run_id: int \| None, profile_name: str` | ignored |
 | `kanban_task_completed` | A kanban task completes (worker process) | `task_id, board, assignee, run_id, profile_name, summary: str \| None` | ignored |
 | `kanban_task_blocked` | A kanban task is blocked (worker process) | `task_id, board, assignee, run_id, profile_name, reason: str \| None` | ignored |
@@ -70838,6 +70869,57 @@ All callbacks should accept `**kwargs` for forward compatibility. If a hook call
 The kanban lifecycle hooks fire **after** the board DB change commits, so a callback always sees durable state and can never hold the SQLite write lock. Because kanban workers run as separate `hermes -p <profile> chat -q` subprocesses, `kanban_task_claimed` fires in the **dispatcher** process while `kanban_task_completed` / `kanban_task_blocked` fire in the **worker** process — hook in the dispatcher to observe every transition centrally, or in the worker for per-task in-session context.
 
 The **API request hooks** are observers for the raw provider request, one level below the per-turn `pre_llm_call` / `post_llm_call` pair: a single turn that calls tools makes several API requests, and these hooks fire around each one. They exist for observability plugins (tracing, cost accounting, latency dashboards). The `request` and `response` kwargs are sanitized, size-capped JSON views of the provider payload (sensitive keys redacted, long strings truncated, SDK objects normalized), and `usage` is a plain token-summary dict. Every payload carries the correlation fields `turn_id`, `api_request_id`, `task_id`, `session_id`, and `api_call_count`, so a plugin can stitch requests, tool calls, and turns together. `api_request_error` fires when a provider call raises and adds `status_code`, `retry_count` / `max_retries`, `retryable`, `reason`, and an `error` dict with `type` and `message`.
+
+### Where each hook fires {#hook-fire-sites}
+
+Every name in `hermes_cli.plugins.VALID_HOOKS` has at least one core fire site. This table names the function that fires each one, so you can read the exact call and payload. Paths are relative to the repository root. When you add a hook, add its row here in the same change.
+
+| Hook | Fired by |
+|------|----------|
+| `pre_tool_call` | `hermes_cli/plugins.py` `_dispatch_pre_tool_call_hooks`, called from `agent/tool_executor.py` `_pre_tool_block`, `agent/agent_runtime_helpers.py` `_pre_tool_block_message` and `model_tools.py` `_pre_dispatch_guards` |
+| `post_tool_call` | `model_tools.py` `_emit_post_tool_call_hook` |
+| `transform_terminal_output` | `tools/terminal_tool_result.py` `_apply_output_transform_hook` |
+| `transform_tool_result` | `model_tools.py` `_apply_transform_tool_result_hook` |
+| `transform_llm_output` | `agent/turn_finalizer.py` `apply_llm_output_transform` |
+| `pre_llm_call` | `agent/turn_context.py` `_collect_pre_llm_call_context` |
+| `post_llm_call` | `agent/turn_finalizer.py` `_apply_output_hooks` |
+| `on_stream_start` / `on_stream_end` | `agent/stream_delivery.py` `StreamDeliveryMixin._emit_stream_start` / `_emit_stream_end` |
+| `on_stream_delta` | `agent/stream_delivery.py` `StreamDeliveryMixin._fire_stream_delta` (text) and `_fire_reasoning_delta` (reasoning) |
+| `on_interim_message` | `agent/stream_delivery.py` `StreamDeliveryMixin._emit_interim_assistant_message` |
+| `pre_verify` | `hermes_cli/plugins.py` `get_pre_verify_continue_message`, called from `agent/turn_stop_gates.py` `_pre_verify_nudge` |
+| `pre_api_request` | `agent/turn_api_request.py` `_fire_pre_api_request_hook` |
+| `post_api_request` | `agent/turn_response_intake.py` `_fire_post_api_request_hook` |
+| `api_request_error` | `agent/api_request_hooks.py` `ApiRequestHooksMixin._invoke_api_request_error_hook` |
+| `pre_auxiliary_call` / `post_auxiliary_call` | `agent/auxiliary_hooks.py` `_AuxCallHooks.pre` / `_AuxCallHooks.post` |
+| `transform_api_error_classification` | `hermes_cli/plugins.py` `get_plugin_error_classification`, called from `agent/error_classifier.py` `_plugin_verdict` |
+| `on_session_start` | `agent/conversation_loop.py` `_restore_or_build_system_prompt` |
+| `on_session_end` | `agent/turn_finalizer.py` `finalize_turn`; interrupted exits: `hermes_cli/cli_shutdown.py` `_invoke_interrupted_session_end`, `tui_gateway/session_lifecycle.py` `_finalize_session` |
+| `on_session_finalize` | `hermes_cli/lifecycle.py` `finalize_session`, called from `hermes_cli/cli_session_mixin.py` `CLISessionMixin._notify_session_boundary`, `hermes_cli/cli_shutdown.py` `_notify_session_finalize`, `tui_gateway/session_lifecycle.py` `_notify_session_boundary` and `gateway/run_shutdown_session_end.py` `GatewaySessionEndMixin._finalize_session_off_loop` |
+| `on_session_reset` | `hermes_cli/cli_session_mixin.py` `CLISessionMixin._notify_session_boundary`; `tui_gateway/session_registry.py` `_start_session_services`; `gateway/slash_commands_session.py` `GatewaySessionCommandsMixin._handle_reset_command`; `gateway/run_shutdown_session_end.py` `GatewaySessionEndMixin._reset_session_off_loop` |
+| `on_session_delete` | `hermes_state_common.py` `emit_session_deleted` |
+| `on_session_open` | `gateway/session_open.py` `_Open._deliver` |
+| `on_skill_lifecycle` | `tools/skill_usage.py` `_emit_skill_lifecycle` |
+| `subagent_start` | `tools/delegate_tool.py` `_build_child_agent` |
+| `subagent_stop` | `tools/delegate_tool_results.py` `_fire_subagent_stop_hooks` |
+| `pre_gateway_dispatch` | `gateway/run_inbound_hooks.py` `GatewayInboundHooksMixin._hm_pre_gateway_dispatch_hook`; webhook and relay ingress: `gateway/platforms/webhook_ingress.py` `_admit_once` |
+| `post_gateway_admission` | `gateway/run_inbound_consumer.py` `run_post_admission_hook`; `gateway/platforms/webhook_ingress.py` `_admit_once` |
+| `agent_loop_stopped` | `gateway/run_agent_cache.py` `GatewayAgentCacheMixin._interrupt_and_clear_session`; `tui_gateway/session_lifecycle.py` `_interrupt_session_turn` |
+| `pre_approval_request` / `post_approval_response` | `tools/approval_context.py` `_fire_approval_hook`, called from `tools/approval.py`, `tools/approval_prompt.py`, `tools/approval_gateway_wait.py`, `tools/approval_smart.py` and `tools/file_tools_write_guards.py` |
+| `on_human_input_request` / `on_human_input_resolved` | `tools/human_input_hooks.py` `human_input_request` |
+| `on_room_member_activity` | `tui_gateway/hosted_room_member_activity.py` `emit_room_member_activity` |
+| `pre_transcription` | `tools/transcription_command.py` `_apply_pre_transcription_hook` |
+| `kanban_task_claimed` | `hermes_cli/kanban_db.py` `claim_task` (through `_fire_task_hook`) |
+| `kanban_task_completed` | `hermes_cli/kanban_db.py` `complete_task` (through `_fire_task_hook`); `hermes_cli/kanban_swarm.py` `create_swarm` |
+| `kanban_task_blocked` | `hermes_cli/kanban_db.py` `block_task` (through `_fire_task_hook`) |
+| `on_kanban_worker_spawned` | `hermes_cli/kanban_db.py` `_fire_worker_spawned_hook` |
+| `on_kanban_worker_exited` | `hermes_cli/kanban_db_dispatch.py` `detect_crashed_workers` |
+| `on_kanban_worker_stale_claim` | `hermes_cli/kanban_db.py` `release_stale_claims` |
+| `on_kanban_task_updated` | `hermes_cli/kanban_db.py` `notify_task_updated` |
+| `on_kanban_dispatch_tick` | `hermes_cli/kanban_db.py` `_fire_dispatch_tick_hook` |
+| `gateway_platform_event` | `gateway/run_adapters.py` `GatewayAdapterLifecycleMixin._handle_gateway_platform_event` (events come from the Telegram and Discord adapters) |
+| `pre_command` | `hermes_cli/plugins.py` `fire_pre_command_hook`, called from `cli.py` `HermesCLI.process_command`, `gateway/run_inbound_hooks.py` `GatewayInboundHooksMixin._hm_command_hooks` and `gateway/session_commands.py` |
+| `post_compaction` | `agent/compaction_events.py` `fire_post_compaction` |
+| `post_curator_run` | `agent/curator.py` `_notify_post_curator_run` |
 
 ### `pre_llm_call` context injection
 
@@ -72433,6 +72515,7 @@ with a name allows that one name only.
 |---|---|---|
 | `agent.account_usage` | whole module | developer-guide / plugins docs |
 | `agent.acp_client` | whole module | developer-guide / plugins docs |
+| `agent.browser_page_backend` | `BrowserPageBackend` | developer-guide / plugins docs |
 | `agent.browser_provider` | whole module | developer-guide / plugins docs |
 | `agent.context_engine` | whole module | developer-guide / plugins docs |
 | `agent.credential_pool` | whole module | developer-guide / plugins docs |
@@ -72450,6 +72533,8 @@ with a name allows that one name only.
 | `agent.terminal_env_provider` | whole module | developer-guide / plugins docs |
 | `agent.transports` | whole module | developer-guide / plugins docs |
 | `agent.transports.chat_completions` | whole module | developer-guide / plugins docs |
+| `agent.vault_backends.base` | `LoginBackend` | developer-guide / plugins docs |
+| `agent.vault_store` | `VaultItemMeta` | developer-guide / plugins docs |
 | `agent.video_gen_provider` | whole module | developer-guide / plugins docs |
 | `agent.web_search_provider` | whole module | developer-guide / plugins docs |
 | `cli` | whole module | developer-guide / plugins docs |
@@ -72498,6 +72583,8 @@ with a name allows that one name only.
 | `tools.approval` | `resolve_gateway_approval_card` | adding-platform-adapters.md § Public helpers for platform plugins |
 | `gateway.approval_actor` | `approval_refusal` | adding-platform-adapters.md § Public helpers for platform plugins |
 | `gateway.approval_actor` | `refusal_text` | adding-platform-adapters.md § Public helpers for platform plugins |
+| `gateway.approval_actor` | `slash_confirm_refusal` | adding-platform-adapters.md § Public helpers for platform plugins |
+| `gateway.approval_actor` | `clarify_refusal` | adding-platform-adapters.md § Public helpers for platform plugins |
 | `tools.clarify_gateway` | `get_pending` | adding-platform-adapters.md § Public helpers for platform plugins |
 | `tools.clarify_gateway` | `resolve_gateway_clarify` | adding-platform-adapters.md § Public helpers for platform plugins |
 | `tools.clarify_gateway` | `mark_awaiting_text` | adding-platform-adapters.md § Public helpers for platform plugins |
@@ -76756,6 +76843,32 @@ interface as `tools.environments.base.BaseEnvironment`:
 
 Subclassing `BaseEnvironment` is recommended (you inherit the shared file-sync
 and background-process plumbing) but not required.
+
+## Background processes and `cleanup()`
+
+A background command (`terminal(background=true)`) on a non-local backend is
+polled through the environment object that spawned it. When Hermes tears that
+environment down (`cleanup()` on session close, idle reaping, or eviction after
+a connection failure), it marks those processes `lost` so their pollers stop.
+It does that only after `cleanup()` returned without raising (or reported the
+sandbox already gone, a 404 / "not found"), because a failed cleanup may leave
+the sandbox running.
+
+If your `cleanup()` only drops a connection and the jobs keep running where the
+same environment object can still reach them (the built-in SSH backend
+reconnects on the next `execute()`), declare it so the poller keeps collecting
+the real exit code:
+
+```python
+class AcmeEnvironment(BaseEnvironment):
+    cleanup_stops_processes = False  # cleanup() disconnects; jobs survive and stay reachable
+```
+
+The default is `True`: once `cleanup()` returns, the processes are gone for that
+environment object (ended with the sandbox, or no longer reachable through it).
+It also applies to duck-typed environments that don't declare the attribute. So
+raise from `cleanup()` only while the sandbox may still be live; once it is
+destroyed, log any later failure (snapshot bookkeeping, client shutdown) instead.
 
 ## File tools and the host filesystem
 
@@ -90289,7 +90402,7 @@ SDK.fetchJSON("/api/plugins/my-plugin/data")
   .catch((err) => console.error("API call failed:", err));
 ```
 
-`fetchJSON` injects the session auth token, surfaces errors as thrown exceptions, and parses JSON automatically.
+`fetchJSON` injects the session auth token, surfaces errors as thrown exceptions, and parses JSON automatically. `fetchJSON` and `authedFetch` only call this dashboard's own origin: an absolute URL to another host is rejected rather than sent the session token, so fetch third-party URLs (CDN assets, a game server) with plain `fetch`.
 
 #### Calling built-in Hermes endpoints
 
