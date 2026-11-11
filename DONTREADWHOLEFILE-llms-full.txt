@@ -9018,6 +9018,8 @@ Creates a fresh profile with bundled skills seeded. It gets the current profile'
 - `--isolated-auth` copies the logins (`auth.json`) once instead of sharing them. A profile created from a named profile always gets a copy of that profile's logins; its subscription (single-use OAuth) logins can't be copied, so for those providers the new profile reads the default profile's and `profile create` says so.
 - `--no-credentials` copies no keys, logins or model; run `mybot setup` afterwards.
 
+When a gateway is running for the current profile, `profile create` asks it to make the profile, so the CLI, the dashboard and the Desktop app all create through the same running process. With `HERMES_TUI_GATEWAY_URL` set, the profile is made on that gateway's machine; if it can't be reached the command fails and nothing is created locally. With no gateway running, the profile is made in the terminal's own process, as before.
+
 If you plan to use this profile as a kanban worker (or want the kanban orchestrator to route work to it), pass `--description "<role>"` at create time so the orchestrator knows what it's good at:
 
 ```bash
@@ -19879,7 +19881,7 @@ Top-level model-facing `delegate_task` calls run in the background automatically
 
 - Normal follow-up messages do not cancel background children, and neither does stopping the current turn: Ctrl+C, Esc, the Desktop/TUI Stop button and an ACP cancel end only the turn. The `/stop` command (gateway `/stop` — also when the session is idle after the dispatching turn ended — or CLI `/stop`) ends the session's running background delegations, and closing or resetting the owning session does the same.
 - Explicit session close/reset interrupts that session's background children. In the CLI and TUI, the gateway owns the session and the client only views it: when the last viewer exits or runs `/new` (a TUI resume switch counts too), the gateway interrupts that session's background children at once and refuses new ones for it until a viewer opens the session again. A plain detach cancels nothing: closing Desktop, a dropped connection, or exiting while another viewer is still attached leaves the work running. Background processes (`terminal(background=True)`) keep running either way.
-- A completion for a CLI or TUI session — a background child's result (including an interrupted one), or a `notify_on_complete` process exit or watch-pattern notice — that reaches the head of the session's queue while no viewer is attached does not start a turn. It is written into the session as a note, and the next turn reads it (for example after `hermes chat --resume`). If a viewer is attached by then, including one that came back after the completion arrived, the completion runs as a turn as before. One exception: a background delegation whose final result includes a failed child (an error, a timeout, a provider refusal, a stuck child a stall watchdog had to stop, or an unknown outcome after a restart, but not a child you or the parent stopped) runs as a turn, so the parent can re-dispatch the work or report the failure without waiting for you to come back. This happens at most three times in a row while nobody is watching: a further failure is written as a note until you attach or send a message, so a parent that keeps re-dispatching into the same failure cannot loop. It does not happen in a chat you closed (exit or `/new`), and a manual cron run's result (`cronjob(action='run')`) stays a note. When a child failed for a reason that repeats on the same model (a safety-filter refusal `content_policy_blocked`, billing, authentication, an unknown model), the result tells the parent not to re-dispatch it unchanged: use a different model, or report it. Messaging chats have no viewers and are unchanged: their completions still start a turn.
+- A background child's final result (including an interrupted one) or a `notify_on_complete` process exit for a CLI, TUI, Desktop or web session runs as the parent's turn whether or not a viewer is attached, so the work carries on while your laptop sleeps, the connection drops or the tab is closed. Results for a chat you closed (exit, `/new`, or a TUI resume or branch switch) are written into that session as a note instead, and the next turn reads it (for example after `hermes chat --resume`). A watch-pattern notice, the early per-task failure notice and a manual cron run's result (`cronjob(action='run')`) are also notes while no viewer is attached. A result with a failed child (an error, a timeout, a provider refusal, a stuck child a stall watchdog had to stop, or an unknown outcome after a restart) wakes the parent at most three times in a row while nobody is watching: a further failure is written as a note until you attach or send a message, so a parent that keeps re-dispatching into the same failure cannot loop. Successful results and `notify_on_complete` process exits (whatever their exit code) have no such limit. When a child failed for a reason that repeats on the same model (a safety-filter refusal `content_policy_blocked`, billing, authentication, an unknown model), the result tells the parent not to re-dispatch it unchanged: use a different model, or report it. Messaging chats have no viewers and are unchanged: their completions still start a turn.
 - A Hermes process restart does **not** resume a running child. Its attempt becomes `unknown` because Hermes cannot prove which side effects happened.
 - A child that completed before restart but whose result was not delivered is restored and routed back through the owning session's normal checks.
 - Stopped children return a structured result (`status="interrupted"`, `exit_reason="interrupted"`) whose `summary` is the last text the child produced before the stop (the interrupt placeholder moves to `error`). The stop recurses down the spawn tree — an orchestrator child's synchronous workers are interrupted first and their partial results roll up into the child's own interrupted result — and each background unit's result re-enters the conversation right away as its normal completion notice (`Subagent Task Interrupted: …`), so nothing waits for the child to exhaust its budget.
@@ -63959,6 +63961,16 @@ ensure lifecycle and a single-use private control ticket, not service installati
 An explicit `HERMES_TUI_GATEWAY_URL` remains remote-only: failed connection or
 authentication never launches a local replacement.
 
+`hermes profile create` uses the same dial (`hermes_cli/profile_provision_gateway.py`): a ready
+owner for the terminal's profile (discovery only, never started for this) or the URL's gateway
+runs `profiles.create` in the connection's profile and returns the receipt the CLI prints
+(`report`). With no owner, or a local one that predates those fields (`-32601` / `4000`), the CLI
+creates in-process; a URL's gateway is never replaced by a local create. A refused create keeps its
+type (`error.data.type`); a socket lost after the request was sent, or a reply without a complete
+receipt, is reported as unknown, never retried. The `~/.local/bin` wrapper is written by the CLI,
+never by the gateway, and only when the profile the gateway made is the directory `-p <name>` selects
+on this machine (a loopback URL alone is not enough: a tunnel or container can serve another home).
+
 The client prints the persisted `Session:` ID to stderr. Resume with
 `hermes --cli chat --resume ID`. Input is admitted with a fresh `input_id`; events
 and final replies come from the authority. `/quit`, `/exit`, `/detach`, EOF and
@@ -68174,6 +68186,56 @@ consistently.
 Both scopes are `contextvars`, so they propagate into executor worker threads
 via `copy_context()` and unwind deterministically — nothing is written to
 `os.environ`, ever.
+
+### One scope value
+
+The scope, the home override, the secret scope and the terminal policy are one
+immutable value, `hermes_scope.ScopeState`, in a single contextvar. The scope is
+`hermes_scope.Scope(tenant, agent, actor, owner=, can_administer=)`:
+
+- `actor` is `Principal(id)` (a person) or `System(reason)` (cron, kanban,
+  housekeeping).
+- `owner` is the agent's one owner: a `Principal` for a personal agent or a
+  `Group` for a shared one. Other people may use a personal agent when its owner
+  shares it.
+- `can_administer` says whether the activity may change the agent itself (keys,
+  settings, plugins, cron, deletion). Every turn still updates the agent's memory
+  and skills. A hosted scope must name both, from the signed claim; a local scope
+  defaults to the local person as owner, administering.
+- A `TurnScope` adds `session`, `turn` and `fence`: the `Fence(epoch, generation)`
+  the turn's admission was claimed under (`agent.runtime_scope.claim_fence(row)`).
+
+`agent/runtime_scope.py` is the only module that turns a scope into profile
+state:
+
+- `bind_profile_scope(home)` binds the scope plus all three pieces as
+  one change and removes it on exit. The process's own home keeps its launch
+  semantics; any other home is hydrated from that profile's sources and stamped
+  as routed. It refuses inside a hosted scope.
+- `bind_state(scope, ...)` returns the change's token, for a host that holds it
+  across calls (the TUI turn, the managed worker) or deliberately binds less.
+- `bind_turn(session_id, turn_id, fence)` marks a turn inside a bound scope.
+
+Inside a hosted scope, a bind must keep the tenant, agent, actor, owner and
+administration right; anything else raises `ScopeSwitchRefused`.
+
+A reset removes its own change and replays the later ones, except those made
+inside a scope the result no longer has. A reset that is stale, repeated, out of
+order or made from a copied context therefore lands on a state that whole binds
+produce, never one profile's home beside another's secrets. Leaving a hosted
+agent by any reset other than the bind that entered it raises
+`ScopeSwitchRefused`.
+
+The legacy setters (`set_hermes_home_override`, `set_secret_scope`,
+`set_terminal_scope`, `install_profile_terminal_scope`) keep working. Inside a
+bound scope, a call naming another profile moves the whole scope in a local
+install and raises `ScopeSwitchRefused` in a hosted one. Clearing one piece of a
+bound scope (`set_secret_scope(None)`, `set_terminal_scope(None)`) refuses. A
+raw terminal policy (a session's frozen policy) goes through
+`bind_terminal_policy(policy, profile_home=...)`, which inside a bound scope
+accepts only a policy owned by the bound agent. The code-health rule HX016 blocks new direct calls, including
+through relative imports; existing ones migrate when their function is next
+edited.
 
 ## Workstream A: context-local secret scope
 
@@ -77143,6 +77205,95 @@ to), set `session_isolated_when_nonpersistent = True`. With
 sandbox identity instead of sharing one — without this, two independent
 ephemeral runs could attach one live VM and delete it out from under each
 other.
+
+## Hosted scopes
+
+A hosted deployment runs many tenants' agents in one Hermes process, and each
+agent's commands, code, background processes and files live in that agent's
+own remote sandbox. A backend that provides those sandboxes sets
+`serves_hosted_scopes = True`. With a hosted `hermes_scope.Scope` bound
+(a tenant other than `local`), Hermes refuses every backend without it, the
+built-ins included, so nothing a hosted agent runs ever runs on the Hermes host.
+
+**Identity.** The sandbox is the agent's, not the task's or the session's:
+`SandboxIdentity(scope.tenant, scope.agent)` from
+`tools/environments/sandbox_scope.py`, never a tool argument, task id or
+profile path. All of an agent's sessions share one sandbox; two agents never
+do, even with the same agent name in different tenants. `create_environment`
+additionally receives `scope=` (the bound scope) and `sandbox=` (the
+identity), and `task_id` is `sandbox.key`. Create or resume the sandbox that
+`sandbox` names and nothing else.
+
+**The guard.** Hermes wraps the environment you return in
+`ScopedEnvironment`. Every call made through it first checks that the bound
+scope names the same agent, and raises `CrossAgentHandleRefused` otherwise
+(including when no scope is bound), then passes that scope to your method as
+`scope=`. Your environment must implement the hosted operation interface:
+`execute`, `cleanup`, `stop_idle`, `start_process`, `attach_process` and
+`stop_process`, plus `fetch_file`, `fetch_realpath` and `get_temp_dir` when it
+has them, each accepting `scope=` (a named parameter or `**kwargs`). An
+environment that lacks one, or would drop the scope, is refused with
+`HostedSandboxRequired` when it is created. The idle reaper runs with no scope
+bound: its `stop_idle` (suspend: keep the workspace, resume on the next call)
+and `cleanup` (destroy) calls run under the scope that created the sandbox. An
+idle hosted sandbox is always suspended with `stop_idle`, never destroyed in
+its place; a sandbox with a background process still running is never reaped.
+
+**Tools.** In a hosted scope the terminal, `execute_code` (always the remote
+kernel, never the host's), background processes and the file tools (read,
+write, patch, search) all go through your environment. The file tools never
+take a host fast path and never open, write, list, stat or dereference the
+requested path on the host: their path policies (credential denylists,
+protected files) judge the path's lexical form. Media the agent names (vision,
+video, image-generation references) is read inside the sandbox, and an
+oversized tool result is written into it, never on the host. Background
+processes, and the completion, watch and heartbeat events they produce, carry
+the agent's sandbox key; another agent's process is indistinguishable from a
+missing one and its events stay queued for it.
+
+**Refused in a hosted scope.** Tools with no sandbox route yet fail closed
+before any setup, file or process (`tools/hosted_tool_policy.py`): the
+browser tools, computer use and desktop UI, image/video generation, text to
+speech, skills, cron jobs and their scripts, delegation, kanban, catalog and
+connection management, onboarding, and every MCP server from the profile's
+config (stdio servers are never started). So are the paths outside the tool
+registry that would act on the host: checkpoints and rollback, inline skill
+shell, `@`-references, the workspace git probe, media delivery by host path,
+connector file inputs, document extraction and voice transcription.
+
+**Long-lived processes.** A hosted environment also implements:
+
+```python
+def start_process(self, name, argv, *, child_env=None, scope): ...  # -> ProcessStream
+def attach_process(self, name, *, scope): ...                        # -> ProcessStream | None
+def stop_process(self, name, *, scope): ...                          # -> bool
+```
+
+`ProcessStream` (from `sandbox_scope`) holds byte pipes `stdin` and `stdout`
+and a `poll()` that returns the exit status or `None`. The stream Hermes hands
+back wraps yours: every pipe operation and `poll()` checks the bound scope, so
+a stream acquired by one agent is refused to any other holder. A later call in the same
+session attaches with the `ProcessRef` from the first stream; a reference that
+names another agent's sandbox is refused before your method runs. The built-in
+backends implement these too (`tools/environments/base_processes.py`: the
+local backend on this host, docker/ssh and `supports_streams` plugins through
+their exec prefix). Suspending a sandbox once its processes are idle-stopped,
+and network isolation between sandboxes, are yours.
+
+**Credentials** reach a hosted sandbox as broker references
+(`sandbox_scope.CredentialRef`), never as values from the secret store. No
+broker exists yet, so Hermes passes none.
+
+**Conformance.** `tools/environments/sandbox_conformance.py` holds the
+isolation checks Hermes runs against its recording stub backend
+(`tests/tools/test_sandbox_scope_conformance.py`): A's tools only address A's
+sandbox; a handle naming another agent is refused; no file tool or media read
+touches the host filesystem (checked with a planted host file and symlink, an
+audit hook and `stat`/`lstat`/`readlink` observation); a background process
+started by A, and its events, are invisible to B; an oversized result stays in
+the sandbox; running work keeps a sandbox alive and an idle one is suspended
+under its owner's scope; host-only tools are refused. Run the same checks
+against your provider.
 
 ---
 
