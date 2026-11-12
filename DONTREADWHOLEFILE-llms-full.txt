@@ -2984,7 +2984,7 @@ for the exact supported subset and trust boundary.
 ## Interface Layout
 
 :::info The classic CLI is a gateway client
-`hermes chat` (and the bare `hermes` prompt when `display.interface` is `cli`) no longer runs the agent inside your terminal process. It discovers or starts the profile's gateway (`hermes gateway ensure`), creates or resumes the session there, and attaches over the gateway's local WebSocket — the same session a Desktop window, the TUI, or a Telegram topic can open at the same time. Closing the terminal detaches (`Detached; accepted work continues at the gateway.`); it does not cancel the turn. Your working directory, `--model`, `--provider`, `--reasoning`, `--toolsets`, `--max-turns`, `--skills`, `--checkpoints`, `--yolo`, `--accept-hooks`, `--pass-session-id`, `--ignore-rules`, `--base-url`/`--api-key`, and `--safe-mode`/`--ignore-user-config` are frozen into the session at creation; `--resume` may repeat the same values but cannot change them. `--resume <id-or-title>` and `-c <title>` name the session; the gateway resolves the title (exact id first, then the latest `"<title> #N"` continuation, followed to its live tip) among the sessions you may read, and reports `No session found matching '…'` (exit 1) otherwise. Bare `-c` and `--resume latest` resume this workspace's most recent CLI session through the gateway. `-c <title> --create-if-missing` creates a session with that title when none exists and resumes it when one does, so programmatic callers (Bot Mode's `Bot Chat` turns) get a deterministic thread. Options that only make sense for an in-process agent — `--image`, `--worktree`/`-w`, `--no-restore-cwd`, `--run-budget`, `--verbose`/`-v`, `--compact`, and `--create-if-missing` without `-c <name>` — are refused up front (`Unsupported gateway CLI options: …`, exit 2); the refusal lists, per flag, where that capability lives now (the TUI flag, the `config.yaml` key, or the `hermes` subcommand), and nothing falls back to a local agent. A `--safe-mode` / `--ignore-user-config` launch reads no profile default model, so it must name one; the refusal prints a complete example such as `hermes chat --safe-mode --provider openrouter --model anthropic/claude-sonnet-4 -q "hello"`. In this mode the slash surface is `/stop`, `/approve <id> <choice>`, `/answer <id> <text>`, `/discard <admission_id>`, `/branch [title]`, `/model <model> [--provider name]`, `/compress [here [N] | <focus>] [--preview]`, `/yolo [on|off]`, `/help` and `/quit`; other slash commands print `Unsupported gateway CLI command; use /help.` Use the TUI (`hermes --tui`) for the full slash registry.
+`hermes chat` (and the bare `hermes` prompt when `display.interface` is `cli`) no longer runs the agent inside your terminal process. It discovers or starts the profile's gateway (`hermes gateway ensure`), creates or resumes the session there, and attaches over the gateway's local WebSocket — the same session a Desktop window, the TUI, or a Telegram topic can open at the same time. Closing the terminal detaches (`Detached; accepted work continues at the gateway.`); it does not cancel the turn. A lost terminal (closed tab, dropped SSH or VS Code remote link, SIGHUP/SIGTERM) is a disconnect: the session's background subagents keep running and their results still reach the session. `/exit`, `/quit`, `/new` and Ctrl+D close the chat and stop them. Your working directory, `--model`, `--provider`, `--reasoning`, `--toolsets`, `--max-turns`, `--skills`, `--checkpoints`, `--yolo`, `--accept-hooks`, `--pass-session-id`, `--ignore-rules`, `--base-url`/`--api-key`, and `--safe-mode`/`--ignore-user-config` are frozen into the session at creation; `--resume` may repeat the same values but cannot change them. `--resume <id-or-title>` and `-c <title>` name the session; the gateway resolves the title (exact id first, then the latest `"<title> #N"` continuation, followed to its live tip) among the sessions you may read, and reports `No session found matching '…'` (exit 1) otherwise. Bare `-c` and `--resume latest` resume this workspace's most recent CLI session through the gateway. `-c <title> --create-if-missing` creates a session with that title when none exists and resumes it when one does, so programmatic callers (Bot Mode's `Bot Chat` turns) get a deterministic thread. Options that only make sense for an in-process agent — `--image`, `--worktree`/`-w`, `--no-restore-cwd`, `--run-budget`, `--verbose`/`-v`, `--compact`, and `--create-if-missing` without `-c <name>` — are refused up front (`Unsupported gateway CLI options: …`, exit 2); the refusal lists, per flag, where that capability lives now (the TUI flag, the `config.yaml` key, or the `hermes` subcommand), and nothing falls back to a local agent. A `--safe-mode` / `--ignore-user-config` launch reads no profile default model, so it must name one; the refusal prints a complete example such as `hermes chat --safe-mode --provider openrouter --model anthropic/claude-sonnet-4 -q "hello"`. In this mode the slash surface is `/stop`, `/approve <id> <choice>`, `/answer <id> <text>`, `/discard <admission_id>`, `/branch [title]`, `/model <model> [--provider name]`, `/compress [here [N] | <focus>] [--preview]`, `/yolo [on|off]`, `/help` and `/quit`; other slash commands print `Unsupported gateway CLI command; use /help.` Use the TUI (`hermes --tui`) for the full slash registry.
 :::
 
 If a running turn loses its owner while your finite CLI query is queued, the CLI
@@ -6340,7 +6340,7 @@ Platforms without an override fall back to the global `tool_progress` value. Val
 
 Signal is listed as a valid platform key because the setting can be saved per platform, but the current Signal adapter cannot edit sent messages and does not render tool-progress bubbles. Keep Signal `tool_progress` set to `off`; use the CLI or an editing-capable messaging platform if you need to watch each tool call live.
 
-`interim_assistant_messages` is gateway-only. When enabled, Hermes sends completed mid-turn assistant updates as separate chat messages. This is independent from `tool_progress` and does not require gateway streaming.
+`interim_assistant_messages` is gateway-only. When enabled, Hermes sends completed mid-turn assistant updates as separate chat messages. This is independent from `tool_progress` and does not require gateway streaming. When disabled, text the model writes in the same message as a `clarify` question is still sent just before the question. The question waits up to 15 seconds in total for that send; a send that is still running after that does not hold the question back, so on a very slow connection the choices can arrive before the end of their explanation.
 
 `show_commentary` (default `true`) controls Codex Responses models' commentary channel — the polished progress narration these models produce alongside their private reasoning. When enabled, each completed commentary message is delivered as a visible mid-turn update (on the gateway this also requires `interim_assistant_messages`). Set it to `false` if the extra narration annoys you: commentary then falls back to the reasoning channel and is only shown when `show_reasoning` is enabled.
 
@@ -7009,6 +7009,9 @@ delegation:
   max_spawn_depth: 1                        # Delegation tree depth cap (1-3, clamped). 1 = flat (default): parent spawns leaves that cannot delegate. 2 = orchestrator children can spawn leaf grandchildren. 3 = three levels.
   orchestrator_enabled: true                # Global kill switch. When false, role="orchestrator" is ignored and every child is forced to leaf regardless of max_spawn_depth.
   oneshot_max_children: 2                   # Total subagents a one-shot run (hermes chat -q / --oneshot) may spawn; 0 = unlimited. Interactive and gateway sessions are never capped by this.
+  resumable_ttl_hours: 48                   # A child stopped by a restart, crash or provider failure stays continuable (delegate_task action=continue) this long, and its worktree is kept from the startup sweep.
+  max_resumable: 32                         # Per profile, how many such children keep their worktree pinned; the oldest beyond it loses its pin (the record stays).
+  auto_resume: false                        # Opt-in: resume such children automatically. Off = you continue them.
   gateway_mode: auto                        # Gateway sessions: auto | inline | background. auto = join children inside the turn (one answer) on a messaging chat whose display.interim_assistant_messages is off. See Subagent Delegation → Messaging chats without interim messages.
 ```
 
@@ -19279,6 +19282,8 @@ Subagents start with a **completely fresh conversation**. They have zero knowled
 
 One exception: when the parent has a resolved workspace directory, every subagent's system prompt embeds that workspace's **project context files** (`.hermes.md` > AGENTS.md chain > CLAUDE.md > `.cursorrules` — the same discovery, priority, and size caps as the main agent's system prompt; SOUL.md is excluded). Subagents working in a repo operate under the repo's own conventions without having to rediscover them.
 
+The `context` and `goal` arrive as the subagent's first user message, context first. Its system prompt carries nothing task-specific, so the subagents of one parent send an identical prompt prefix and can read each other's prompt cache, including a context they share. That first message is kept verbatim through context compression.
+
 This means the parent agent must pass **everything** the subagent needs in the call:
 
 ```python
@@ -19296,7 +19301,7 @@ delegate_task(
 )
 ```
 
-The subagent receives a focused system prompt built from your goal and context, instructing it to complete the task and provide a structured summary of what it did, what it found, any files modified, and any issues encountered.
+The subagent's first message is your context followed by the goal. Its system prompt instructs it to complete the task and provide a structured summary of what it did, what it found, any files modified, and any issues encountered.
 
 ### Forwarding Images to a Subagent
 
@@ -19736,6 +19741,20 @@ The parent agent orchestrates its own running children with the same `delegate_t
 
 Control actions run synchronously in-turn (never backgrounded), are scoped to the caller's own spawn tree — a conversation can never see or control another session's children — and never consume the per-turn subagent spawn cap, so `stop` keeps working even after the cap is hit.
 
+**Continue a finished child.** `{"action": "continue", "subagent_id": "sa-0-1a2b3c4d", "message": "now add tests for it"}` gives a child that already returned its result a follow-up. The child is rebuilt on the same route (model, provider, profile) and toolsets, its history is loaded from its saved transcript, and `message` becomes its next turn; it keeps its `subagent_id` and session (the transcript appends, like `--resume`) and runs as a new background delegation with its own `delegation_id`, so the result arrives as a normal completion. A still-running child is refused with a pointer to `steer`, and so is a child whose inherited route now resolves to a different provider or endpoint because the parent switched since it ran. Only the owning conversation (or an ancestor in its spawn tree) can continue a child; background processes it started are gone, so it gets a fresh terminal, which starts in the directory and worktree the child stopped in. A continue is an ordinary dispatch: a closed chat, `max_concurrent_children`, `max_spawn_depth` and the spawn pause all refuse it the same way they refuse a spawn. It is not offered in one-shot sessions or managed worker sessions.
+
+**Resumable after a restart or crash.** Every child also keeps a durable record in the profile's `state.db`, so `continue` works after a gateway restart, a hard kill or a PC crash, not only while the process still remembers it. After a restart the child's route is re-resolved from its own routing request and must land on the same provider and endpoint. A child that did not complete and was not stopped by you or its parent (gateway shutdown, a crash, a usage limit, a provider refusal) is *resumable*: its completion entry carries `resume_mode`, and a limit failure also carries `failure_resets_at` (and `usage_limit` on a plan window) so you know when continuing can succeed. `resume_mode` is one of:
+
+| `resume_mode` | Typical cause | What continuing needs |
+|---|---|---|
+| `AUTO_AT` | usage/rate limit with a reset time, transient provider errors | wait until `failure_resets_at` |
+| `AUTO_ON_BOOT` | gateway shutdown, crash or hard kill | nothing; check git state and the last tool before re-running side effects |
+| `ON_FIX` | credits, auth, model access, account policy, request-shape errors | you fix the cause first |
+| `REPAIR_THEN_CONTINUE` | the conversation no longer fits, or an image/reasoning part is rejected | the transcript needs repairing first |
+| `HANDOFF` | a provider safety refusal of this conversation | another model, or the parent takes the work over |
+
+A resumable child's worktree (where its terminal was when it stopped, plus any worktree it created) is kept from the startup worktree sweep while its record lives: `delegation.resumable_ttl_hours` (default 48), at most `delegation.max_resumable` (default 32) per profile; beyond the cap the oldest loses its pin first. When the pin ends the normal sweep archives the tree to `refs/hermes/archive/` before removing it. Completed children and children you stopped are not pinned. Nothing resumes on its own unless you opt in with `delegation.auto_resume: true` (default `false`; reserved for the scheduler that reads `resume_mode`).
+
 ### From the TUI / gateway (session-facing)
 
 `steer_subagent(subagent_id, text)` in `tools/delegate_tool_registry.py` is the redirection-side mirror of `interrupt_subagent()`: it queues text into a live child through the same mechanism as [`/steer`](../../reference/slash-commands.md) — the text is appended to the child's last tool result at its next iteration boundary, the in-flight tool call is never cut, and the child sees it as an out-of-band user message. Programmatic hosts reach it through the session-scoped `subagent.steer` gateway RPC, which sits beside `subagent.interrupt`:
@@ -19964,6 +19983,9 @@ delegation:
   # worktree_isolation: false               # Give each child its own git worktree (see Worktree Isolation above)
   # max_spawn_depth: 1                      # Tree depth (floor 1, no ceiling, default 1 = flat). Raise to 2 to allow orchestrator children to spawn leaves; 3+ for deeper trees.
   # orchestrator_enabled: true              # Disable to force all children to leaf role.
+  # resumable_ttl_hours: 48                 # How long a stopped child stays continuable after a restart, worktree kept
+  # max_resumable: 32                       # Resumable children per profile whose worktree is kept (oldest unpinned first)
+  # auto_resume: false                      # Opt-in: resume such children without being asked
   model: "google/gemini-3-flash-preview"             # Optional provider/model override
   provider: "openrouter"                             # Optional built-in provider
   api_mode: anthropic_messages                       # optional; auto-detected from base_url for anthropic_messages endpoints
@@ -21261,6 +21283,12 @@ hermes kanban notify-unsubscribe t_abcd \
 
 A subscription removes itself automatically once the task reaches `done` or `archived`; no cleanup needed.
 
+When an agent runs `notify-subscribe` from inside a gateway chat (through its terminal tool) and the
+target is that same chat (and topic), a missing `--user-id` is filled with the sender of the turn. In groups with
+`group_sessions_per_user` (the default), that keeps the wake in the participant's own session instead
+of a second, shared one. Subscriptions to any other chat or topic never take the caller's id, and
+neither does one given an explicit `--user-id-alt`.
+
 **Discord threads under `profile_routes`:** when the gateway multiplexes profiles and routes a *channel*
 to a profile, a subscription created from the CLI for a *thread* in that channel needs the thread's route
 anchors, or the notifier cannot match it to any route and skips it (logged once at WARNING). Pass them
@@ -21273,6 +21301,10 @@ hermes kanban notify-subscribe t_abcd \
 ```
 
 Subscriptions created from inside the chat (`/kanban create`, `kanban_create`) record these anchors automatically.
+A Telegram forum topic, or a Slack DM thread, lives inside its own chat (`chat_id` is the group or DM, not
+the thread), so it needs no `--parent-chat-id`: the notifier matches it against the route that names that chat.
+That needs a stated `--chat-type` (`dm`, `group` or `channel`; the gateway records it for you). A row without one
+may store the thread's own id as `chat_id`, so it still needs `--parent-chat-id` to reach a channel route.
 
 ### Delivery modes
 
@@ -22280,6 +22312,8 @@ What ends a kernel:
 - **Timeout or interrupt.** A cell that hits the timeout (or is interrupted) kills the kernel process and its state is lost on purpose; the result says so and the next call starts a fresh kernel.
 - **`reset=true`.** The agent can pass `reset: true` to discard the kernel's state and start clean. This is also the way to pick up environment changes: a kernel's environment is frozen when it spawns, so a newly allowlisted passthrough variable is invisible until the kernel is reset.
 - **Idle timeout and eviction.** Kernels die with the session, after `code_execution.kernel_idle_timeout` idle seconds (default 1800), or when more than `code_execution.max_session_kernels` (default 4) top-level sessions' kernels are alive and the oldest is evicted (running subagents' kernels do not count against the cap).
+
+**Edited modules.** A kernel keeps every module it has imported, so after a project file is edited the next cell still runs the code that was loaded earlier. When that happens the result carries a warning naming the edited modules (`warning` on the local kernel, `kernel.warning` on remote backends), and the agent can either `importlib.reload()` them or pass `reset: true`. Kernel state is never discarded for this; standard-library and installed packages are not watched.
 
 The security envelope is the same as a one-shot script: environment scrubbing, the tool whitelist, and the per-call tool budget all apply to every cell, and tool-call authority (approvals, session, allow-list) is rebound on each cell.
 
@@ -25474,7 +25508,11 @@ stt:
                                     # the gateway still caches the audio file and
                                     # passes its path to the agent as part of the
                                     # inbound message, useful for custom pipelines
-                                    # (diarization, alignment, archival, etc.)
+                                    # (diarization, alignment, archival, etc.).
+                                    # When enabled, the agent gets the quoted
+                                    # transcript followed by a
+                                    # "[User sent audio: <path>]" line, so the
+                                    # recording stays reachable after STT succeeds
   provider: "local"                  # "local" (free) | "groq" | "openai" | "mistral" | "xai" | "elevenlabs" | "deepinfra"
   language: "en"                     # global hint for every provider; set "" to auto-detect
   local:
@@ -27160,6 +27198,7 @@ Only positive integers are honored. Zero, negative, non-numeric, or boolean valu
 Telegram voice bubbles require Opus/OGG audio format:
 
 - **OpenAI, ElevenLabs, and Mistral** produce Opus natively — no extra setup
+- **OpenAI-compatible servers without Opus** (Speaches/Kokoro, OpenRouter's speech route): when the server rejects `response_format: opus` with a 400/422, Hermes asks once more for MP3 and converts it with **ffmpeg**
 - **Edge TTS** (default) outputs MP3 and needs **ffmpeg** to convert:
 - **MiniMax TTS** outputs MP3 and needs **ffmpeg** to convert for Telegram voice bubbles
 - **Google Gemini TTS** outputs raw PCM and uses **ffmpeg** to encode Opus directly for Telegram voice bubbles
@@ -28237,6 +28276,8 @@ By default, messaging a busy agent redirects its active turn (a running foregrou
 - `queue` — follow-up messages wait and run as the next turn after the current task finishes. Each follow-up (text, voice note, video, document) gets its own turn in arrival order; only a rapid photo burst is merged into one album turn.
 - `steer` — follow-up messages are injected into the current run via `/steer`, arriving at the agent after the next tool call. No interrupt, no new turn. Falls back to `queue` behavior if the agent hasn't started yet.
 
+A steer carries text only, so a message with an attachment (a photo, file or video, including one captioned `/steer ...`) is queued with its attachment as the next turn instead. With no agent running, `/queue` or `/steer` as an attachment's caption (bare, or with text) sends the attachment as a normal message.
+
 Gateway steers (including explicit `/steer`) and active-turn redirects carry the requesting event's available platform, chat, thread, sender, message, profile, and scope identifiers as per-message JSON context. With `privacy.redact_pii: true`, identifiers in this model-visible context are hashed on supported platforms, including alternate and parent identifiers; the original event identifiers remain internal for routing. Otherwise identifiers are preserved exactly. Neither mode changes the session's system prompt or chooses a fallback reply destination. The context is routing data, not authorization or a guarantee of automatic delivery.
 
 ```yaml
@@ -28276,6 +28317,10 @@ display:
   # Only applies where tool_progress is already enabled.
   tool_progress_grouping: accumulate   # accumulate | separate
 ```
+
+An unrecognised `tool_progress` value — a typo, or a mode copied from another tool — is not read as a
+request for more output: the gateway logs it once and keeps the platform's own default, so a Telegram
+chat whose tier is `off` stays quiet.
 
 ### `log` mode — audit file instead of chat messages
 
@@ -29982,12 +30027,14 @@ gateway:
 
 **Rich Messages (Bot API 10.1).** Final replies that contain constructs the legacy MarkdownV2 path degrades — tables, task lists, collapsible `<details>`, and block math — are sent with Telegram's native [`sendRichMessage`](https://core.telegram.org/bots/api#sendrichmessage) using the agent's **raw markdown**, so they render natively with no client-side flattening. In DMs, the default `rich_drafts: false` keeps the streaming preview plain — it uses Telegram's ephemeral draft transport with legacy rendering (tables and other rich-only constructs stay as raw markdown in the preview) — then persists the completed response with `sendRichMessage`. Setting `rich_drafts: true` makes the live preview use `sendRichMessageDraft` too. Edit-based streams can finalize an existing preview in place through `editMessageText`'s `rich_message` parameter. Ordinary replies (plain prose, bold/italic, simple lists) stay on the MarkdownV2 path for consistent font weight and spacing across clients.
 
-The rich path is skipped automatically when content exceeds the 32,768-character rich text limit, and any rejection from Telegram (unsupported endpoint on an older `python-telegram-bot`, parser error, oversized blocks/columns) **transparently falls back** to the MarkdownV2 path — your message is never lost. Transient/network errors are *not* silently re-sent (no duplicate final message).
+A rich-eligible message longer than the 32,768-character rich text limit is sent as several rich messages, split between blocks (a `<details>` section, table or code block is never cut unless it alone is over the limit, in which case a table repeats its header and a code block reopens in the next part). Any rejection from Telegram (unsupported endpoint on an older `python-telegram-bot`, parser error, oversized blocks/columns) **transparently falls back** to the MarkdownV2 path — your message is never lost. Transient/network errors are *not* silently re-sent (no duplicate final message).
 
 **MarkdownV2 fallback.** When the rich path is unavailable for a message, Hermes converts markdown to MarkdownV2. Since MarkdownV2 has no native table syntax, pipe tables are normalized:
 
 - **Small tables** are flattened into **row-group bullets** — each row becomes a readable bulleted list under the column headings. Good for 2–4 columns and short cells.
 - **Larger or wider tables** fall back to a **fenced code block** with aligned columns so nothing collapses.
+
+LaTeX symbol macros in prose (`\rightarrow`, `\leq`, `\alpha`, ...) are shown as the symbols they name (→, ≤, α), and an inline `$x \leq y$` drops its dollar signs once it is plain text, since MarkdownV2 cannot typeset math. Code spans, code blocks, file paths and unknown macros keep their backslashes. On the rich path the same mapping applies only outside math spans, which Telegram typesets itself.
 
 Rich messages are **opt-in**. The default stays on the legacy MarkdownV2 path because current Telegram clients can make Bot API rich messages difficult to copy as plain text, which is especially painful for command snippets and mobile handoffs. To enable native rendering for tables/task lists/details/math:
 
@@ -30019,7 +30066,7 @@ gateway:
 
 When enabled, Hermes attaches Telegram's `LinkPreviewOptions(is_disabled=True)` to every outgoing message, including the streaming preview edits and the final edit of a streamed reply (edits that resolve a button prompt, such as an approval card, don't carry it yet), and falls back to the legacy `disable_web_page_preview` parameter on older `python-telegram-bot` versions.
 
-**Long replies and flood control.** A reply longer than Telegram's 4,096-character limit is sent as numbered parts (`(1/3)`, `(2/3)`, …). Sends to one chat are delivered one reply at a time, so a scheduled report and a DM answer landing together cannot interleave their parts, and a file upload cannot land between two parts of the text it accompanies. If Telegram's flood control refuses a part mid-way, Hermes resumes from the refused part once the penalty passes instead of re-sending the parts already on screen, and while a chat is inside a known penalty window further sends to it fail closed locally (no extra requests that would lengthen the penalty). A penalty longer than the gateway's inline wait cap is handed to the delivery ledger, which redelivers the reply with a "part of it may already have arrived above" note. File attachments (documents, photos, videos, voice) follow the same rule: a short penalty is waited out and the upload retried; a longer one schedules a single native re-upload once the window has passed, and you only see the "Couldn't deliver the file attachment" notice if that re-upload is refused too.
+**Long replies and flood control.** A reply longer than Telegram's 4,096-character limit is sent as numbered parts (`(1/3)`, `(2/3)`, …). A part boundary that falls inside bold, italic, underline, strikethrough or spoiler text closes the style at the end of one part and reopens it at the start of the next, so both parts keep the formatting. Sends to one chat are delivered one reply at a time, so a scheduled report and a DM answer landing together cannot interleave their parts, and a file upload cannot land between two parts of the text it accompanies. If Telegram's flood control refuses a part mid-way, Hermes resumes from the refused part once the penalty passes instead of re-sending the parts already on screen, and while a chat is inside a known penalty window further sends to it fail closed locally (no extra requests that would lengthen the penalty). A penalty longer than the gateway's inline wait cap is handed to the delivery ledger, which redelivers the reply with a "part of it may already have arrived above" note. File attachments (documents, photos, videos, voice) follow the same rule: a short penalty is waited out and the upload retried; a longer one schedules a single native re-upload once the window has passed, and you only see the "Couldn't deliver the file attachment" notice if that re-upload is refused too. An upload that never reached Telegram (a connect or pool failure) or that Telegram answered with its own 5xx error is retried up to three times with a short backoff. If all three fail, you get the "Couldn't deliver the file attachment" notice. An upload that may already be in the chat (the connection dropped or timed out after the file was sent) is never re-sent and posts no failure notice; it is reported as unconfirmed, so the `send_message` tool and cron delivery do not re-send it either.
 
 ## Group Allowlisting
 
@@ -55805,7 +55852,7 @@ Advanced per-platform knobs for throttling the outbound message batcher. Most us
 | `HERMES_TELEGRAM_TEXT_BATCH_SPLIT_DELAY_SECONDS` | Delay between split chunks when a single Telegram message exceeds the length limit (default: `2.0`). |
 | `HERMES_SIMPLEX_TEXT_BATCH_DELAY` | Quiet-period seconds (default: `0.8`) used to concatenate rapid-fire inbound text messages into a single MessageEvent — same pattern as Telegram's text batching. |
 | `HERMES_TELEGRAM_MEDIA_BATCH_DELAY_SECONDS` | Grace window before flushing queued Telegram media (default: `0.6`). |
-| `HERMES_TELEGRAM_FOLLOWUP_GRACE_SECONDS` | Delay before sending a follow-up after the agent finishes, to avoid racing the last stream chunk. |
+| `HERMES_TELEGRAM_FOLLOWUP_GRACE_SECONDS` | Seconds after a turn starts during which a plain Telegram text follow-up joins the queue instead of interrupting or redirecting that turn (default `3`; `0` disables the grace). Commands and media are not held. |
 | `HERMES_TELEGRAM_HTTP_CONNECT_TIMEOUT` / `_READ_TIMEOUT` / `_WRITE_TIMEOUT` / `_POOL_TIMEOUT` | Override the underlying `python-telegram-bot` HTTP timeouts (seconds). |
 | `HERMES_TELEGRAM_INIT_TIMEOUT` | Per-attempt cap (seconds) on the Telegram `initialize()` connect chain during gateway startup, so an unreachable fallback-IP chain can't block startup indefinitely (default: `30`). |
 | `HERMES_TELEGRAM_HTTP_POOL_SIZE` | Max concurrent HTTP connections to the Telegram API. |
@@ -70776,6 +70823,37 @@ def open_skill(name):
 Plugin-registered skills (`ctx.register_skill`) are not on disk under these roots; `find_all_skills()`
 returns the on-disk catalog only.
 
+### Check file paths and read YAML with Hermes's own helpers
+
+A plugin that reads or writes a path the model chose (an attachment, an export target, a file to
+summarise) should refuse the same paths Hermes's own file tools refuse: credential stores, the
+skills-hub cache, project `.env` files and anything outside `HERMES_WRITE_SAFE_ROOT`. Call these
+instead of keeping your own denylist:
+
+| Import | What it gives you |
+|---|---|
+| `agent.file_safety.get_read_block_error(path)` | An error string if Hermes's file tools would refuse to read `path`, else `None`. Pass an absolute path. |
+| `agent.file_safety.raise_if_read_blocked(path)` | The same check, raising `ValueError` on a block. |
+| `agent.file_safety.get_write_denied_error(path)` | An error string if Hermes's file tools would refuse to write `path`, else `None`. |
+| `agent.file_safety.is_write_denied(path)` | `True` when that write would be refused. |
+| `hermes_yaml.safe_load(text)` / `hermes_yaml.safe_dump(data)` | The YAML reader and writer Hermes uses for its own config. Hermes does not ship PyYAML, so `import yaml` fails unless your plugin declares it. |
+
+```python
+from agent.file_safety import get_read_block_error
+from hermes_yaml import safe_load
+
+def load_recipe(path):
+    if err := get_read_block_error(path):
+        return err
+    with open(path, encoding="utf-8") as fh:
+        return safe_load(fh)
+```
+
+Import the names themselves (`from hermes_yaml import safe_load`), as above: `hermes plugins
+validate` accepts those spellings and reports a bare `import agent.file_safety` as a private import.
+To read Hermes's own settings, use `load_config_readonly()` from `hermes_cli.config` rather than
+parsing `config.yaml` yourself.
+
 ### Ship a language pack
 
 A plugin can add a UI language or override the wording of an existing one for every surface at once —
@@ -72669,6 +72747,13 @@ the gallery. There is no separate listing to maintain.
    record (never a file inside the plugin). Local-directory, Git URL, `--ref`,
    `--allow-removed`, project and pip installs are refused, and no setting
    relaxes it.
+19. **No plugins built to reach infringing content.** A plugin whose main
+   purpose is to find, stream or download copyrighted films, shows, music, books,
+   games or software from sources that are not licensed to distribute them
+   (piracy aggregators, unofficial mirrors, cracked-release indexes) is declined,
+   however clean its code. A general-purpose tool such as a browser, downloader
+   or media player is fine; one that ships with those sources built in, or whose
+   description points users at them, is not.
 <!-- admission-rules:end -->
 
 ## Updating your entry
@@ -72830,6 +72915,12 @@ with a name allows that one name only.
 | `gateway.session_context` | `get_session_env` | plugins/index.md § platform plugins: read session identity through the task-local context |
 | `agent.redact` | `redact_sensitive_text` | plugin-llm-access.md § From the plugin's frontend: a plugin RPC method (`force=True` where secrets must never leave) |
 | `hermes_cli.plugin_session` | `session_client` | user-guide/features/plugins.md § Plugin code inside the gateway: which client created the session |
+| `agent.file_safety` | `get_read_block_error` | plugins/index.md § Check file paths and read YAML with Hermes's own helpers |
+| `agent.file_safety` | `raise_if_read_blocked` | plugins/index.md § Check file paths and read YAML with Hermes's own helpers |
+| `agent.file_safety` | `is_write_denied` | plugins/index.md § Check file paths and read YAML with Hermes's own helpers |
+| `agent.file_safety` | `get_write_denied_error` | plugins/index.md § Check file paths and read YAML with Hermes's own helpers |
+| `hermes_yaml` | `safe_load` | plugins/index.md § Check file paths and read YAML with Hermes's own helpers |
+| `hermes_yaml` | `safe_dump` | plugins/index.md § Check file paths and read YAML with Hermes's own helpers |
 
 ---
 
@@ -103977,7 +104068,9 @@ profile's job targeting an unrouted chat (or a chat routed to another profile)
 is never sent through the shared bot. Guild-only routes do not qualify a cron
 target; add a `chat_id` route for the delivery channel. Routes declaring
 `user_id` do not qualify either: cron has no authenticated inbound sender, so
-they need a separate location-only route. The routed profile does not need its
+they need a separate location-only route. Telegram DMs are the exception: a
+Telegram DM's chat id is the user's id, so a `user_id` route qualifies cron
+delivery to that user's DM without an extra route. The routed profile does not need its
 own `platforms.<platform>` block for this: the shared bot's authorization comes
 from the route, not from the satellite's config.
 
