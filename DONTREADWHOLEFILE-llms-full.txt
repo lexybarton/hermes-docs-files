@@ -9020,6 +9020,8 @@ hermes profile create mybot
 
 Creates a fresh profile with bundled skills seeded. It gets the current profile's API keys (bot tokens and allowlists left out) and model, and shares the default profile's logins, the same as the Desktop bot page's "Share keys & accounts" default. Run `mybot setup` for its gateway tokens.
 
+If a cloned profile has no model selection of its own, creation inherits the current profile's model without querying the provider's model catalog. The selected provider and model stay pinned to the source selection; URL and credential references still use the new profile's environment. The source's model-level key, key pointer and context-length settings are not copied. Explicit model selections continue to be validated.
+
 - `--isolated-auth` copies the logins (`auth.json`) once instead of sharing them. A profile created from a named profile always gets a copy of that profile's logins; its subscription (single-use OAuth) logins can't be copied, so for those providers the new profile reads the default profile's and `profile create` says so.
 - `--no-credentials` copies no keys, logins or model; run `mybot setup` afterwards.
 
@@ -30080,6 +30082,8 @@ gateway:
 
 A rich-eligible message longer than the 32,768-character rich text limit is sent as several rich messages, split between blocks (a `<details>` section, table or code block is never cut unless it alone is over the limit, in which case a table repeats its header and a code block reopens in the next part). Any rejection from Telegram (unsupported endpoint on an older `python-telegram-bot`, parser error, oversized blocks/columns) **transparently falls back** to the MarkdownV2 path — your message is never lost. Transient/network errors are *not* silently re-sent (no duplicate final message).
 
+**Long replies arrive as a file.** A reply that would need more than 8 Telegram messages (about 32,000 characters of prose) is sent as one `reply-<id>.md` document holding the complete text, with a short caption, instead of a burst of messages that can trip Telegram's flood limits. While a long reply streams, Hermes stops opening new messages once it reaches the limit, uploads the finished reply as the file, and then deletes the partial messages it had already posted for it. If the upload fails, nothing is deleted and the rest of the reply arrives as ordinary messages, so no text is lost; a message Telegram will not let the bot delete (older than 48 hours, or missing permission) simply stays. `hermes send` and the `send_message` tool do the same for an over-long message. A reply over Telegram's 50 MB document limit is split across numbered files.
+
 **MarkdownV2 fallback.** When the rich path is unavailable for a message, Hermes converts markdown to MarkdownV2. Since MarkdownV2 has no native table syntax, pipe tables are normalized:
 
 - **Small tables** are flattened into **row-group bullets** — each row becomes a readable bulleted list under the column headings. Good for 2–4 columns and short cells.
@@ -31236,6 +31240,10 @@ The Discord adapter supports native file uploads for every common media type via
 | Documents (PDF/ZIP/docx/etc.) | `send_document` — native attachment with download button |
 
 Discord's per-upload size limit depends on the server's boost tier (25 MB free, up to 500 MB). If Hermes gets an HTTP 413, the adapter falls back to a link pointing at the local cache path rather than failing silently.
+
+## Long Replies
+
+A reply that would need more than 8 Discord messages (about 16,000 characters) is sent as one `reply-<id>.md` attachment holding the complete text, with a short caption, instead of a long run of 2,000-character messages. While a long reply streams, Hermes stops opening new messages at the limit, uploads the finished reply, then deletes the partial messages it had already posted for it. If the upload fails (no **Attach Files** permission, for example), nothing is deleted and the whole reply is delivered as messages, never cut short; they go out at the pace Discord's rate limits allow (about five per channel every five seconds), and a rate-limited message is retried after the wait Discord asks for. A reply over the attachment limit is split across numbered files of at most 7 MB each.
 
 ## Receiving Arbitrary File Types
 
@@ -70967,7 +70975,8 @@ returns the on-disk catalog only.
 
 A plugin that reads or writes a path the model chose (an attachment, an export target, a file to
 summarise) should refuse the same paths Hermes's own file tools refuse: credential stores, the
-skills-hub cache, project `.env` files and anything outside `HERMES_WRITE_SAFE_ROOT`. Call these
+skills-hub cache, project `.env` files, device and `/proc` process files, and anything outside
+`HERMES_WRITE_SAFE_ROOT`. Call these
 instead of keeping your own denylist:
 
 | Import | What it gives you |
@@ -70993,6 +71002,24 @@ Import the names themselves (`from hermes_yaml import safe_load`), as above: `he
 validate` accepts those spellings and reports a bare `import agent.file_safety` as a private import.
 To read Hermes's own settings, use `load_config_readonly()` from `hermes_cli.config` rather than
 parsing `config.yaml` yourself.
+
+### Send a credentialed HTTP request without leaking it on redirect
+
+Plain `urllib.request.urlopen` follows a redirect to another host with your `Authorization` header
+still attached. `hermes_cli.urllib_security.open_credentialed_url(request, timeout=...)` opens a
+`urllib.request.Request` the way Hermes's own provider calls do: credential headers are dropped when
+a redirect leaves the original origin, and the process's installed opener (proxy, TLS trust) is kept.
+
+```python
+import urllib.request
+
+from hermes_cli.urllib_security import open_credentialed_url
+
+def fetch_models(base_url, api_key):
+    request = urllib.request.Request(f"{base_url}/models", headers={"Authorization": f"Bearer {api_key}"})
+    with open_credentialed_url(request, timeout=10) as response:
+        return response.read()
+```
 
 ### Ship a language pack
 
@@ -73066,6 +73093,7 @@ with a name allows that one name only.
 | `agent.file_safety` | `get_write_denied_error` | plugins/index.md § Check file paths and read YAML with Hermes's own helpers |
 | `hermes_yaml` | `safe_load` | plugins/index.md § Check file paths and read YAML with Hermes's own helpers |
 | `hermes_yaml` | `safe_dump` | plugins/index.md § Check file paths and read YAML with Hermes's own helpers |
+| `hermes_cli.urllib_security` | `open_credentialed_url` | plugins/index.md § Send a credentialed HTTP request without leaking it on redirect |
 
 ---
 
