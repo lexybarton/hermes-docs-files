@@ -12531,7 +12531,9 @@ it does not keep unfinished children alive after a timeout or crash.
 
 ## Sudo Support
 
-On an interactive parent session, supported sudo commands use the masked password prompt (cached for the session). This includes literal absolute or quoted executable paths and `env` prefixes with ordinary options and assignments, such as `env -u UNUSED /usr/bin/sudo id`. Passwordless sudo does not need a prompt. You can also configure `SUDO_PASSWORD` in your profile's `.env` file on the agent machine.
+On an interactive parent session, supported sudo commands use the masked password prompt (cached for the session). This includes literal absolute or quoted executable paths and `env` prefixes with ordinary options and assignments, such as `env -u UNUSED /usr/bin/sudo id`. Passwordless sudo does not need a prompt. You can also configure `SUDO_PASSWORD` in your profile's `.env` file on the agent machine. It is sent to whichever terminal backend runs the command, so set it to the sudo password of that backend (the remote host for SSH, the container user for Docker), not to a password that belongs to a different machine.
+
+Where the backend's sudo supports an askpass helper (`sudo -A`) and its temp directory allows running a small helper script, the password is handed to each sudo invocation through that helper, so other commands in the same command line never read it from stdin. Otherwise, and for commands that already pass their own `-S` or `-A`, the password goes to sudo through its stdin.
 
 Shell payloads such as `bash -c 'sudo id'`, `env -S` split strings, dynamic executable paths, and unrecognized `env` options are not interpreted by the password rewriter. Invoke sudo directly when you need the interactive prompt. This handling does not change approval rules or the guard against agent-supplied sudo passwords.
 
@@ -27305,7 +27307,7 @@ tts:
 
 Local engines (Piper, KittenTTS) load their model lazily, so without help the *first* spoken reply after you turn speech on pays the whole model load — and on a fresh install the voice download — as silence before the first word. Hermes treats the speech-output toggles as the signal that TTS is about to be needed:
 
-- **Desktop** — **Read replies aloud** is a desktop-local preference, independent of the gateway's `voice.auto_tts` setting in Settings → Voice. It migrates the shared value once, then later gateway configuration changes do not override the desktop toggle. If local storage is full or unavailable, the choice still lasts for this window; persistence across a reload remains best-effort. Turning on **Read replies aloud**, or starting a **voice conversation**, pre-loads the configured engine in the background right away. Turning both off again unloads the resident model (a Piper voice is tens of MB; KittenTTS up to ~80MB) so it isn't parked in RAM for nothing.
+- **Desktop** — **Read replies aloud** (the composer button, or **Read replies aloud in this app** in Settings → Voice) is a desktop preference that every open Desktop window follows; turning it off also stops a reply that is being read. **Read Responses Aloud** in Settings → Voice is `voice.auto_tts` for messaging and the CLI of the profile you are editing; it migrates into the desktop toggle once, and later changes to it do not override the desktop toggle. If local storage is full or unavailable, the choice still lasts for this window; persistence across a reload remains best-effort. Turning on **Read replies aloud**, or starting a **voice conversation**, pre-loads the configured engine in the background right away. Turning both off again unloads the resident model (a Piper voice is tens of MB; KittenTTS up to ~80MB) so it isn't parked in RAM for nothing.
 - **CLI / TUI** — `/voice tts` (and `/voice on` when `voice.auto_tts` is set) do the same; `/voice off` releases. A TUI attached to the shared gateway refuses `/voice tts`, because the gateway cannot play speech in that terminal.
 
 Each toggle holds a *lease* on the engine; the model is only unloaded when the last lease across surfaces is released, so switching off read-aloud in one Desktop window never pulls the voice out from under a conversation running in another. The unload waits `tts.keep_warm_seconds` (default `60`) after the last release, and any toggle turning speech back on within that window keeps the loaded model, so a wake-word loop or a quickly restarted voice conversation doesn't reload the voice each time. Set it to `0` to unload immediately. For cloud providers there is no model to hold — the toggle only makes sure a lazily-installed SDK (edge-tts, ElevenLabs, Mistral) is present. Warm-up is best-effort: if the engine can't load, the toggle still succeeds and the first reply falls back to loading on demand as before.
@@ -32700,6 +32702,13 @@ override `session_path`, keep it distinct per profile, or the profiles share one
 WhatsApp login. Bridges started by an older Hermes report no session directory
 and are restarted once, as after a bridge update.
 
+A bridge left running by a crashed gateway is adopted only when it was started
+with the settings this gateway would start one with: DM and group policy,
+allowlists, mode, reply prefix, read receipts and the other bridge settings,
+plus the bridge's `package.json`. Otherwise it is restarted, without
+re-pairing. A bridge with no such record (one started by an older Hermes) is
+restarted once.
+
 ### Bridge API authentication
 
 The bridge listens on loopback only, but loopback does not identify the caller:
@@ -32913,7 +32922,7 @@ whatsapp:
   send_read_receipts: false                 # Mark accepted inbound messages as read (blue ticks)
 ```
 
-When `send_read_receipts` is `true`, the adapter marks policy-accepted inbound messages as read after DM/group/mention filtering passes. Rejected messages (e.g., from non-allowlisted senders) are not marked read. Disabled by default for privacy. Changing this setting automatically restarts the bridge subprocess on the next connection.
+When `send_read_receipts` is `true`, the adapter marks policy-accepted inbound messages as read after DM/group/mention filtering passes. Rejected messages (e.g., from non-allowlisted senders) are not marked read. Disabled by default for privacy. Changing this setting, like any other bridge setting (DM and group policy, allowlists, mention settings, mode, `reply_prefix`, debug, owner-message forwarding, message length, chunk delay, send timeout, the media cache directories) or the bridge's `package.json`, restarts the bridge subprocess on the next connection, without re-pairing.
 
 Delivery and read status of the messages Hermes sends is logged to `gateway.log`, one line per status change (`server_ack`, `delivered`, `read`, `played`, or `error` with WhatsApp's error code). In groups, each recipient's receipt is its own line with `recipient=`. Messages typed by a person on the linked phone are not logged.
 
@@ -35806,7 +35815,7 @@ hermes webhook subscribe github-issues \
 
 This returns the webhook URL and an auto-generated HMAC secret. Configure your service to POST to that URL.
 
-New subscriptions are pinned to `--signature generic` (timestamp-bound V2 or Standard Webhooks) unless you pass `--signature github`, `gitlab` or `linear` for a provider that signs its own way. Updating an existing subscription keeps its pin.
+New subscriptions are pinned to `--signature generic` (timestamp-bound V2 or Standard Webhooks) unless you pass `--signature github`, `gitlab` or `linear` for a provider that signs its own way. Updating an existing subscription keeps its pin. A dashboard re-save of an existing route keeps its pin too, and MCP event subscriptions are pinned to `generic` when first created.
 
 ### List subscriptions
 
@@ -40680,7 +40689,7 @@ See [Memory Providers — Honcho](./memory-providers.md#honcho) for the complete
 
 When using [OpenRouter](https://openrouter.ai) as your LLM provider, Hermes Agent supports **provider routing** — fine-grained control over which underlying AI providers handle your requests and how they're prioritized.
 
-OpenRouter routes requests to many providers (e.g., Anthropic, Google, AWS Bedrock, Together AI). Provider routing lets you optimize for cost, speed, quality, or enforce specific provider requirements.
+OpenRouter routes requests to many providers (e.g., Anthropic, Google, AWS Bedrock, Together AI). Provider routing lets you optimize for cost, speed, quality, or enforce specific provider requirements. Comparing the two gateways? [Nous Portal vs OpenRouter](https://portal.nousresearch.com/compare/openrouter) covers pricing, free models and plans.
 
 :::note
 [Nous Portal](../../integrations/nous-portal.md) decides routing centrally per model and does not accept caller-supplied provider preferences; Hermes never sends the `provider` object to Portal, so `provider_routing` is simply ignored there.
@@ -82125,7 +82134,7 @@ Those pages land alongside the PRs that add the corresponding runtime. This cred
 
 # Migrate from OpenClaw
 
-`hermes import-agent openclaw` imports your OpenClaw (or legacy Clawdbot/Moldbot) setup into Hermes. This guide covers exactly what gets migrated, the config key mappings, and what to verify after migration.
+`hermes import-agent openclaw` imports your OpenClaw (or legacy Clawdbot/Moldbot) setup into Hermes. This guide covers exactly what gets migrated, the config key mappings, and what to verify after migration. Deciding between the two first? [Hermes Agent vs OpenClaw](https://hermes-agent.nousresearch.com/compare/openclaw) compares licensing, models and hosting with sources.
 
 The command comes from the official **`agent-importers` plugin** in the [plugin catalog](../user-guide/features/plugins.md), which also imports Claude Code, Codex CLI and Cursor setups ([Import from Other Agents](../user-guide/import-from-other-agents.md)). The older spelling `hermes claw migrate` still works once the plugin is installed and runs the same import.
 
@@ -84413,7 +84422,7 @@ platforms:
 
 # xAI Grok OAuth (SuperGrok / X Premium+)
 
-Hermes Agent supports xAI Grok through a browser-based OAuth device-code login flow against [accounts.x.ai](https://accounts.x.ai), using either a **SuperGrok subscription** ([grok.com](https://x.ai/grok)) or an **X Premium+ subscription** (linked X account). No `XAI_API_KEY` is required — log in once and Hermes automatically refreshes your session in the background.
+Hermes Agent supports xAI Grok through a browser-based OAuth device-code login flow against [accounts.x.ai](https://accounts.x.ai), using either a **SuperGrok subscription** ([grok.com](https://x.ai/grok)) or an **X Premium+ subscription** (linked X account). No `XAI_API_KEY` is required — log in once and Hermes automatically refreshes your session in the background. Comparing the two products? [Hermes Agent vs Grok Bot](https://hermes-agent.nousresearch.com/compare/grok-bot) covers model choice, platforms and pricing with sources.
 
 When you sign in with an X account that has Premium+, xAI automatically links the subscription status to your xAI session, so the OAuth flow works the same as it does for direct SuperGrok subscribers.
 
@@ -84713,7 +84722,7 @@ The Buzz integration was built with the community: @SHL0MS (PATH launcher + Desk
 
 # Nous Portal
 
-[Nous Portal](https://portal.nousresearch.com) is Nous Research's unified subscription gateway and **the recommended way to run Hermes Agent**. One OAuth login replaces the juggling act of separate accounts, API keys, and billing relationships across every model lab, search API, image generator, and browser provider you'd otherwise need to wire up by hand.
+[Nous Portal](https://portal.nousresearch.com) is Nous Research's unified subscription gateway and **the recommended way to run Hermes Agent**. One OAuth login replaces the juggling act of separate accounts, API keys, and billing relationships across every model lab, search API, image generator, and browser provider you'd otherwise need to wire up by hand. Comparing it with OpenRouter? [Nous Portal vs OpenRouter](https://portal.nousresearch.com/compare/openrouter) covers pricing, free models and plans with sources.
 
 If you only have time to set up one thing, set up this. The fastest path:
 
@@ -88772,7 +88781,7 @@ The mount comes back on the next WSL restart; repeat the two commands then.
 
 Hermes can optionally hand `openai/*`, `openai-codex/*` and [named custom provider](#named-custom-providers) turns to the [Codex CLI app-server](https://github.com/openai/codex) instead of running its own tool loop. When enabled, terminal commands, file edits, sandboxing, and MCP tool calls all execute inside Codex's runtime — Hermes becomes the shell around it (sessions DB, slash commands, gateway, memory and skill review).
 
-This is **opt-in only**. Default Hermes behavior is unchanged unless you flip the flag. Hermes never auto-routes you onto this runtime.
+This is **opt-in only**. Default Hermes behavior is unchanged unless you flip the flag. Hermes never auto-routes you onto this runtime. Weighing the two? [Hermes Agent vs Codex](https://hermes-agent.nousresearch.com/compare/codex) compares model choice, platforms and pricing with sources.
 
 :::tip
 Not using OpenAI Codex? `hermes setup --portal` configures a non-Codex backend with Claude/Gemini/etc. in one step. See [Nous Portal](../../integrations/nous-portal.md).
