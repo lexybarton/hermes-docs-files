@@ -3890,6 +3890,26 @@ Settings are resolved in this order (highest priority first):
 Secrets (API keys, bot tokens, passwords) go in `.env`. Everything else (model, terminal backend, compression settings, memory limits, toolsets) goes in `config.yaml`. When both are set, `config.yaml` wins for non-secret settings.
 :::
 
+### Credentials written by Hermes
+
+When Hermes itself writes a credential for a config field, the value goes to the profile's `.env` and `config.yaml` gets only a reference to it. This covers `hermes config set` on these fields, the dashboard / desktop model and auxiliary pickers, and the `hermes model` custom-endpoint and auxiliary flows:
+
+| Field | Saved in `.env` as | `config.yaml` stores |
+|---|---|---|
+| `model.api_key` (`hermes config set`) | `HERMES_MODEL_API_KEY` | `${HERMES_MODEL_API_KEY}` |
+| `model.api_key` for a custom endpoint picked in the dashboard | `HERMES_CUSTOM_<HOST>[_<PORT>][_<PATH>]_<HASH>_API_KEY` | `${...}` |
+| `auxiliary.<task>.api_key` | `AUXILIARY_<TASK>_API_KEY` | `${AUXILIARY_<TASK>_API_KEY}` |
+| `delegation.api_key` | `HERMES_DELEGATION_API_KEY` | `${HERMES_DELEGATION_API_KEY}` |
+| a new `custom_providers` entry | `HERMES_CUSTOM_<HOST>[_<PORT>][_<PATH>]_<HASH>_API_KEY` | `key_env: <that name>` |
+| `custom_providers.<N>.api_key` (`hermes config set`) | the entry's `HERMES_CUSTOM_..._API_KEY` (an entry without a `base_url` uses its name: `HERMES_PROVIDER_<NAME>_<HASH>_API_KEY`) | `${...}` |
+| `providers.<name>.api_key` (`hermes config set`), a dashboard Custom Endpoints entry | `HERMES_PROVIDER_<NAME>_<HASH>_API_KEY` | `${...}` |
+
+The path segment is only added when it is something other than `/v1`. A plugin task key that is not all lowercase (`My_Task`) also gets `_<HASH>`, so it never shares a variable with `my_task`. `<HASH>` is 8 hex characters derived from the exact endpoint URL (or provider name), so endpoints whose names look alike, such as `my-host.com` and `my.host.com`, never share a variable. Hermes refuses to overwrite a variable that another endpoint in `config.yaml` already reads with a different key. A value you type as a reference (`hermes config set model.api_key '${MY_KEY}'`) is stored as you typed it. These variables are always stripped from terminal and subprocess environments, even when `env_passthrough` lists them or `inherit_credentials` is on. With a remote config backend, which does not share `.env` between hosts, values are stored as given.
+
+A running gateway re-reads `.env` at the start of every turn, so its next message uses a newly saved key without a restart. A process that read `.env` only at startup and is not driven by gateway turns picks the key up after `/reload` or a restart; until then, an auxiliary task whose key was just saved sends the unexpanded `${VAR}` text as the key.
+
+Inline credentials already in `config.yaml` still work and are not migrated, but they are discouraged. Move one by hand with `hermes config set <field> <value>`, which rewrites it as a reference.
+
 :::tip Org deployments
 An administrator can pin specific config and secret values that a standard user
 cannot override, via a system-level managed directory. See
@@ -7013,7 +7033,8 @@ delegation:
   oneshot_max_children: 2                   # Total subagents a one-shot run (hermes chat -q / --oneshot) may spawn; 0 = unlimited. Interactive and gateway sessions are never capped by this.
   resumable_ttl_hours: 48                   # A child stopped by a restart, crash or provider failure stays continuable (delegate_task action=continue) this long, and its worktree is kept from the startup sweep.
   max_resumable: 32                         # Per profile, how many such children keep their worktree pinned; the oldest beyond it loses its pin (the record stays).
-  auto_resume: false                        # Opt-in: resume such children automatically. Off = you continue them.
+  auto_resume: false                        # Opt-in: the gateway resumes children stopped by a limit (at its reset) or a restart/crash, at most twice each, silently (no completion while it waits; see delegate_task list), until you stop it, /stop or /new. Spends tokens unattended. Off = you continue them.
+  auto_resume_deadline_minutes: 360         # With auto_resume: give up this long after a child's first stop and send the parent one failure.
   gateway_mode: auto                        # Gateway sessions: auto | inline | background. auto = join children inside the turn (one answer) on a messaging chat whose display.interim_assistant_messages is off. See Subagent Delegation → Messaging chats without interim messages.
 ```
 
@@ -7023,7 +7044,7 @@ delegation:
 
 **Subagent fallback chain:** Set `delegation.fallback_providers` to give workers their own chain (same entry shape as the top-level list). An explicitly pinned child (by provider, endpoint, or model) uses that chain only when it is declared; otherwise it fails loudly instead of borrowing the parent agent's route. For an unpinned child, an absent or `null` setting preserves parent-chain inheritance. Use `fallback_providers: []` under `delegation:` to disable child fallback entirely.
 
-**Direct endpoint override:** If you want the obvious custom-endpoint path, set `delegation.base_url`, `delegation.api_key`, and `delegation.model`. That sends subagents directly to that OpenAI-compatible endpoint and takes precedence over `delegation.provider`. If `delegation.api_key` is omitted, Hermes falls back to `OPENAI_API_KEY` only. When `delegation.provider` is set alongside `delegation.base_url`, the explicit endpoint and key still win, but that provider's request settings (`extra_body` overrides and max output tokens from your `custom_providers` entry) are carried into the subagent.
+**Direct endpoint override:** If you want the obvious custom-endpoint path, set `delegation.base_url`, `delegation.api_key`, and `delegation.model`. That sends subagents directly to that OpenAI-compatible endpoint and takes precedence over `delegation.provider`. If `delegation.api_key` is omitted and `delegation.provider` names a provider (anything but `custom`/`auto`), `delegation.base_url` is that provider's endpoint override — the same as `model.base_url` for the main agent — and the subagent uses that provider's own key (e.g. `XIAOMI_API_KEY` for `provider: xiaomi` on a token-plan URL), never the parent agent's key. Without a named provider, an omitted `delegation.api_key` inherits the parent agent's key. When `delegation.provider` is set alongside `delegation.base_url` and `delegation.api_key`, the explicit endpoint and key win, but that provider's request settings (`extra_body` overrides and max output tokens from your `custom_providers` entry) are carried into the subagent.
 
 **Per-child request settings (`request_overrides`):** `delegation.request_overrides` is a dict of request settings sent on every subagent API call. Top-level keys are API kwargs (e.g. `service_tier`); an `extra_body` sub-dict is merged into the request's `extra_body`. It is honored on **all three** resolution branches — direct `base_url`, named `provider`, and pure inherit — so the key always takes effect. Precedence: explicit `request_overrides` values merge **over** any runtime- or parent-derived overrides — top-level explicit keys win, and `extra_body` is deep-merged one level so runtime `extra_body` keys (e.g. a provider's `thinking: {type: disabled}` personality) survive unless your key redefines them. The canonical use case is OpenRouter routing hints for delegation children:
 
@@ -8673,6 +8694,12 @@ The keyword mode supports standard FTS5 query syntax:
 - `sort` — `newest` or `oldest`, on top of FTS5 ranking. Omit for relevance-only ordering (the default; suitable for exploratory recall). Use `newest` for "where did we leave X" questions, `oldest` for "how did X start" questions.
 - `detail` — `adaptive` (default) fully hydrates only the top discovery result; `full` hydrates every discovery result.
 - `role_filter` — comma-separated roles to include. Discovery defaults to `user,assistant` (tool output is usually noise). Pass `user,assistant,tool` to include tool output (debugging tool behaviour) or `tool` to search tool output only.
+
+### Who can search what
+
+`session_search` reads the whole session store of the profile it runs in: every chat, from every platform and every user in that profile's allowlist. On a shared or family bot, anyone allowed to talk to it can ask the agent to find and read anyone else's conversations with it. Hermes does not separate users inside one profile (see `SECURITY.md` §2.6), and profiles on one host are not isolated from each other either: the default profile reads every profile's sessions (below), and an agent with terminal or code-execution tools can read any profile's files. Give each person who needs private history their own instance, under a separate OS user or container (`SECURITY.md` §2.2).
+
+`profile=` (and an `@session:<profile>/<id>` link) reads another profile's store. When one process serves several profiles (a multiplexed gateway, a dashboard or `hermes serve` backend on a host with more than one profile), only the **default** profile may do that, except in your own Desktop, TUI, CLI and editor (ACP) sessions; a call from any other profile that names a different profile is refused with an error. A process running a single profile on its own keeps cross-profile reads.
 
 ### When It's Used
 
@@ -11069,6 +11096,8 @@ When both are set, a narrowed `approvers` takes precedence: it is the explicit a
 
 A DM with the bot's owner keeps working when the owner is on the DM admin list. Clarify questions are not commands and only follow `approvers`.
 
+Discord interactions through the relay are checked more tightly. The relay forwards a Discord button press or application command (such as `/approve` or `/deny`) without checking who sent it. So under `approvers: ["*"]`, a member answers with one only once the relay has delivered one of their messages to this gateway (since it last started); anyone else must be the requester or one of the scope's admins, on top of the rules above. Other senders get the same note and the prompt stays pending. Any other Discord interaction (an application command such as `/status` or `/new`, a modal) from a sender the relay has not delivered a message from is dropped unless they are one of the scope's admins. When Hermes starts again, a member's application commands do nothing until they have sent a message. Ordinary messages, and button presses on the relay's other platforms, keep the rules above.
+
 Picker cards (`/model`, `/reasoning`, `/fast` and the usage-limit switch offer) and the `/update` Yes/No prompt always belong to the member who opened them, whatever `approvers` says: only that member and the chat scope's admins can tap them or, for `/update`, answer by typing. Anyone else gets the same private note and the card stays open; their typed text is an ordinary message. A member refused an admin-only command therefore cannot apply an admin's open card instead.
 
 The setting is read when the approval is raised, so with multiplexed profiles each profile's own `config.yaml` decides. Host surfaces (CLI, TUI, Desktop, the API server) answer as the host and are not affected. Matrix keeps its own stricter `MATRIX_APPROVAL_REQUIRE_SENDER` (default on). QQBot already accepts clicks only from the session's own user.
@@ -11581,7 +11610,7 @@ security:
   allow_private_urls: true   # default: false
 ```
 
-When on, web tools, the browser, vision URL fetches, gateway media downloads, and cron `monitor_url` fetches no longer reject RFC 1918 / loopback / link-local / CGNAT destinations. Cloud-metadata endpoints (`169.254.169.254`, `metadata.google.internal`, and the like) stay blocked even with this on. **This is a deliberate trust boundary** — only enable it on machines where the agent running arbitrary prompt-injected URLs against the local network is an acceptable risk. Public-facing gateways should leave it off.
+When on, web tools, the browser, vision URL fetches, gateway media downloads, cron `monitor_url` fetches, and A2A push callbacks no longer reject RFC 1918 / loopback / link-local / CGNAT destinations. Cloud-metadata endpoints (`169.254.169.254`, `metadata.google.internal`, and the like) stay blocked even with this on. **This is a deliberate trust boundary** — only enable it on machines where the agent running arbitrary prompt-injected URLs against the local network is an acceptable risk. Public-facing gateways should leave it off.
 
 The host-substring guard (which blocks lookalike Unicode domain tricks even when the underlying IP is public) stays on regardless of this setting.
 
@@ -12533,7 +12562,7 @@ it does not keep unfinished children alive after a timeout or crash.
 
 ## Sudo Support
 
-On an interactive parent session, supported sudo commands use the masked password prompt (cached for the session). This includes literal absolute or quoted executable paths and `env` prefixes with ordinary options and assignments, such as `env -u UNUSED /usr/bin/sudo id`. Passwordless sudo does not need a prompt. You can also configure `SUDO_PASSWORD` in your profile's `.env` file on the agent machine. It is sent to whichever terminal backend runs the command, so set it to the sudo password of that backend (the remote host for SSH, the container user for Docker), not to a password that belongs to a different machine.
+On an interactive parent session, supported sudo commands use the masked password prompt (cached for the session). This includes literal absolute or quoted executable paths and `env` prefixes with ordinary options and assignments, such as `env -u UNUSED /usr/bin/sudo id`. Passwordless sudo does not need a prompt. You can also configure `SUDO_PASSWORD` in your profile's `.env` file on the agent machine. It is sent to whichever terminal backend runs the command, so set it to the sudo password of that backend (the remote host for SSH, the container user for Docker), not to a password that belongs to a different machine. Programs running in a container, cloud sandbox or remote backend can read the password there, so use one that is only valid in that environment, or set up passwordless sudo in its image; Hermes logs a one-time warning the first time it sends a sudo password to a backend other than the local one.
 
 Where the backend's sudo supports an askpass helper (`sudo -A`) and its temp directory allows running a small helper script, the password is handed to each sudo invocation through that helper, so other commands in the same command line never read it from stdin. Otherwise, and for commands that already pass their own `-S` or `-A`, the password goes to sudo through its stdin.
 
@@ -17354,6 +17383,104 @@ Hooks, tools and injected turns of every chat and every local session (CLI, TUI,
 
 In the classic CLI process itself (for example a plugin slash command), `ctx.session_cwd()` is the launch directory and `ctx.session_surface()` is `"cli"`.
 
+## A plugin with its own chat client
+
+A plugin can add a command (`hermes <name>`, through `ctx.register_cli_command`) that starts its own chat frontend. The frontend attaches to the profile's shared gateway with `hermes gateway attach --json` (see [Programmatic integration](../../developer-guide/programmatic-integration.md)).
+
+The command exists only when the plugin runs inside the Hermes process (`plugins.isolation: in_process`, the default). With `plugins.isolation: host`, Hermes skips `ctx.register_cli_command`, and `hermes <name>` is not a command.
+
+Three imports do what the Hermes terminal client's launcher does around its own client:
+
+- `hermes_cli.gateway_chat.shell_client_env()` returns the allowlisted variables of the shell that ran your command, as a dict. Call it in the launcher, before you change the environment, and send the dict as `client_env` on `session.create`. The session's commands then run with the user's `PATH`, virtual environment and toolchain variables. Names that look like credentials are left out, and the gateway filters the dict again by its own rules.
+- `hermes_cli.chat_launch.hermes_command(args)` returns the argv that runs this Hermes install with `args`. It needs no `PYTHONPATH`; the child serves the profile named by the inherited `HERMES_HOME`. Give it to your frontend for `hermes gateway attach`, instead of `hermes` from `PATH` (which may be another install) or `sys.executable` (which an update may replace).
+- `hermes_cli.chat_launch.print_exit_summary(session_id, command=...)` prints the lines Hermes shows when a chat ends: how to resume the session, its id, title, message count and tokens. Call it after your frontend exits, with your own command name. It prints nothing for a session with no messages. The lines name two ways to resume, `--resume <id>` (a short id) and `-c "<title>"`, so your command must accept both.
+
+```python
+import json
+import os
+import subprocess
+import tempfile
+
+
+def _arguments(parser):
+    # The exit summary prints `hermes my-client --resume <id>` and `hermes my-client -c "<title>"`.
+    parser.add_argument("--resume", "-r", metavar="ID")
+    parser.add_argument("--continue", "-c", dest="title", metavar="TITLE")
+
+
+def _session_to_resume(args):
+    wanted = args.resume or args.title
+    if not wanted:
+        return None  # a new chat: a new profile has no session store to open yet
+    from hermes_constants import get_hermes_home
+    from hermes_state import SessionDB
+
+    db = SessionDB(db_path=get_hermes_home() / "state.db", read_only=True)
+    try:
+        # The summary prints a short id: resolve_session_id takes a unique prefix.
+        found = db.resolve_session_id(args.resume) if args.resume else db.resolve_session_by_title(args.title)
+    finally:
+        db.close()
+    if not found:
+        raise SystemExit(f"hermes my-client: no session matches {wanted!r}")
+    return found
+
+
+def _run_chat(args):
+    from hermes_cli.chat_launch import hermes_command, print_exit_summary
+    from hermes_cli.gateway_chat import shell_client_env
+
+    env = dict(os.environ)
+    env["MY_CLIENT_ENV"] = json.dumps(shell_client_env())
+    env["MY_ATTACH_COMMAND"] = json.dumps(hermes_command(["gateway", "attach", "--json", "--start"]))
+    env["MY_RESUME"] = _session_to_resume(args) or ""  # the frontend sends it with session.resume
+    # One file for this launch: the frontend writes {"session_id": ...} there for the session it shows.
+    fd, session_file = tempfile.mkstemp(prefix="my-client-", suffix=".json")
+    os.close(fd)
+    env["MY_SESSION_FILE"] = session_file
+    try:
+        subprocess.run(["my-client"], env=env)
+        with open(session_file, encoding="utf-8") as f:
+            shown = f.read()
+    finally:
+        os.unlink(session_file)
+    if shown:  # empty when the client left before it opened a session
+        print_exit_summary(json.loads(shown)["session_id"], command="hermes my-client")
+
+
+def register(ctx):
+    ctx.register_cli_command("my-client", "Chat in my client", _arguments, _run_chat)
+```
+
+### `-w`: run the session in a fresh worktree
+
+The same launcher can offer `-w` the way `hermes --tui -w` does. It calls three functions from `hermes_cli.session_worktree`:
+
+- `create()` before the client starts. It makes a new git worktree of the repository the user is in, under `<repo>/.worktrees/`, on its own `hermes/` branch. It returns `{"path", "branch", "repo_root", "base"}`, or `None` when no tree could be made (it has already printed why). Send `path` as the `cwd` of `session.create`.
+- `restore(session_id)` before the client attaches to a resumed session. Pass the full session id. When that session ran in a `-w` tree that an earlier quit removed, it makes the tree again at the same path and returns the path. Otherwise it returns `None`. Without it, the gateway refuses every turn of that session with `workspace_unavailable`.
+- `finish(info, session_id, ask=...)` after the client exits, in a `finally` block, so a client that fails to start does not leave the tree behind. Pass `ask=True` after a clean exit: a tree with uncommitted or unpushed work then gets a keep / archive / discard question on the terminal. Call it only after your client has given the terminal back. A clean tree that nothing still uses is removed with its branch. A kept tree is handed to `session_id`, so Hermes keeps it while that session can be resumed.
+
+Do not make the tree yourself with `git worktree add`. Hermes regularly removes old idle trees under `.worktrees/`. It keeps a locked tree only when the lock reason is one Hermes wrote, so it can remove your tree while a stored session still runs in it.
+
+```python
+import os
+
+from hermes_cli.session_worktree import create, finish, restore
+
+resume = _session_to_resume(args)  # the full session id, from the launcher above
+info = create() if args.worktree else None
+if args.worktree and info is None:
+    raise SystemExit(1)
+if resume and not args.worktree:
+    restore(resume)
+code, session_id = None, resume
+try:
+    code, session_id = run_my_client(cwd=info["path"] if info else os.getcwd(), resume=resume)
+finally:
+    if info:  # also when the client did not start, or Ctrl+C reached the launcher
+        finish(info, session_id, ask=code == 0)
+```
+
 ## Calling MCP servers from plugins
 
 `ctx.call_mcp()` lets a plugin call a tool on one of the user's configured MCP servers — synchronously, from any hook or tool handler — routing through Hermes' existing native MCP client (same connections, trust-tier gates, circuit breaker, and reconnect logic as model-invoked MCP tools; never a parallel client).
@@ -18371,8 +18498,9 @@ When scheduling jobs, you specify where the output goes:
 | `"origin"` | Back to where the job was created | Default on messaging platforms |
 | `"local"` | Save to local files only (`~/.hermes/cron/output/`) | Default on CLI |
 | `"telegram"` | Telegram home channel | Uses `TELEGRAM_HOME_CHANNEL` |
-| `"telegram:123456"` | Specific Telegram chat by ID | Direct delivery |
+| `"telegram:123456"` | Specific Telegram chat by ID | Direct delivery; on the job's own origin chat it keeps the topic the job was created in (Telegram and Slack only) |
 | `"telegram:-100123:17585"` | Specific Telegram topic | `chat_id:thread_id` format |
+| `"telegram:-100123:1"` | The forum's General topic | Posts top-level even when the job was created in a topic |
 | `"discord"` | Discord home channel | Uses `DISCORD_HOME_CHANNEL` |
 | `"discord:#engineering"` | Specific Discord channel | By channel name |
 | `"slack"` | Slack home channel | |
@@ -19019,8 +19147,11 @@ For `update`, pass `skills=[]` to remove all attached skills.
 
 `cronjob(action="run")` fires the job immediately **in the background** (like
 `delegate_task`): the tool call returns at once with a handle, and the job's
-outcome — success/failure, delivery target, next scheduled run, and an output
-excerpt — re-enters the conversation as a new message when the run finishes.
+outcome — success/failure, delivery target and next scheduled run — re-enters
+the conversation as a new message when the run finishes. The output excerpt is
+included only for `deliver: local` jobs and for runs whose delivery failed on every target: a
+job that delivered to a chat already posted its output there, so the excerpt is
+not copied into the conversation that ran it (which may be a different topic).
 The agent (and you) can keep working in the meantime, and a job that is
 already mid-run is refused with "already running" instead of double-firing.
 
@@ -19774,7 +19905,26 @@ Control actions run synchronously in-turn (never backgrounded), are scoped to th
 | `REPAIR_THEN_CONTINUE` | the conversation no longer fits, or an image/reasoning part is rejected | the transcript needs repairing first |
 | `HANDOFF` | a provider safety refusal of this conversation | another model, or the parent takes the work over |
 
-A resumable child's worktree (where its terminal was when it stopped, plus any worktree it created) is kept from the startup worktree sweep while its record lives: `delegation.resumable_ttl_hours` (default 48), at most `delegation.max_resumable` (default 32) per profile; beyond the cap the oldest loses its pin first. When the pin ends the normal sweep archives the tree to `refs/hermes/archive/` before removing it. Completed children and children you stopped are not pinned. Nothing resumes on its own unless you opt in with `delegation.auto_resume: true` (default `false`; reserved for the scheduler that reads `resume_mode`).
+A resumable child's worktree (where its terminal was when it stopped, plus any worktree it created) is kept from the startup worktree sweep while its record lives: `delegation.resumable_ttl_hours` (default 48), at most `delegation.max_resumable` (default 32) per profile; beyond the cap the oldest loses its pin first. When the pin ends the normal sweep archives the tree to `refs/hermes/archive/` before removing it. Completed children and children you stopped are not pinned. Nothing resumes on its own unless you opt in with `delegation.auto_resume: true` (default `false`, see below).
+
+### Automatic resume (`delegation.auto_resume`, opt-in)
+
+With `delegation.auto_resume: true` the gateway continues stopped background children on its own, through the same claim and `continue` path as `action='continue'`, on the child's own conversation and worktree, with a message naming the real cause ("Your run was stopped by a provider limit; continue where you left off."). A gateway checks every profile it serves every 15 seconds, each under that profile's own configuration, credentials and `state.db`.
+
+- **What resumes:** `AUTO_AT` children once their limit's reset time has passed, and `AUTO_ON_BOOT` children (gateway shutdown, crash, hard kill) once the gateway is back up.
+- **What never resumes:** `ON_FIX`, `REPAIR_THEN_CONTINUE` and `HANDOFF` children (credits, auth, model not found, refusals, deterministic request errors), children you or the parent stopped, children whose stop did not promise a resume (stopped while `auto_resume` was off, or under a parent no gateway serves, such as a classic local CLI: those get the manual `continue` hint), expired records, records whose worktree pin was dropped by `max_resumable`, and nested children (an orchestrator subagent's own workers; that orchestrator resumes instead).
+- **Silent while it waits.** A stop that is promised an automatic resume sends the parent no completion. `delegate_task(action='list')` shows the child as `waiting_to_resume` with a note such as "waiting to resume at 14:05 (attempt 1 of 2); gives up at 19:40". In a batch where only some children wait, the completion lists the waiting ones with that same status, and the failed-delegations view does not count them as failed.
+- **One report at the end.** The parent hears once per child: the resumed run's own result, or ONE terminal failure when the scheduler gives up. It gives up when 2 automatic attempts are used, when `delegation.auto_resume_deadline_minutes` (default 360) has passed since the child's first stop, when the limit's reset is known to land after that deadline (it gives up at once), or when a permanent reason appears (for example its worktree pin was dropped). A child already promised a resume still gets its one failure when `auto_resume` is turned off while it waits, or when its record reaches `delegation.resumable_ttl_hours` first; `/stop`, a session end and `action='stop'` still cancel it while `auto_resume` is off. The failure carries the reason, the child's last summary, the tail of its transcript, and how to continue it by hand (`delegate_task(action='continue', subagent_id=..., message=...)`) or re-dispatch it. A crash during the last attempt reports that same give-up, not a generic "outcome unknown".
+- **Explicit cancel only.** Only these cancel a waiting resume (the record becomes `superseded`, or `stopped` for `stop`; it can still be continued by hand until its TTL):
+  - `delegate_task(action='stop', subagent_id=...)` on the waiting child: it never resumes and its worktree pin is released (the transcript stays);
+  - the parent continued the child itself;
+  - the parent conversation was stopped (`/stop`), reset (`/new`), closed, deleted, or no longer exists to receive the result.
+  Other work the parent starts, including new subagents in the same repository, does not cancel it. These decisions also win while a resume is starting: the scheduler claims the record and re-checks them in one `state.db` transaction, and checks again right before the child runs, so a stop, `/stop` or `/new` that lands meanwhile cancels it (the attempt is not counted). A child that is already running is stopped like any other, with `delegate_task(action='stop')`.
+- **No duplicate of a waiting child.** A spawn whose goal is exactly (ignoring surrounding whitespace) the goal of one of the parent's children that is waiting to resume is refused with a tool error naming that `subagent_id`, when it resumes, and the two ways forward: wait for it, or `delegate_task(action='stop', subagent_id=...)` first and then re-dispatch. In a batch only that task is refused; its siblings run. The guard is off when `auto_resume` is off, and it stops refusing once that child is past its deadline or out of attempts, even before the scheduler has delivered its give-up.
+- **Unconfirmed side effects.** The resume message tells the child: if its last tool call has no recorded result and it cannot establish whether that call ran, it must not repeat it and must finish with a result that starts with `BLOCKED:` naming that call.
+  A parent stopped by the same limit is simply woken by the resumed children's results (the usual unattended-wake limit applies).
+- **Bounded:** at most 2 automatic attempts per child, counted before each attempt runs, so a child whose resume crashes the gateway every time stops after two boots; the record says why. A resume that hits the limit again goes back to waiting with its attempt counted. Resumes stay within the profile's own `delegation.max_concurrent_children` (counting that profile's running background units only), wait while delegation spawning is paused, run on the parent conversation's own model route (its `/model` choice, channel override or launch policy), and children waiting on the same reset are started one per provider endpoint per pass (15 s apart) rather than all at once.
+- **Cost:** a resumed child spends tokens with nobody watching, and so does the parent turn its result starts. Leave it off where unattended spend is not wanted.
 
 ### From the TUI / gateway (session-facing)
 
@@ -20006,7 +20156,8 @@ delegation:
   # orchestrator_enabled: true              # Disable to force all children to leaf role.
   # resumable_ttl_hours: 48                 # How long a stopped child stays continuable after a restart, worktree kept
   # max_resumable: 32                       # Resumable children per profile whose worktree is kept (oldest unpinned first)
-  # auto_resume: false                      # Opt-in: resume such children without being asked
+  # auto_resume: false                      # Opt-in: the gateway resumes limit/restart-stopped children itself (spends tokens unattended)
+  # auto_resume_deadline_minutes: 360       # Give up (one failure to the parent) this long after a child's first stop
   model: "google/gemini-3-flash-preview"             # Optional provider/model override
   provider: "openrouter"                             # Optional built-in provider
   api_mode: anthropic_messages                       # optional; auto-detected from base_url for anthropic_messages endpoints
@@ -25799,7 +25950,9 @@ and it works on headless servers with no desktop browser at all.
 
 1. `browser.executable_path`, when set.
 2. The Chromium (Chrome for Testing) installed by Hermes's package manager — the
-   installers and `hermes update` install it by default.
+   installers and `hermes update` install it by default. The macOS desktop app
+   does not ship it: the first browser use downloads it (about 195 MB) into
+   `~/.hermes/tools`.
 3. `/etc/hermes/chromium-executable-path` in the official Docker image.
 4. A system `chromium` / `chromium-browser` on `PATH` (Android/Termux, and
    platforms the package manager has no Chromium build for).
@@ -28703,6 +28856,8 @@ Once upstream is healthy, `/platform resume <name>` clears the breaker and re-ar
 
 When the gateway restarts (or is shut down with in-flight sessions), it can send a one-shot "the agent is back" / "the agent was interrupted" message to each platform's home channel. This is controlled per-platform by the `gateway_restart_notification` flag in `config.yaml`, which defaults to `true`:
 
+The "shutting down" and "online" home-channel notices come as a pair: once a home chat was told the gateway is going down, the next start says it is back online, whatever stopped it (a `/restart`, `hermes gateway restart`, or the service manager, such as `systemctl restart`). A `--replace` takeover sends neither, because the replacing gateway keeps serving. When the gateway is stopped over and over in a short time (a restart loop), it sends at most `gateway.restart_loop_guard.max_restarts` shutdown notices (default 3, chained while the gaps between them stay under `max_gap_seconds`) and then goes quiet until it stays up. The same settings drive the restart-loop breaker for session auto-resume.
+
 Configure the destination with a `home_channel` object containing both `platform` and `chat_id`:
 
 ```yaml
@@ -28971,6 +29126,12 @@ Notes:
   A hard crash leaves the last-known status — the inherent limitation of a
   profile-text indicator.
 - Off by default, since it mutates the bot's global profile.
+- Hermes saves the bot's own short description (the one set in @BotFather) before
+  it first writes **Online**, and keeps that copy across restarts and crashes.
+  Turn `status_indicator` off and the next connect puts your text back, unless
+  you have set a new description in @BotFather since (yours is kept). Edit the
+  description while the gateway is down and the new text is what Hermes saves.
+  If Hermes cannot read and save your text at connect, it writes no status that run.
 
 ### Cold-boot pending queue (Optional)
 
@@ -29280,6 +29441,7 @@ Add the following to `~/.hermes/.env`:
 TELEGRAM_WEBHOOK_URL=https://my-app.fly.dev/telegram
 TELEGRAM_WEBHOOK_SECRET="$(openssl rand -hex 32)"  # required
 # TELEGRAM_WEBHOOK_PORT=8443        # optional, default 8443
+# TELEGRAM_WEBHOOK_HOST=::          # optional, bind host (e.g. IPv6-only)
 ```
 
 | Variable | Required | Description |
@@ -29287,6 +29449,7 @@ TELEGRAM_WEBHOOK_SECRET="$(openssl rand -hex 32)"  # required
 | `TELEGRAM_WEBHOOK_URL` | Yes | Public HTTPS URL where Telegram will send updates. The URL path is auto-extracted (e.g., `/telegram` from the example above). |
 | `TELEGRAM_WEBHOOK_SECRET` | **Yes** (when `TELEGRAM_WEBHOOK_URL` is set) | Secret token that Telegram echoes in every webhook request for verification. The gateway refuses to start without it — see [GHSA-3vpc-7q5r-276h](https://github.com/NousResearch/hermes-agent/security/advisories/GHSA-3vpc-7q5r-276h). Generate with `openssl rand -hex 32`. |
 | `TELEGRAM_WEBHOOK_PORT` | No | Local port the webhook server listens on (default: `8443`). |
+| `TELEGRAM_WEBHOOK_HOST` | No | Local bind host for the webhook server. Default: unset → dual-stack bind on all interfaces (IPv4+IPv6). Set this on IPv6-only deployments (e.g. Fly.io 6PN) or to pin the listener to a specific interface. Can also be set via `platforms.telegram.extra.webhook_host` in `config.yaml`. |
 
 When `TELEGRAM_WEBHOOK_URL` is set, the gateway starts an HTTP webhook server instead of polling. When unset, polling mode is used — no behavior change from previous versions.
 
@@ -29708,6 +29871,10 @@ Messages in Telegram topics `31` and `42` are always ignored before the mention 
 - Patterns use Python regular expressions
 - Matching is case-insensitive
 - Patterns are checked against both text messages and media captions
+- A captionless voice note has no text, so it can only wake the bot by reply or @mention. Set
+  `voice_mention_patterns: true` to transcribe such a group voice note first and match these patterns
+  against what was said. It is off by default because every unaddressed voice note in the group then
+  goes to your speech-to-text provider. The turn reuses that transcript (one STT call)
 - Invalid regex patterns are ignored with a warning in the gateway logs rather than crashing the bot
 - If you want a pattern to match only at the start of a message, anchor it with `^`
 
@@ -30160,6 +30327,7 @@ Behavior:
 - `TELEGRAM_GROUP_ALLOWED_USERS` only authorizes the listed senders in groups/forums. They still can't DM the bot unless listed in `TELEGRAM_ALLOWED_USERS`.
 - A chat in `TELEGRAM_GROUP_ALLOWED_CHATS` authorizes every member of that chat, regardless of sender.
 - Use `*` in any of these to allow any sender/chat.
+- Edits to these lists in `config.yaml` apply to the next message with no gateway restart: a user you remove is refused from their next message or button tap. In a gateway that serves several profiles (`gateway.multiplex_profiles`), the host profile — the one the gateway was started with — keeps the lists it had at startup: restart the gateway after editing its lists. A value set in `.env` still wins over `config.yaml`.
 - This layers on top of existing mention/pattern triggers and on top of `group_topics` + `ignored_threads`.
 
 ### Migration from before PR #17686
@@ -30816,7 +30984,7 @@ Discord behavior is controlled through two files: **`~/.hermes/.env`** for crede
 | `DISCORD_IGNORE_NO_MENTION` | No | `true` | When `true`, the bot stays silent if a message `@mentions` other users but does **not** mention the bot. Prevents the bot from jumping into conversations directed at other people. Only applies in server channels, not DMs. |
 | `DISCORD_AUTO_THREAD` | No | `true` | When `true`, automatically creates a new thread for every `@mention` in a text channel, so each conversation is isolated (similar to Slack behavior). Messages already inside threads or DMs are unaffected. |
 | `DISCORD_FREE_RESPONSE_AUTO_THREAD` | No | `false` | When `true`, free-response channels (listed in `DISCORD_FREE_RESPONSE_CHANNELS`) also auto-create a thread for each top-level message, while staying mention-free. Default `false` preserves the lightweight inline-chat behavior. Requires `DISCORD_AUTO_THREAD=true`; `DISCORD_NO_THREAD_CHANNELS` still wins, and voice-linked channels always ignore it. |
-| `DISCORD_ALLOW_BOTS` | No | `"none"` | Controls how the bot handles messages from other Discord bots. `"none"` — ignore all other bots. `"mentions"` — only accept bot messages that `@mention` Hermes. `"all"` — accept all bot messages. By default, either enabled mode still requires a literal inline mention; see the next setting. |
+| `DISCORD_ALLOW_BOTS` | No | `"none"` | Controls how the bot handles messages from other Discord bots and webhooks (any post carrying a `webhook_id`, such as CI or deploy alerts, counts as a bot even when Discord omits the bot flag). `"none"` — ignore all other bots. `"mentions"` — only accept bot messages that `@mention` Hermes. `"all"` — accept all bot messages. By default, either enabled mode still requires a literal inline mention; see the next setting. |
 | `DISCORD_BOTS_REQUIRE_INLINE_MENTION` | No | `true` | Require a literal `<@BOT_ID>` / `<@!BOT_ID>` token to start a bot handoff. Reply metadata alone does not start one. Brief same-sender/channel continuations are admitted as described below. Set to `false` only for trusted relays needing legacy admission. Human messages are unaffected. |
 | `DISCORD_REACTIONS` | No | `true` | When `true`, the bot adds emoji reactions to messages during processing (👀 when starting, ✅ on success, ❌ on error). Set to `false` to disable reactions entirely. |
 | `DISCORD_IGNORED_CHANNELS` | No | — | Comma-separated channel IDs where the bot **never** responds, even when `@mentioned`. Takes priority over all other channel settings. |
@@ -31492,6 +31660,8 @@ Semantics:
 - **DM fallback.** In DMs the role check scans mutual guilds; a user with an allowed role in any shared server is authorized in DMs too.
 
 This is the preferred pattern when the moderation team churns — new moderators get access the moment the role is granted, with no `.env` edit or gateway restart.
+
+**Editing the lists in `config.yaml` takes effect on the next message.** `discord.allowed_roles`, `discord.allow_from` and the channel lists are re-read when `config.yaml` changes, with no gateway restart: a role or user you remove is refused from their next message, slash command or button click. In a gateway that serves several profiles (`gateway.multiplex_profiles`), the host profile — the one the gateway was started with — keeps the lists it had at startup: restart the gateway after editing its lists. A value set in `.env` still wins over `config.yaml`. Adding the *first* role or username to a bot connected without the Server Members intent still needs a restart, because the intent is chosen at connect. A username added later is matched only after the next reconnect resolves it to an ID.
 
 ### Mention Control
 
@@ -32874,7 +33044,10 @@ addresses by LID matches through the phone number Baileys supplies alongside it,
 `allowlist` trusts the group-JID list alone and admits every participant of a listed group, while `open` still
 needs the participant paired or `WHATSAPP_ALLOW_ALL_USERS=true`. By default the bot answers every admitted group
 message; set `require_mention: true` / `WHATSAPP_REQUIRE_MENTION=true` to answer only @mentions, replies to the
-bot, or `/commands` (groups in `free_response_chats` are exempt).
+bot, or `/commands` (groups in `free_response_chats` are exempt). Regex wake words go in `mention_patterns`.
+A captionless voice note can only match them with `voice_mention_patterns: true`, which transcribes the group
+voice note first (off by default: every unaddressed voice note then goes to your speech-to-text provider; the
+turn reuses that transcript).
 
 Then start the gateway:
 
@@ -32994,6 +33167,49 @@ Set `text_batch_delay_seconds: 0` to dispatch each message immediately (disables
 ### Quoted Replies
 
 Replying to (quoting) an earlier message gives the agent the quoted text as context. Quoting an image, voice note, video or document also attaches that file to the turn, so "what is this?" under a quoted image works — whether the attachment came from another person or from the bot itself (a cron-delivered chart, a generated image). WhatsApp only ships a thumbnail stub with a quote, so the file is resolved from the bridge's download cache (inbound media, in-memory for the bridge's lifetime) or from a local index of the bot's own sends (last 1000 messages); quotes of anything older arrive without the attachment.
+
+---
+
+## Customer-facing bot
+
+Defaults assume the people on the allowlist are you and your team. If the bot number answers
+customers (`WHATSAPP_ALLOWED_USERS=*`, `WHATSAPP_ALLOW_ALL_USERS=true`, or a list of customer
+numbers), everyone on the allowlist is trusted the same way, so harden the gateway before going
+live:
+
+```yaml
+# ~/.hermes/config.yaml
+display:
+  platforms:
+    whatsapp:
+      tool_progress: "off"              # or "log": no tool-progress bubbles in the chat
+      interim_assistant_messages: false # no mid-turn commentary, only the final reply
+
+platforms:
+  whatsapp:
+    home_channel:                       # or WHATSAPP_HOME_CHANNEL in ~/.hermes/.env
+      platform: whatsapp
+      chat_id: "15551234567@s.whatsapp.net"   # your operator chat, not a customer's
+      name: Operator
+    extra:
+      allow_admin_from:                 # only these senders may run admin slash commands
+        - "15551234567@s.whatsapp.net"
+      group_allow_admin_from:           # same, for group chats (DM admins are not group admins)
+        - "15551234567@s.whatsapp.net"
+      # user_allowed_commands: [new]    # optional: commands customers may still run
+```
+
+- **`tool_progress`** defaults to `new` on WhatsApp, so customers see each tool the agent runs.
+- **`interim_assistant_messages`** defaults to `true`, so customers see the agent's mid-turn commentary.
+- **Home channel:** without one, every sender's first message in a new session (a new customer, or
+  anyone after `/new`) gets a "type /sethome" prompt, and any sender who runs `/sethome` takes over
+  cron and notification delivery. Set it to your own chat.
+- **`allow_admin_from`** (DMs) and **`group_allow_admin_from`** (groups) turn on [slash-command access control](../../reference/slash-commands.md#permissions-and-adminuser-split):
+  customers keep only `/help` and `/whoami` (plus anything in `user_allowed_commands`), can't run
+  `/sethome`, and never get the `/sethome` prompt. Send `/whoami` from your own phone to get the
+  exact ID to list.
+
+`hermes whatsapp` prints a warning pointing here when bot mode allows everyone and no home channel is set.
 
 ---
 
@@ -34062,6 +34278,15 @@ Only enable notices when a trusted human workflow really sends `m.notice`:
 MATRIX_PROCESS_NOTICES=true
 ```
 
+Processed notices count as bot messages: they use the gateway's bot loop guard
+and never get a pairing reply. Any Matrix user can send `m.notice`, so it grants
+no access: a notice sender still needs `MATRIX_ALLOWED_USERS` (or another human rung).
+The loop guard also ends the exchange: by default, after Hermes answers a notice
+sender, that sender's next notice gets no reply until someone sends a regular
+message in the room or the room has gone 10 minutes without a notice. Set
+`gateway.bot_loop_guard.bot_replies_expect_reply: true` in `config.yaml` for a
+workflow that needs back-and-forth (still capped at `max_hops`, default 4).
+
 Outbound whole-room notifications are disabled by default. Keep
 `MATRIX_ALLOW_ROOM_MENTIONS=false` unless the bot is explicitly allowed to wake
 the whole room with `@room`.
@@ -34652,7 +34877,7 @@ For more information on securing your Hermes Agent deployment, see the [Security
 
 # Mattermost Setup
 
-Hermes Agent integrates with Mattermost as a bot, letting you chat with your AI assistant through direct messages or team channels. Mattermost is a self-hosted, open-source Slack alternative — you run it on your own infrastructure, keeping full control of your data. The bot connects via Mattermost's REST API (v4) and WebSocket for real-time events, processes messages through the Hermes Agent pipeline (including tool use, memory, and reasoning), and responds in real time. It supports text, file attachments, images, and slash commands.
+Hermes Agent integrates with Mattermost as a bot, letting you chat with your AI assistant through direct messages or team channels. Mattermost is a self-hosted, open-source Slack alternative — you run it on your own infrastructure, keeping full control of your data. The bot connects via Mattermost's REST API (v4) and WebSocket for real-time events, processes messages through the Hermes Agent pipeline (including tool use, memory, and reasoning), and responds in real time. It supports text, file attachments, images, and slash commands. Inbound attachments are downloaded only for senders the gateway authorizes, and each is capped by `gateway.max_inbound_media_bytes`.
 
 No external Mattermost library is required — the adapter uses `aiohttp`, which is already a Hermes dependency.
 
@@ -35823,7 +36048,9 @@ hermes webhook subscribe github-issues \
 
 This returns the webhook URL and an auto-generated HMAC secret. Configure your service to POST to that URL.
 
-New subscriptions are pinned to `--signature generic` (timestamp-bound V2 or Standard Webhooks) unless you pass `--signature github`, `gitlab` or `linear` for a provider that signs its own way. Updating an existing subscription keeps its pin. A dashboard re-save of an existing route keeps its pin too, and MCP event subscriptions are pinned to `generic` when first created.
+New subscriptions are pinned to `--signature generic` (timestamp-bound V2 or Standard Webhooks) unless you pass `--signature github`, `gitlab` or `linear` for a provider that signs its own way. Updating an existing subscription keeps its pin. A dashboard re-save of an existing route that omits `signature` keeps its pin too (an explicit pick replaces it), and MCP event subscriptions are pinned to `generic` when first created.
+
+The dashboard's **New subscription** form (web dashboard and desktop app) has the same choice as a **Signature** select, defaulting to `generic`; pick GitHub, GitLab or Linear for routes those services deliver to. Through the API, `POST /api/webhooks` takes an optional `signature` (`generic`, `github`, `gitlab` or `linear`; anything else is a `422`): a new route without it is pinned to `generic`, and a re-POST without it keeps the stored pin.
 
 ### List subscriptions
 
@@ -35896,7 +36123,7 @@ For dynamic subscriptions, add the `toolsets` key by editing `~/.hermes/webhook_
 
 Behavior and safety properties:
 
-- The route list **replaces** the platform-level webhook toolset resolution for that route's runs (it is not merged).
+- The route list **replaces** the platform-level webhook toolset resolution for that route's runs (it is not merged). An explicit empty list (`toolsets: []`) is an override too: that route gets no platform toolsets and no MCP servers, the same as `platform_toolsets.webhook: []`.
 - Names are validated through the same path as `platform_toolsets` config — unknown names and platform-restricted toolsets are dropped.
 - `hermes webhook subscribe` deliberately does **not** accept a toolsets flag. Granting elevated tools is a manual config-file edit, so an agent creating its own subscription at runtime cannot self-grant `terminal`.
 - Only grant elevated toolsets to routes whose senders you fully control, with a real HMAC secret. Anyone who can POST a validly-signed payload to that route is effectively running an agent with those tools.
@@ -37509,7 +37736,11 @@ providers:
 
 Each entry accepts: `api` (the endpoint base URL — `base_url`/`url` are accepted aliases), `name` (optional display name; defaults to the dict key), `key_env` or inline `api_key` or `key_cmd` (see below), `transport` (`chat_completions` / `anthropic_messages` / `codex_responses`), `default_model`, `models`, `context_length`, `discover_models`, `extra_body`, `extra_headers`, `session_affinity_header` (name of a header that carries the conversation id, for session-aware proxies; off unless set), `ssl_ca_cert` / `ssl_verify`, `catalog_provider` (see below), and `enabled: false` to hide an entry without deleting it.
 
-An entry keyed like a built-in provider (`openrouter:`, `Anthropic:`, `deepseek:`, in any case) that sets its own `api`/`base_url` **is** what that name means: `--provider openrouter`, `/model`, `hermes model` and the dashboard save it as `custom:openrouter` and every turn goes to your endpoint. When the entry declares a key (`api_key` or `key_env`), that key is used and the built-in's env key is never sent; an entry with no key falls back to the built-in's env key, the same as `custom:<name>`. A same-named block without an endpoint (for example `providers.openrouter: {request_timeout_seconds: 300}`) only tunes the built-in. `hermes doctor` warns when `model.provider` names a built-in that such an entry takes over.
+An entry keyed like a built-in provider (`openrouter:`, `Anthropic:`, `deepseek:`, in any case) that sets its own `api`/`base_url` **is** what that name means: `--provider openrouter`, `/model`, `hermes model` and the dashboard save it as `custom:openrouter` and every turn goes to your endpoint. When the entry declares a key (`api_key`, `key_env` or `key_cmd`), that key is used and the built-in's own key is never sent. An entry with no key gets the built-in's env and pooled keys only while its address is on the built-in's own host (scheme, host and port); anywhere else (a proxy, a mirror, another region's host such as Kimi's `.cn` endpoint) it sends no key, because a built-in's key is never sent to a host other than its own unless you say so. To use the built-in's key on your endpoint, name it: `key_env: DEEPSEEK_API_KEY` (the built-in's variable), or add the endpoint's key with `hermes auth add deepseek` while the entry is configured, which records the entry's address. A same-named block without an endpoint (for example `providers.openrouter: {request_timeout_seconds: 300}`) only tunes the built-in. `hermes doctor` warns when `model.provider` names a built-in that such an entry takes over.
+
+:::note Migration: built-in keys and same-named entries
+Earlier releases sent the built-in's env key (for example `DEEPSEEK_API_KEY`) to a key-less `providers.deepseek` entry on any address. Now that key stays on the built-in's own host. If such an entry now gets `401`, add `key_env: DEEPSEEK_API_KEY` (use your provider's variable) to the entry. Hermes logs one warning per entry naming the remedy when this happens. Pooled keys added before addresses were recorded (`hermes auth add`, the dashboard) for a built-in's pool belong to the built-in's own address. To use one on the entry's host, re-add it with `hermes auth add <name>` while the entry is configured.
+:::
 
 #### Command-minted credentials (`key_cmd`)
 
@@ -41661,6 +41892,8 @@ Custom endpoint pools are stored in `auth.json` under `credential_pool` with a `
   }
 }
 ```
+
+A key added for a custom endpoint (`hermes auth add`, or the dashboard's credential pool) records the endpoint address it was entered for, and is only ever sent to that origin (scheme, host and port). If you change the endpoint's address, its pooled keys stay behind: the Desktop and dashboard editors ask for the new address's key (or an explicit blank for none) rather than reuse them. Keys added before addresses were recorded are bound to the endpoint's address the first time they are used. A built-in provider's keys (for example `DEEPSEEK_API_KEY` for a `providers.deepseek` entry) serve the entry only on that provider's own address, unless the entry names the variable as its `key_env` (for example `key_env: DEEPSEEK_API_KEY`); Hermes logs one warning per entry when it withholds them. This also covers a delegated subagent (`delegation.provider: deepseek`) and auxiliary tasks on that entry. A key added to a built-in provider's pool without an address belongs to that provider's own address, never to a same-named entry's. An origin is scheme, host and port only: two endpoints on the same host that differ only by path (`https://gw.example/tenantA/v1` and `https://gw.example/tenantB/v1`) count as one origin, so their pooled keys can serve each other.
 
 ## Auto-Discovery
 
@@ -50797,7 +51030,8 @@ lists each import of it.
 |---|---|
 | Adapter base class, send results, media cache helpers | `gateway.platforms.base` (public names) |
 | SSRF-safe HTTP client: connect-time IP validation, per-redirect re-check, shared keepalive limits | `from gateway.platforms.helpers import platform_http_client` |
-| The pieces of that client, to build your own | `gateway.platforms.base.ssrf_redirect_guard` (httpx `response` hook), `tools.url_safety.create_ssrf_safe_async_client`, `tools.url_safety.is_safe_url`, `gateway.platforms._http_client_limits.platform_httpx_limits` |
+| The pieces of that client, to build your own | `gateway.platforms.base.ssrf_redirect_guard` (httpx `response` hook), `tools.url_safety.create_ssrf_safe_async_client` (sync: `create_ssrf_safe_client`), `tools.url_safety.is_safe_url`, `gateway.platforms._http_client_limits.platform_httpx_limits` |
+| Fetch a URL with an existing `aiohttp.ClientSession`, every redirect hop SSRF-checked (credential-bearing cross-origin hops refused, one `total` timeout for the chain) | `async with gateway.platforms.helpers.ssrf_checked_aiohttp_get(session, url, **get_kwargs) as resp:` (raises `ValueError` on a blocked hop) |
 | Own DM/group policy (`dm_policy` / `group_policy` / allowlists) | `from gateway.platforms.access_policy_mixin import OwnAccessPolicyMixin` |
 | Resolve an approval from a native button | `from tools.approval import resolve_gateway_approval_card` (pass the card's request id; a call without one resolves nothing. Every request starts Deny-only: render through `_send_exec_approval_prompt` so the base `send_exec_approval` can lift the mark once the card shows the whole command. `resolve_gateway_approval` answers the oldest pending request) |
 | Refuse a click from someone who may not answer the approval (not its requester when `approvals.approvers` is narrowed; not allowed `/approve` / `/deny` when the chat sets `allow_admin_from`) | `from gateway.approval_actor import approval_refusal, refusal_text`: call `approval_refusal(session_key, clicker_id, extra=self.config.extra, request_id=..., choice=choice)` before resolving (the `choice` lets the chat's slash admin gate check the answer's own `/approve` or `/deny`); a non-`None` result is the requester's name, reply privately with `refusal_text(name)` and leave the approval pending. Then settle with `resolve_gateway_approval_card(session_key, choice, request_id, actor_id=clicker_id, extra=self.config.extra)`, which rechecks the clicker against the entry it settles in the same critical section. Slash-confirm and clarify taps use `slash_confirm_refusal(session_key, confirm_id, clicker_id, extra=...)` and `clarify_refusal(clarify_id, clicker_id, extra=...)` the same way, before `slash_confirm.resolve` / `resolve_gateway_clarify` / `mark_awaiting_text` |
@@ -53230,7 +53464,7 @@ Upload a debug report (system info + recent logs) to a paste service and get a s
 | Option | Description |
 |--------|-------------|
 | `--lines <N>` | Number of log lines to include per log file (default: 200). |
-| `--expire <days>` | Paste expiry in days (default: 7). |
+| `--expire <days>` | dpaste.com fallback retention in days (minimum 1; default: 1). paste.rs pastes are always deleted after 6 hours; dpaste.com pastes cannot be deleted early. |
 | `--nous` | Upload to Nous-internal diagnostics storage instead of a public paste service. Use this when Nous support asks for a private diagnostic bundle. |
 | `--local` | Print the report locally instead of uploading. |
 | `--no-redact` | Disable upload-time secret redaction. By default, uploads are redacted. |
@@ -53244,7 +53478,7 @@ Default uploads use public paste services tried in order: paste.rs, dpaste.com. 
 ```bash
 hermes debug share              # Upload debug report, print URL
 hermes debug share --lines 500  # Include more log lines
-hermes debug share --expire 30  # Keep paste for 30 days
+hermes debug share --expire 30  # Keep a dpaste.com fallback paste for 30 days
 hermes debug share --nous       # Upload a private diagnostics bundle for Nous support
 hermes debug share --local      # Print report to terminal (no upload)
 ```
@@ -54081,7 +54315,7 @@ Launch the web dashboard to manage configuration, API keys, and sessions. For a 
 | `--no-open` | — | Don't auto-open the browser |
 | `--insecure` | off | **Deprecated / no-op.** Formerly bypassed auth on a non-loopback bind. Since the June 2026 hardening a public bind *always* requires an auth provider (password or OAuth). Bind `127.0.0.1` and tunnel to keep it local. |
 | `--skip-build` | off | Skip the web UI build step and serve the existing `dist` directly. Useful for non-interactive contexts (Windows Scheduled Tasks, CI) where pnpm isn't available. Pre-build with `cd web && pnpm run build`. |
-| `--isolated` | off | When launched from a named profile (`worker dashboard`), run a dedicated per-profile server instead of routing to the machine dashboard. |
+| `--isolated` | off | When launched from a named profile (`worker dashboard`), run a dedicated per-profile server instead of routing to the machine dashboard. It lists only that profile. Routing/ops convenience, **not** a security boundary: profiles under one OS user can read each other; isolate tenants with separate OS users or containers. |
 | `--stop` | — | Stop the running `hermes dashboard` / `hermes serve` backend **of this Hermes home** and exit (`-p <profile>` / `HERMES_HOME` select which; backends of other profiles, other installs on the machine, and the shell you typed the command into are never touched — a backend whose owner cannot be read is left alone). SIGTERM, a 10s grace, then SIGKILL; a hosted Chat TUI that outlives its backend is stopped too (it would otherwise keep the deleted `state.db-wal` open and block the next start). Messaging-gateway bots started from the dashboard are not touched. |
 | `--status` | — | List running `hermes dashboard` processes and exit. |
 
@@ -54440,7 +54674,7 @@ Type `/` in the CLI to open the autocomplete menu. Built-in commands are case-in
 | `/paste` | Attach a clipboard image |
 | `/copy [number]` | Copy the last assistant response to clipboard (or the Nth-from-last with a number). CLI-only. |
 | `/image <path>` | Attach a local image file for your next prompt. |
-| `/debug` | Upload debug report (system info + logs) and get shareable links. Also available in messaging. |
+| `/debug [upload\|nous upload\|local]` | Debug report. Bare `/debug` shows the privacy notice and uploads nothing; `/debug upload` uploads to a public paste and returns shareable links, `/debug nous upload` uploads to Nous-internal storage (classic CLI only: messaging, the TUI and the desktop app refuse it and point to `hermes debug share --nous` or Desktop's Send diagnostics), `/debug local` prints the report without uploading. Also available in messaging. |
 | `/update` | Update Hermes Agent to the latest version. |
 | `/profile` | Show active profile name and home directory |
 
@@ -54605,7 +54839,7 @@ The messaging gateway supports the following built-in commands inside Telegram, 
 | `/deny` | Reject a pending dangerous command. |
 | `/update` | Update Hermes Agent to the latest version. |
 | `/restart` | Gracefully restart the gateway after draining active runs. When the gateway comes back online, it sends a confirmation to the requester's chat/thread. |
-| `/debug` | Upload debug report (system info + logs) and get shareable links. |
+| `/debug [upload]` | Bare `/debug` shows the privacy notice and uploads nothing; `/debug upload` uploads the summary report (system info + log tails) and returns a shareable link. |
 | `/help` | Show messaging help. |
 | `/<skill-name>` | Invoke any installed skill by name. |
 
@@ -55237,7 +55471,7 @@ After installation, tab completion works for:
 
 # Environment Variables Reference
 
-Hermes reads environment variables from the process environment and, for user-managed secrets, from `~/.hermes/.env`. Keep API keys, bot tokens, OAuth secrets, and other credentials in `.env`; prefer `config.yaml` for non-secret behaviour settings when a config key exists. Some variables below are process-only overrides or internal bridge variables and should not be committed to `.env` just because they are documented here.
+Hermes reads environment variables from the process environment and, for user-managed secrets, from `~/.hermes/.env`. Keep API keys, bot tokens, OAuth secrets, and other credentials in `.env`; prefer `config.yaml` for non-secret behaviour settings when a config key exists. Some variables below are process-only overrides or internal bridge variables and should not be committed to `.env` just because they are documented here. Values written by the platform YAML bridge (and the Telegram/Signal mention fallbacks) are refreshed when that config changes, including across a daemon replacement. After a successful full YAML load, a removed key also retracts its unchanged bridge-owned value; failed loads do not trigger this cleanup, and explicit process, user `.env`, or managed `.env` values still take precedence. The bridge tracks what it wrote in `HERMES_BRIDGED_<NAME>` variables holding a SHA-256 digest of the value, never the value itself, and they are removed from every agent subprocess; a process export whose value happens to equal the bridge's own earlier write is treated as the bridge's and follows `config.yaml`.
 
 ## LLM Providers
 
@@ -55487,7 +55721,7 @@ These variables configure the [Tool Gateway](../user-guide/features/tool-gateway
 | `TERMINAL_TIMEOUT` | Command timeout in seconds |
 | `TERMINAL_LIFETIME_SECONDS` | Max lifetime for terminal sessions in seconds |
 | `TERMINAL_CWD` | Deprecated direct override for gateway/cron terminal sessions. Prefer `terminal.cwd` in `config.yaml`; CLI still uses the launch directory. |
-| `SUDO_PASSWORD` | Enable sudo without interactive prompt |
+| `SUDO_PASSWORD` | Enable sudo without interactive prompt. Sent to the backend that runs the command; see [Sudo Support](../user-guide/features/tools.md#sudo-support) |
 
 For cloud sandbox backends, persistence is filesystem-oriented. `TERMINAL_LIFETIME_SECONDS` controls when Hermes cleans up an idle terminal session, and later resumes may recreate the sandbox rather than keep the same live processes running.
 
@@ -55551,7 +55785,11 @@ These are set automatically by the Docker terminal backend when `proxy.enabled: 
 | `TELEGRAM_CRON_THREAD_ID` | Forum topic ID to receive cron deliveries; overrides `TELEGRAM_HOME_CHANNEL_THREAD_ID` for cron only. Use in topic mode so replies to cron messages open a new session instead of hitting the system lobby (#24409). |
 | `TELEGRAM_WEBHOOK_URL` | Public HTTPS URL for webhook mode (enables webhook instead of polling) |
 | `TELEGRAM_WEBHOOK_PORT` | Local listen port for webhook server (default: `8443`) |
+| `TELEGRAM_WEBHOOK_HOST` | Local bind host for the webhook server. Default: unset → dual-stack bind on all interfaces (IPv4+IPv6). Set explicitly on IPv6-only deployments (e.g. Fly.io 6PN). Equivalent to `platforms.telegram.extra.webhook_host`. |
 | `TELEGRAM_WEBHOOK_SECRET` | Secret token Telegram echoes back in each update for verification. **Required whenever `TELEGRAM_WEBHOOK_URL` is set** — the gateway refuses to start without it (GHSA-3vpc-7q5r-276h). Generate with `openssl rand -hex 32`. |
+| `TELEGRAM_ALLOW_BOTS` | Allow messages from other bots to be processed (`none` = reject all bot messages, `mentions` = allow only when the bot is @mentioned, `all` = allow all bot messages; default: `none`). Equivalent to `telegram.allow_bots`. |
+| `TELEGRAM_GUEST_MODE` | Let non-allowlisted groups trigger the bot only by an explicit @mention, every turn (default: `false`). Equivalent to `telegram.guest_mode`. |
+| `TELEGRAM_OBSERVE_UNMENTIONED_GROUP_MESSAGES` | Passively observe unmentioned group messages into shared session context, in allowlisted chats/topics only (default: `false`). Equivalent to `telegram.observe_unmentioned_group_messages`. |
 | `TELEGRAM_REACTIONS` | Enable emoji reactions on messages during processing (default: `false`) |
 | `TELEGRAM_REQUIRE_MENTION` | Require an explicit trigger before responding in Telegram groups. Equivalent to `telegram.require_mention` in `config.yaml`. |
 | `TELEGRAM_MENTION_PATTERNS` | JSON array, newline-separated list, or comma-separated list of regex wake-word patterns accepted when Telegram group mention gating is enabled. Equivalent to `telegram.mention_patterns`. |
@@ -56705,6 +56943,8 @@ mcp_servers:
 ```
 
 This creates a `mcp-github` toolset you can reference in `--toolsets` or platform configs. The bare server name (`github`) works as an alias. If a server is named like a built-in toolset (`browser`, `web`), that name resolves to the built-in tools **plus** the server's `mcp__<server>__*` tools; neither side shadows the other.
+
+In `platform_toolsets.<platform>`, a list that names no MCP server gets every enabled server, a list that names servers gets only those, and `no_mcp` drops them all. An explicitly empty list (`email: []`) gets no MCP servers.
 
 ### Plugin toolsets
 
@@ -64324,7 +64564,7 @@ handler does; `client-local (cli_only)` commands are terminal/UI features of a c
 | `/copy` | refused | HermesCLI._handle_copy_command | local | unavailable: terminal | slash.exec: refused | client-local (cli_only) |
 | `/cron` | read (bare / `list`; add/edit/pause/resume/run/remove control, from the classic CLI's own command socket only) | HermesCLI._handle_cron_command | slash.exec | unavailable: terminal | slash.exec | client-local (cli_only) |
 | `/curator` | control | HermesCLI._handle_curator_command | slash.exec | unavailable: advanced | slash.exec |  |
-| `/debug` | control | HermesCLI._handle_debug_command | slash.exec | slash.exec | slash.exec | uploads logs to a public paste |
+| `/debug` | control | HermesCLI._handle_debug_command | slash.exec | slash.exec | slash.exec | `/debug upload` uploads logs to a public paste (bare `/debug` is the privacy notice) |
 | `/deny` | control | messaging-only: unknown command | slash.exec | slash.exec | slash.exec | messaging-only |
 | `/diff` | read | HermesCLI._handle_diff_command | slash.exec | slash.exec | slash.exec |  |
 | `/discard` | refused | HermesCLI._handle_discard_command | slash.exec: refused | slash.exec: refused | prompt.resolve_unknown |  |
@@ -64562,6 +64802,23 @@ listener keeps working.
   there), `last_reply` (its newest reply, shortened as `preview` is; a pure compaction handoff is no
   reply, a carrier shows the reply it wraps), `git_branch`, `last_active_at` and `pinned`. Off by
   default, so the 1.5 s live-list poll pays nothing; on, a page is one batched store read.
+  The stored scope also pages and searches (`gateway/session_listing.py`); runtimes that serve this
+  advertise `session-list-cursor-v1` in `runtime.describe.capabilities`:
+  - `query`: only conversations whose title or id contains this text (case-insensitive; a title
+    also matches with `-`, `_`, `.` and spaces removed, and every segment of a compression chain
+    counts). The same rule as `hermes sessions list --search`. It must be 1 to 200 characters and
+    not only spaces.
+  - Each stored result carries `next_cursor`: an opaque string when more rows may follow, `null` when
+    the listing is exhausted. A last page may be empty. Send it back as `cursor` to read the next
+    page. The live scope is not paged: its result carries no `next_cursor`.
+  - A cursor is valid only with the `workspace`, `query` and `include_hidden` of the call that
+    returned it; `limit` and `picker` may change between pages. Any other cursor, a cursor this
+    method did not issue, or `query` / `cursor` with the live scope or with `title` answers
+    `invalid_params`.
+  - On an unchanged store, following `next_cursor` to `null` lists every conversation once, in the
+    order one unpaged read would. The store can change between calls (a conversation with a new
+    message moves to the front), so a later page may repeat a row an earlier page listed: key rows
+    by `session_id`. The 200 row cap per call stays.
 - `session.transcript({session_id, subagent_id?, cursor?, limit?, order?, inline_images?})` reads a
   conversation without attaching to it (`gateway/session_stored_reads.py`). It is authorized as
   `session.resume`'s read (`SessionAuthority.authorize`, `session:read`: profile, owner or operator).
@@ -66149,6 +66406,10 @@ The existing `release-signing` environment supplies:
 Publishing requires the Apple credentials. The existing after-sign hook owns
 notarization, so electron-builder's second notarization path is disabled.
 The publish gate verifies the signature, stapled ticket and Gatekeeper assessment.
+Recording the build refuses an update ZIP of 1 GiB (1,073,741,824 bytes) or
+more: Squirrel.Mac before Electron 44.7, which v0.22.0 ships, reads the whole ZIP
+into memory and crashes downloading one that size
+([electron/electron#55089](https://github.com/electron/electron/issues/55089)).
 The Darwin publish job waits for the arm64 build and its smoke, and serializes channel writes.
 
 ## Verification limits
@@ -66694,7 +66955,7 @@ data_dir = Path("~/.hermes/my-provider").expanduser()
 
 One gateway process can serve several profiles at once, and their turns run concurrently on different threads. Each agent gets its own `MemoryManager` and its own provider instance, initialized for one profile. Your provider must:
 
-- **Return a new instance per load.** `register(ctx)` should construct the provider (`ctx.register_memory_provider(MyProvider())`), not hand back a module-level singleton. The manager refuses to initialize an instance that another profile's manager already bound, and logs `memory_provider_instance_shared`.
+- **Return a new instance per load.** `register(ctx)` should construct the provider (`ctx.register_memory_provider(MyProvider())`), not hand back a module-level singleton. The manager refuses to initialize an instance that another profile's live manager already bound, on any host that serves several profiles, multiplexed or not, and logs `memory_provider_instance_shared`.
 - **Bind from `initialize()`.** Derive every store, path, client, bank and tenant from the `hermes_home` keyword (and secrets read through `get_secret()` during `initialize`), and keep that binding on `self`.
 - **Keep nothing profile-specific at module or class level.** No global "current store", and no rebinding a shared binding on each call. Two profiles' calls interleave, so a per-call rebind races.
 
@@ -68566,7 +68827,7 @@ conflating (`gateway/authz_mixin.py`):
 | Shared credential → satellite via `profile_routes` | Routed profile | Receiving (shared) adapter | Receiving adapter; after a restart the satellite still drains through the primary |
 | Shared bot → a profile that owns its own bot | Routed profile | Receiving adapter | Receiving adapter — the conversation stays with the bot the user wrote to |
 | Secondary-owned bot → `default` (`bot_profile: <secondary>`) | `default` (`agent:main`, default home) | Receiving (secondary) adapter | Receiving adapter |
-| Restored / synthetic source, no live provenance | Stored `source.profile` | **None** (fail closed) | Unique owner of `(platform, runtime)`, else `None` |
+| Restored / synthetic source, no live provenance | Stored `source.profile` | **None** (fail closed) | Unique owner of `(platform, runtime)`, else the Relay in that profile's map when it fronts the platform, else `None` |
 
 Outside multiplexing there is one adapter per platform, so both seams return
 it. `tests/gateway/test_multiplex_transport_matrix.py` asserts every row.
@@ -68581,6 +68842,14 @@ delivers through that bot's adapter or fails closed — a satellite routed
 through the default bot keeps answering from the default bot, a lane owned by
 a secondary never falls back to the default bot's credential. Entries written
 before the column existed carry `null` and keep the shared-bot heuristics.
+The relay-delivery marker is never persisted, so a restored lane that arrived
+over the relay finds no native adapter for its logical platform; delivery then
+falls back to the Relay registered in that profile's map when its transport
+advertises the platform (the same rule as `resolve_delivery_transport`). Only
+the primary serves the Relay, so a secondary's lane still fails closed.
+Auto-resume, heartbeats and plugin injection warm the Relay's per-chat egress
+routing from the restored source before dispatch, and a reconnecting Relay
+resumes the sessions of every platform it fronts.
 Over the relay, every outbound frame's `metadata.profile` (and `follow_up`'s
 key namespace) tells the connector which profile to stamp on the next
 `passthrough_forward`, so a button press after a routed slash command stays in
@@ -70894,6 +71163,22 @@ One directory per plugin means every plugin's data is inspectable in one
 predictable place. Secrets don't belong here — credential reads go through
 the standard `.env` / secret-scope path like everywhere else.
 
+### Redact secrets before storing or sending text
+
+Text your plugin saves or uploads (a transcript, a diff, a log) can carry API keys
+the user pasted. Run it through `ctx.redact_text()` first instead of importing
+Hermes internals:
+
+```python
+safe = ctx.redact_text(transcript, force=True)  # force: this text leaves the machine
+```
+
+It uses the same scrubber as Hermes's own output, at its strongest setting:
+prefixed keys become a sentinel such as `«redacted:sk-…»` with no key characters
+left, and assignments like `API_KEY=…` are masked. Patterns registered with
+`ctx.register_redaction_patterns()` apply too. Without `force`, a user who set
+`security.redact_secrets: false` gets the text back unchanged.
+
 ### Bundle skills
 
 Plugins can ship skill files that the agent loads via `skill_view("plugin:skill")`. Register them in your `__init__.py`:
@@ -73065,6 +73350,7 @@ with a name allows that one name only.
 | `tools.clarify_gateway` | `SKIPPED` | adding-platform-adapters.md § Public helpers for platform plugins |
 | `tools.url_safety` | `is_safe_url` | adding-platform-adapters.md § Public helpers for platform plugins |
 | `tools.url_safety` | `create_ssrf_safe_async_client` | adding-platform-adapters.md § Public helpers for platform plugins |
+| `tools.url_safety` | `create_ssrf_safe_client` | adding-platform-adapters.md § Public helpers for platform plugins |
 | `gateway.platforms._http_client_limits` | `platform_httpx_limits` | adding-platform-adapters.md § Public helpers for platform plugins |
 | `hermes_cli.gateway_setup_wizard` | `print_setup_header` | adding-platform-adapters.md § Public helpers for platform plugins |
 | `hermes_cli.gateway_setup_wizard` | `confirm_reconfigure` | adding-platform-adapters.md § Public helpers for platform plugins |
@@ -73094,6 +73380,12 @@ with a name allows that one name only.
 | `hermes_yaml` | `safe_load` | plugins/index.md § Check file paths and read YAML with Hermes's own helpers |
 | `hermes_yaml` | `safe_dump` | plugins/index.md § Check file paths and read YAML with Hermes's own helpers |
 | `hermes_cli.urllib_security` | `open_credentialed_url` | plugins/index.md § Send a credentialed HTTP request without leaking it on redirect |
+| `hermes_cli.chat_launch` | `hermes_command` | user-guide/features/plugins.md § A plugin with its own chat client |
+| `hermes_cli.chat_launch` | `print_exit_summary` | user-guide/features/plugins.md § A plugin with its own chat client |
+| `hermes_cli.gateway_chat` | `shell_client_env` | user-guide/features/plugins.md § A plugin with its own chat client |
+| `hermes_cli.session_worktree` | `create` | user-guide/features/plugins.md § A plugin with its own chat client |
+| `hermes_cli.session_worktree` | `restore` | user-guide/features/plugins.md § A plugin with its own chat client |
+| `hermes_cli.session_worktree` | `finish` | user-guide/features/plugins.md § A plugin with its own chat client |
 
 ---
 
@@ -73412,7 +73704,7 @@ Plugins add `plugin.<plugin_id>.<name>` methods (`ctx.register_rpc`) and session
 
 `session.active_list`, `session.activate`, and `session.close` are the process-local live-session controls used by the TUI session switcher. Use `session.list` / `/resume` for saved transcript discovery; use the active-session methods only for sessions that are currently open in the TUI gateway process.
 
-On the shared gateway's `hermes-gateway-v1` socket, a session picker reads stored conversations without attaching: `session.list` takes a `workspace` folder filter and, with `picker: true`, returns each row's `preview`, `last_reply`, `cwd`, `git_branch`, `workspace`, `last_active_at` and `pinned`; `session.transcript({session_id, subagent_id?, cursor?, limit?, order?})` pages a conversation's display rows across its compression lineage from the oldest or the newest, each compaction handoff a `row_kind: "compaction"` row at its position (`{rows, next_cursor, reset}`, opaque cursor, at most 2 MiB a page); an oldest-order cursor also polls for rows written since (`reset: true` when the rows it covered changed shape), and `subagent_id` reads a delegated child of the session. None of them subscribes the caller or starts an agent. Details: [Gateway local sessions](./gateway-local-sessions.md).
+On the shared gateway's `hermes-gateway-v1` socket, a session picker reads stored conversations without attaching: `session.list` takes a `workspace` folder filter and, with `picker: true`, returns each row's `preview`, `last_reply`, `cwd`, `git_branch`, `workspace`, `last_active_at` and `pinned`; with `scope: "stored"` it also takes a `query` (title or id text) and pages with `cursor` / `next_cursor` (capability `session-list-cursor-v1`); `session.transcript({session_id, subagent_id?, cursor?, limit?, order?})` pages a conversation's display rows across its compression lineage from the oldest or the newest, each compaction handoff a `row_kind: "compaction"` row at its position (`{rows, next_cursor, reset}`, opaque cursor, at most 2 MiB a page); an oldest-order cursor also polls for rows written since (`reset: true` when the rows it covered changed shape), and `subagent_id` reads a delegated child of the session. None of them subscribes the caller or starts an agent. Details: [Gateway local sessions](./gateway-local-sessions.md).
 
 Within one authenticated gateway, resuming or activating a live session attaches another event subscriber rather than replacing the previous connection. Streaming and terminal events go to all attached clients; disconnecting one client does not end a session another client is viewing. Existing submit exclusivity and configured busy-input policy remain in force. Attached clients can steer the session's subagents. This does not enable independent gateway processes to write the same session, nor does it imply durable prompt admission across an owner restart.
 
@@ -75900,6 +76192,10 @@ Native payloads contain `hermes-agent`, `tools`, `venv`, `pm-runtime`, `bin`,
 desktop bundles also carry the Webapp at `hermes-agent/apps/desktop/dist-webapp/`,
 which `hermes webapp` serves as shipped and never rebuilds.
 The TUI asset directory contains `entry.js` and module-mode package metadata.
+The `tools` store ships a user install's pinned PM tools, except Chromium on
+macOS: the browser tool installs it into the writable store on first use. It is left out
+because Squirrel.Mac before Electron 44.7 cannot download an update ZIP of 1 GiB
+or more, and v0.22.0 ships Electron 40.
 
 Docker keeps its existing TUI product at `/opt/hermes/ui-tui` and web output
 at `/opt/hermes/hermes_cli/web_dist`. The assembler also plants its shared TUI
@@ -75972,7 +76268,11 @@ consumers. They are not interchangeable cleanup targets.
   excludes cached sdist `src/` trees (including Rust `target/` outputs) before
   copying. On macOS and Linux, uv's wheel entries stay relative symlinks into
   `archive-v0/`, so each unpacked wheel ships once; on Windows uv writes
-  pointer files instead. The provider cache is unchanged; native
+  pointer files instead. Off Windows, each `archive-v0/` file the payload venv
+  holds byte for byte is then replaced by a relative link to the venv copy.
+  That shrinks the macOS update ZIP, which Squirrel.Mac before Electron 44.7
+  cannot download at 1 GiB or more. The first-use seed copies those links'
+  bytes into the machine cache. The provider cache is unchanged; native
   signing reaches the extracted binaries without scanning build-only artifacts.
 - PM-runtime and application builds share the provider's persistent uv cache.
   CI restores/saves that cache, not the temporary build HOME. Failed builds
@@ -85352,6 +85652,14 @@ membership, and currency checks use the same declaration reader.
 PM prepares core requirements, enabled extras, and enabled plugin requirements
 together. It seeds resolution from the existing lock. Compatible transitive
 versions can change, but declared constraints and exact pins remain binding.
+Core's lock still takes precedence over that seed: when core's `uv.lock` moves a
+package past both the previous environment's pin and the core lock that
+environment was built from (a security release of a transitive, say), the
+package moves to core's version for the installing interpreter's fork
+(`uv lock -P name==version`), and a plugin that cannot accept it is disabled by
+an update like any other plugin that no longer builds. Pins core did not move,
+packages core's lock does not pin, and conflicts between plugins keep the
+incumbent environment's versions.
 Each candidate gets a fresh workspace with explicit source, lock seed, and
 prepared environment inputs. Plugin snapshots keep a plugin's runtime dependencies
 and the optional extras this install selects (or the plugin's own requirements name);
@@ -85666,8 +85974,9 @@ update) or `pnpm fetch`, so another pnpm 12 passes those. The backstop for a
 lockfile written that way is CI: every change to `pnpm-lock.yaml` runs the JS checks,
 which install it with the pinned pnpm under `--frozen-lockfile` (with
 `--lockfile-only` when the installed tree is cached). That proves the lockfile matches
-the manifests and the release-age policy, not which pnpm wrote it. A user agent
-overridden through `pnpm_config_user_agent` is refused as well.
+the manifests and the release-age policy, not which pnpm wrote it. The preinstall
+reads the user agent pnpm reports, so a `pnpm_config_user_agent` override is
+refused unless it names the pinned version.
 
 In the repository root and the JS workspace folders, npm refuses every command that
 installs or resolves dependencies (`npm install` with or without `--ignore-scripts`,
@@ -93055,6 +93364,7 @@ directory of the hermes-agent repository, declaring:
 | `platforms` | OS restrictions, empty = all (optional) |
 | `title` | Human name shown on cards, e.g. `NVIDIA App` (optional; defaults to `name`) |
 | `onboarding` | `true` offers the plugin on the desktop onboarding card, beside the hosted connectors, on the platforms it lists. Curated: official or verified entries only (optional, default `false`) |
+| `default` | `true` installs and enables the plugin in every Hermes home, once: at the end of an install (or on first start for Desktop, Docker, Nix and Termux), on `hermes update` when it became a default since, and when a profile is created. Removing or disabling it sticks. Official or verified entries only; nothing is fetched where `security.allow_lazy_installs` is off (optional, default `false`) |
 | `docs_url` | External documentation link (optional) |
 | `known_issues` | Short notes shown at the install prompt, e.g. an unsupported install mode. Informational; they never block the install (optional) |
 | `version` | Human-readable label for the pinned sha, e.g. `"1.4.0"`; shown as `1.4.0 @ abcd1234` in the CLI, on the catalog card and on the Desktop **Update to** button (optional, cosmetic) |
@@ -95041,7 +95351,7 @@ This starts a local web server and opens `http://127.0.0.1:9119` in your browser
 | `--host` | `127.0.0.1` | Bind address |
 | `--no-open` | — | Don't auto-open the browser |
 | `--insecure` | off | **Deprecated / no-op.** Formerly bypassed auth on a non-loopback bind; it no longer disables authentication — a public bind always requires an auth provider (password or OAuth) |
-| `--isolated` | off | When launched from a named profile (`worker dashboard`), run a dedicated per-profile server instead of routing to the machine dashboard |
+| `--isolated` | off | When launched from a named profile (`worker dashboard`), run a dedicated per-profile server instead of routing to the machine dashboard. It lists only that profile; this is not a security boundary (see [Managing multiple profiles](#managing-multiple-profiles)) |
 
 ```bash
 # Custom port
@@ -95083,9 +95393,21 @@ whole server lifetime: a deep link that omits `?profile=` (for example a
 sees that profile's MCP servers, model and skills. An explicit `?profile=`
 in the URL always wins.
 
-Pass `--isolated` to opt out and run a dedicated server scoped to that
-profile (the pre-unification behavior — useful if you deliberately expose
-different profiles' dashboards with different auth).
+Pass `--isolated` to opt out and run a dedicated server for that profile
+(the pre-unification behavior). Its profile list, `/api/status` profile
+names, unified session sidebar and the Desktop profile rail (and so its
+SOUL editor) show only the launch profile.
+
+:::warning `--isolated` is not a security boundary
+`--isolated` is a routing and operations convenience, not tenant isolation.
+Every profile under one OS user can read every other profile's files: on
+the dedicated server, routes that take a profile selector, `/api/fs/*` and
+the agent's own terminal and file tools can still reach sibling profiles
+(`~/.hermes/profiles/*`). Different auth per profile's server
+does not change that. To keep people's data apart (family members,
+customers, teams), run each tenant's Hermes as a **separate OS user** or in
+a **separate container**. See [SECURITY.md](https://github.com/NousResearch/hermes-agent/blob/main/SECURITY.md) §2.2.
+:::
 
 The **Chat** tab follows the switcher too: a scoped chat spawns its PTY
 child with the selected profile's `HERMES_HOME`, so the conversation runs
@@ -95683,6 +96005,7 @@ same auth gate as the rest of `/api/`.
 | `GET /api/curator` · `PUT .../paused` · `POST .../run` | Skill-curator status + pause/resume + run |
 | `GET /api/portal` | Nous Portal auth + Tool Gateway routing (read-only) |
 | `POST /api/ops/prompt-size` · `/dump` · `/config-migrate` | Diagnostics (backgrounded) |
+| `POST /api/ops/debug-share` | Upload a redacted debug report + full logs to a public paste and return the URLs (synchronous). Body: `{consent: true, redact?, lines?}`; without `"consent": true` it returns `400` and uploads nothing |
 | `PUT /api/webhooks/{name}/enabled` | Enable / disable a webhook route |
 | `POST /api/skills/hub/install` · `/uninstall` · `/update` | Skills hub actions (backgrounded) |
 | `GET /api/skills/hub/search` | Search the skill hub across all sources |
@@ -97453,7 +97776,21 @@ the feature.
 The location can be relocated with the `HERMES_MANAGED_DIR` environment variable
 (for containers or non-`/etc` deployments). This is a deployment/bootstrap path
 knob — like `HERMES_HOME` — set by the same administrator who owns the managed
-files. It is **never persisted** to any `.env` by Hermes.
+files. Hermes ignores the variable (in any letter case) in every `.env`, secret
+source and top-level `config.yaml` key, and logs a warning when it skips one: set
+it in the launch environment (service unit `Environment=`, container image), not
+in `~/.hermes/.env`. On NixOS, `services.hermes-agent.environment` is written to
+`$HERMES_HOME/.env`, so it can't carry this variable: use
+`systemd.services.hermes-agent.environment` (and
+`systemd.services.hermes-backend.environment` when the backend runs),
+`environment.variables` for interactive shells, or, in container mode, an `--env`
+entry in `services.hermes-agent.container.extraOptions` with the directory mounted
+through `container.extraVolumes`. The Home Manager module writes
+`services.hermes-agent.environment` to the same `.env`: set the variable on the
+user units instead, with `systemd.user.services.hermes-agent.Service.Environment`
+(and `hermes-backend`) on Linux, or
+`launchd.agents.hermes-agent.config.EnvironmentVariables` (and `hermes-backend`)
+on macOS.
 
 ```bash
 # Point managed scope at a custom directory (set by IT / the deployment, not the user)
@@ -97728,7 +98065,7 @@ curl -X POST http://your-host:9900/ \
 ## Troubleshooting
 
 - **Peers can't reach the card URL** — the card was advertising your bind address; set `A2A_PUBLIC_URL` to the externally routable URL.
-- **`401 Unauthorized`** — token mismatch; check `A2A_PEER_TOKENS`/`A2A_BEARER_TOKEN` on the server and the peer's `auth:` block.
+- **`401 Unauthorized`** — token mismatch; check `A2A_PEER_TOKENS`/`A2A_BEARER_TOKEN` on the server and the peer's `auth:` block. Every `A2A_PEER_TOKENS` entry must be `name:token`: a bare token is ignored, and a value with no `name:token` pair refuses every caller unless `A2A_BEARER_TOKEN` is also set (the gateway log has an ERROR saying which).
 - **Server won't bind non-localhost** — by design: set a bearer token first, then `A2A_HOST=0.0.0.0`.
 - **`403` "Host must be a loopback name…" with no token** — without a token the server answers only requests addressed to a loopback name (`localhost`, `127.x.x.x`, `[::1]`) or the `A2A_PUBLIC_URL` host, so a web page on another hostname that resolves to your machine cannot read the card or the served-agent list. Call it by one of those names, set `A2A_PUBLIC_URL` to the name a local proxy forwards, or configure a token.
 - **`403` "Content-Type must be application/json" with no token** — the POST had a missing or non-JSON `Content-Type` (plain `curl -d` sends a form type); add `-H 'Content-Type: application/json'`.
@@ -103865,7 +104202,14 @@ using the default listener's existing credentials.
   with `GH_TOKEN` / `GITHUB_TOKEN` from `profiles/coder/.env`. If coder has no
   adapter for that platform the delivery fails (502) rather than posting as
   another profile's bot; a default route likewise never borrows a platform that
-  is enabled only on a secondary profile.
+  is enabled only on a secondary profile. A shared-bot satellite (no bot of
+  its own, reached through `profile_routes`) delivers through the shared bot
+  only to a chat a route maps to it, the same rule as its cron jobs and its
+  `send_message` sends and reactions; any other target, including an unrouted
+  home channel, fails (502). On every platform except Telegram, Slack, Matrix
+  and Mattermost (whose thread ids are scoped to a chat), a `thread_id` target
+  needs a route that names that `thread_id`; a chat-only route does not cover
+  it.
 - `/p/coder/api/platforms/<platform>/events` callbacks are verified and
   dispatched by coder's adapter; when coder has none the callback is a 503.
 
@@ -104266,8 +104610,8 @@ default-profile behavior.
 Cron jobs owned by a routed profile deliver through the shared bot too, but
 only to targets an enabled route with a `chat_id`/`thread_id` maps to that
 profile (a `guild_id + chat_id` route qualifies its channel) — a routed
-profile's job targeting an unrouted chat (or a chat routed to another profile)
-is never sent through the shared bot. Guild-only routes do not qualify a cron
+profile's job targeting an unrouted chat (or a chat, topic or thread whose most
+specific route names another profile) is never sent through the shared bot. Guild-only routes do not qualify a cron
 target; add a `chat_id` route for the delivery channel. Routes declaring
 `user_id` do not qualify either: cron has no authenticated inbound sender, so
 they need a separate location-only route. Telegram DMs are the exception: a
@@ -104275,6 +104619,43 @@ Telegram DM's chat id is the user's id, so a `user_id` route qualifies cron
 delivery to that user's DM without an extra route. The routed profile does not need its
 own `platforms.<platform>` block for this: the shared bot's authorization comes
 from the route, not from the satellite's config.
+
+A routed profile's `send_message` sends and reactions, and plugin
+`ctx.platform_actions`, follow the same target rule, with one addition: during a
+turn, the conversation that turn came from also qualifies whenever the inbound
+route matcher would hand it to that profile. That covers guild-only routes, a
+thread under a routed channel, and `user_id` routes. The target is matched on
+the thread the send actually reaches. A target without a thread is the chat's
+top level (Telegram's General topic, a Slack/Matrix/Mattermost channel, a Feishu
+or Google Chat group), so a route pinned to one topic or thread does not cover
+the rest of the chat. On Discord, where a thread is its own channel, the thread's
+channel id is that thread. A thread other than the turn's own qualifies only if
+the most specific route matching it names the profile, the same route inbound
+dispatch picks. A chat route therefore does not cover a topic or thread that a
+more specific route pins to another profile. This holds for cron delivery too.
+One known gap: a Discord thread addressed by its own channel id is matched as a
+plain channel, so no route that names it as a thread (`thread_id`) or through
+its parent channel or guild is consulted. A `chat_id` route on the thread's id
+can therefore qualify it even when dispatch hands the thread to another profile.
+Don't route a thread id to one profile while its parent channel, or a
+`thread_id` route on it, names another.
+If the primary's route table cannot be read, cron's own shared-bot view refuses
+every target until it can. A routed profile that enables the platform in its own
+config still falls back to the running gateway's check, which applies the same
+rule to the routes the gateway has loaded.
+A Google Chat send without a thread replies under the space's last inbound
+thread, so once a route pins any thread of a space to another profile, a
+routed profile's thread-less sends to that space are refused; name the thread
+explicitly.
+Webhook deliveries never qualify through the turn's conversation, because they
+have no inbound conversation.
+Reactions are checked against the chat and the thread named in the target, not
+against the topic the reacted-to message is in. A profile routed to a chat can
+therefore react to any message in it, including one in a topic routed to another
+profile, and a profile routed to one topic names that topic in a `send_message`
+reaction target (`telegram:<chat>:<topic>`). A plugin's
+`ctx.platform_actions.add_reaction` names no thread; when it targets the turn's
+own message, the turn's topic or thread is used.
 
 ## Start, stop, or restart all gateways at once
 
@@ -105853,6 +106234,7 @@ Startup warnings now include a `→` remediation line telling you exactly which 
 
 - The bootstrap token (`BWS_ACCESS_TOKEN`) is itself sensitive — anyone with it can read every secret the machine account has access to. Treat it the same as any other API key.
 - Hermes will refuse to let Bitwarden overwrite the bootstrap token itself, even with `override_existing: true`. If you store `BWS_ACCESS_TOKEN` as a secret inside the project, it's silently skipped during apply.
+- `BWS_ACCESS_TOKEN` is stripped from the processes the agent and its tools spawn (terminal, `execute_code`, background processes, cron scripts, CLI helpers). `terminal.env_passthrough` and skill `required_environment_variables` cannot re-allow it, so `bws` run by the agent never sees the token. Hermes's own processes for the same profile still get it: its `bws` child, a gateway it starts or restarts, and `key_cmd` helpers. Run `bws` yourself from your own shell.
 - PM checks the managed archive against its SHA-256 hash in `pm/lock.json`. A mismatch aborts installation.
 - The same lock declares the version. First use does not resolve a "latest" release. External binaries remain outside these PM checks.
 
@@ -106084,6 +106466,7 @@ Successful, complete pulls are cached in-process and on disk at `<hermes_home>/o
 
 - A 1Password service-account token can read every secret the account has access to. Store it in `~/.hermes/.env` (not `config.yaml`), and revoke + regenerate from 1Password if it leaks.
 - Hermes refuses to let a resolved value overwrite the token env var itself, even with `override_existing: true`.
+- `OP_SERVICE_ACCOUNT_TOKEN` is stripped from the processes the agent and its tools spawn (terminal, `execute_code`, background processes, cron scripts, CLI helpers). `terminal.env_passthrough` and skill `required_environment_variables` cannot re-allow it, so `op` run by the agent never sees the token. Hermes's own processes for the same profile still get it: its `op` child, a gateway it starts or restarts, and `key_cmd` helpers such as `op read`. To run `op` with the service account yourself, use your own shell; for `op` in the agent's terminal, use the desktop app integration or a Connect server.
 - The `op` child process gets a minimal allowlisted environment (auth/session vars + `PATH`/`HOME` and the `op` config-location vars `OP_CONFIG_DIR`/`XDG_CONFIG_HOME`), not a copy of the full `os.environ`, so post-dotenv provider credentials aren't all inherited by the child. Set `OP_CONFIG_DIR` when `~/.config` is not writable by the Hermes user (common in containers).
 - References are validated to start with `op://`, and the reference is passed after a `--` option terminator so a crafted value can't be parsed as an `op` flag.
 
