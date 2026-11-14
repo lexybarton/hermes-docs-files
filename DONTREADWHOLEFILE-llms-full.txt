@@ -997,7 +997,8 @@ On Linux and macOS, `hermes update` stops every gateway running from this instal
 - The paused set is recorded in the Hermes home before the first stop. If the update is killed, the next `hermes` command (or `hermes update`) starts exactly those gateways again. A failed update that never changed the checkout restarts them on the old code. If the dependency sync fails after the checkout moved, they restart once a launch has synced the dependencies.
 - A gateway the updater cannot stop through its supervisor (an s6 or custom systemd unit, `--external-supervisor`, a launchd job that started this update) is left running and refreshed after the update, as before.
 - `--no-gateway-restart` stops nothing; you manage the gateways.
-- The pause never blocks an update. If it cannot list, record or stop the gateways, it restarts anything it stopped, says so, and the update continues the way it did before the pause existed: gateways run through the swap and are restarted afterwards.
+- `hermes update --force` (Linux and macOS) skips the wait for in-flight work. Each gateway is stopped at once and prints one `⏹ <gateway>: stopped by --force, interrupting N unit(s): …` line naming the chat turns, cron jobs and background delegations it was running. Those are interrupted (background delegations as resumable) and its tool and background processes are stopped; a gateway still alive about 12 seconds later is killed, and the background processes it recorded are stopped for it (`⏹ <gateway>: also stopped N background process(es) it left behind`). The update then runs and the gateways start again on the new code as usual. If a stop still has not finished after the kill (a systemd stop job still running, or a process that survives SIGKILL), the update stops before changing the checkout and names the unit or PID to check; nothing is started behind that stop, and the next `hermes` command restarts the stopped gateways once it has finished.
+- The pause never blocks an update, apart from the unfinished `--force` stop above. If it cannot list, record or stop the gateways, it restarts anything it stopped, says so, and the update continues the way it did before the pause existed: gateways run through the swap and are restarted afterwards.
 
 Windows already paused its gateways before the update (they lock files the dependency sync replaces) and restarts them once the update completes, after the builds.
 
@@ -1054,17 +1055,19 @@ Sessions and messages created after the update are not in that snapshot.
 
 ### Why the gateway restart can take a while
 
-The restart is drain-first: the running gateway refuses new turns, then waits for in-flight work (chat turns, cron jobs, API runs) to finish before exiting, capped by `agent.restart_after_turn_timeout` (30 minutes by default) so a long-running job is never cut off mid-run. While that wait is in progress the updater prints, every 30 seconds, what the gateway is still holding for — for example:
+The restart happens when the gateway is idle: the running gateway keeps serving normally (new turns, background-process notices and background-subagent completions all still run) and exits at the first moment no work is in flight (chat turns, cron jobs, API runs, background subagents, notify-watched background processes). Live work is never interrupted on a timer: every `agent.restart_after_turn_timeout` seconds (30 minutes by default) the gateway logs a warning naming what it is still waiting on and keeps waiting; only a forced restart stops it. While that wait is in progress the updater prints, every 30 seconds, what the gateway is still holding for — for example:
 
 ```
   → hermes-gateway: draining (up to 1875s)...
-  ⏳ still draining — 1560s left before the forced restart
+  ⏳ still waiting for idle — 1560s left of this wait (live work is never interrupted; past it the gateway keeps its restart pending)
      waiting on 1 active work unit(s):
        • cron job 6ba19dab68df (nightly-scout) in external worker pid 573597, running 6m40s
-     finish or kill the work above to release the drain now; agent.restart_after_turn_timeout in config.yaml caps this wait
+     finish or kill the work above to restart now, or `hermes update --force` to stop it now
 ```
 
-Chat turns show their session key, model and current tool; cron jobs show the job id, name and the process running them (an external restart-safe worker on systemd installs, otherwise the gateway itself). `hermes gateway status` lists the same units while the gateway is draining. To stop waiting, finish or kill the listed work, or lower `agent.restart_after_turn_timeout` in `config.yaml` (`0` enters the forced drain immediately).
+Chat turns show their session key, model and current tool; cron jobs show the job id, name and the process running them (an external restart-safe worker on systemd installs, otherwise the gateway itself). `hermes gateway status` lists the same units while the gateway is draining. To stop waiting, finish or kill the listed work, or start the update with `hermes update --force`, which stops every gateway at once and interrupts that work (see [Gateway downtime during an update](#gateway-downtime-during-an-update)). A second `hermes update --force` cannot cut short an update that is already waiting: that update holds the update lock, so the second one is refused until it finishes.
+
+The updater's wait is bounded (the `draining (up to …)` figure), the work is not: when that wait runs out on a gateway that is still doing work, the updater and the gateway restart command leave it running and print one line naming what it is still doing. The gateway keeps its restart pending and exits at its first idle moment; its service (systemd, launchd or an external supervisor) then starts it on the new code, and the update's fleet check lists it as `restart pending`, not stale. A gateway started by hand with `gateway run` exits the same way and needs starting again. The pre-swap pause works the same way: it stops nothing that is still working and the update carries on without the pause.
 
 Wedged work does not hold the restart: a chat turn idle past `agent.gateway_timeout`, or a cron run older than the scheduler's in-flight allowance (`max(2 × the job's interval, cron.inflight_max_minutes)`, 30 minutes by default), is excluded from the wait and interrupted by the restart instead.
 
@@ -1342,8 +1345,9 @@ Follow any blocker diagnostic for the specific process and installation. Do
 not kill every process named Python or Hermes. Source updates and MSIX package
 replacement have different owners and shutdown requirements.
 
-The parser retains `--force` and `--force-venv` for Windows compatibility. They
-are not normal update instructions or a guarantee that an OS file lock can be
+On Windows, `--force` also lets the update proceed when another `hermes.exe` is
+detected, and `--force-venv` mutates the venv while other processes hold it.
+Neither is a normal update instruction or a guarantee that an OS file lock can be
 bypassed. Inspect `hermes update --plan`, the update log, and `hermes pm status`
 before retrying a failed update.
 
@@ -4746,14 +4750,14 @@ Writes from the background self-improvement review are always scanned, whatever 
 
 ### Write approval for skill writes
 
-Independent of the content scanner above, `skills.write_approval` gates **every** agent skill write (create / edit / patch / delete / supporting files) behind your explicit approval — the same approve/deny mechanism as dangerous commands:
+Independent of the content scanner above, `skills.write_approval` gates every skill write made through the `skill_manage` tool (create / edit / patch / delete / supporting files) behind your explicit approval — the same approve/deny mechanism as dangerous commands:
 
 ```yaml
 skills:
   write_approval: false   # false = write freely (default) | true = stage every write for review
 ```
 
-When on, skill writes are staged under `~/.hermes/pending/skills/` and reviewed with `/skills pending`, `/skills diff <id>`, `/skills approve <id>`, `/skills reject <id>` — from the CLI or any messaging platform. Toggle at runtime with `/skills approval on|off`. Memory has the same gate (`memory.write_approval`, below). Full walkthrough: [Gating agent skill writes](./features/skills.md#gating-agent-skill-writes-skillswrite_approval).
+When on, skill writes are staged under `~/.hermes/pending/skills/` and reviewed with `/skills pending`, `/skills diff <id>`, `/skills approve <id>`, `/skills reject <id>` — from the CLI or any messaging platform. Toggle at runtime with `/skills approval on|off`. Memory has the same gate (`memory.write_approval`, below). Neither gate covers direct edits by the generic file tools or the terminal. Full walkthrough: [Gating agent skill writes](./features/skills.md#gating-agent-skill-writes-skillswrite_approval).
 
 ## Memory Configuration
 
@@ -4763,10 +4767,10 @@ memory:
   user_profile_enabled: true
   memory_char_limit: 2200   # ~800 tokens
   user_char_limit: 1375     # ~500 tokens
-  write_approval: false     # true = require approval before any memory write
+  write_approval: false     # true = require approval for memory-tool writes
 ```
 
-With `memory.write_approval: true`, memory writes need your approval before they land: interactive CLI turns prompt inline; messaging sessions and the background self-improvement review stage the write for `/memory pending` → `/memory approve <id>` / `/memory reject <id>` review. Toggle at runtime with `/memory approval on|off`. See [Controlling memory writes](./features/memory.md#controlling-memory-writes-write_approval).
+With `memory.write_approval: true`, writes made through the `memory` tool need your approval before they land: interactive CLI turns prompt inline; messaging sessions and the background self-improvement review stage the write for `/memory pending` → `/memory approve <id>` / `/memory reject <id>` review. Toggle at runtime with `/memory approval on|off`. See [Controlling memory writes](./features/memory.md#controlling-memory-writes-write_approval).
 
 ## Context File Truncation
 
@@ -5089,7 +5093,7 @@ it lets in-flight chat turns keep running before it interrupts them:
 agent:
   restart_drain_timeout: 0          # default: interrupt in-flight chat turns at once
   cron_drain_timeout: 30            # floor for cron jobs and api_server (/v1) runs
-  restart_after_turn_timeout: 1800  # /restart and `gateway restart`: wait for turns BEFORE stopping
+  restart_after_turn_timeout: 1800  # /restart and `gateway restart` restart when idle; warn (never interrupt) every N s
 ```
 
 With the default `0`, a restart interrupts a running turn immediately. The turn settles as
@@ -6552,7 +6556,8 @@ The final prompt is sent to the configured STT provider alongside the audio file
 voice:
   record_key: "ctrl+b"         # Push-to-talk key inside the CLI
   max_recording_seconds: 120    # Hard stop for long recordings
-  auto_tts: false               # Enable spoken replies automatically when /voice on
+  auto_tts: false               # Enable automatic spoken replies in gateway chats
+  auto_tts_mode: "all"          # "all" (legacy default) | "voice_only"
   beep_enabled: true            # Play record start/stop beeps in CLI voice mode
   beep_volume: 0.3              # Beep amplitude (0.0-1.0); raise it on quiet systems / headphones
   silence_threshold: 200        # RMS threshold for speech detection
@@ -6560,6 +6565,13 @@ voice:
 ```
 
 Use `/voice on` in the CLI to enable microphone mode, `record_key` to start/stop recording, and `/voice tts` to toggle spoken replies. See [Voice Mode](./features/voice-mode.md) for end-to-end setup and platform-specific behavior.
+
+For gateway chats with no explicit per-chat `/voice` mode, `voice.auto_tts_mode`
+controls which replies receive audio when `voice.auto_tts` is enabled. The
+default, `all`, preserves the existing behavior: replies to both text and voice
+input include audio. Set it to `voice_only` to include audio only when the
+triggering message is voice input. Explicit `/voice off`, `/voice on`, and
+`/voice tts` choices still override the global default for that chat.
 
 ## Streaming
 
@@ -6951,7 +6963,7 @@ security:
       - "/etc/hermes/blocked-sites.txt"
 ```
 
-When enabled, any URL matching a blocked domain pattern is rejected before the web or browser tool executes. This applies to `web_search`, `web_extract`, browser navigation, and any tool that accesses URLs.
+When enabled, any URL matching a blocked domain pattern is rejected before the web or browser tool executes. This applies to `web_extract`, browser navigation, `vision_analyze` and `video_analyze` URLs, and skills hub downloads. A `web_extract` redirect to a blocked host is caught after the provider has fetched it: the page is withheld from the agent, but the blocked host still saw the request. `web_search` takes a query rather than a URL and does not filter its result list. Other URL fetches (kanban URL attachments, cron URL monitors, gateway media downloads) only apply the private-address SSRF check, not this blocklist.
 
 Domain rules support:
 - Exact domains: `admin.example.com`
@@ -11036,6 +11048,7 @@ The following patterns trigger approval prompts (defined in `tools/approval.py`)
 | `pkill`/`killall` hermes/gateway | Self-termination prevention |
 | `gateway run` with `&`/`disown`/`nohup`/`setsid` | Prevents starting gateway outside service manager |
 | `docker stop/kill/restart`, `docker compose down/stop/kill/restart` | Container lifecycle (also catches global flags and `docker-compose`) |
+| `docker`/`podman` `rm`, `container rm/remove`, `volume rm/remove/prune`, `container/system prune`; `podman system reset`; `docker compose rm` / `docker-compose rm` | Container and volume destruction (`image rm`/`rmi`/`network rm` stay ungated: a pull or recreate restores them) |
 | `docker -H`/`--host`/`--context`, `DOCKER_HOST=`/`DOCKER_CONTEXT=` | Docker daemon redirect — the command targets a different (often remote) daemon |
 | `docker context use` | Switches the default daemon for all future docker commands |
 | `podman --remote`/`-r`/`--url`/`--connection`/`--identity`, `CONTAINER_HOST=` | Podman remote daemon redirect |
@@ -11605,7 +11618,7 @@ security:
       - "/etc/hermes/blocked-sites.txt"
 ```
 
-When a blocked URL is requested, the tool returns an error explaining the domain is blocked by policy. The blocklist is enforced across `web_search`, `web_extract`, `browser_exec`, and all URL-capable tools.
+When a blocked URL is requested, the tool returns an error explaining the domain is blocked by policy. The blocklist is enforced on `web_extract`, browser navigation, `vision_analyze` and `video_analyze` URLs, and skills hub downloads. A `web_extract` redirect to a blocked host is caught after the provider has fetched it, so the page is withheld from the agent but the host still saw the request. `web_search` takes a query, not a URL, so it is not gated, and its result list is not filtered. Kanban URL attachments, cron URL monitors and gateway media downloads apply only the private-address SSRF check.
 
 See [Website Blocklist](./configuration.md#website-blocklist) in the configuration guide for full details.
 
@@ -13279,7 +13292,9 @@ skills:
 When `write_approval: true`, every `skill_manage` write (create / edit /
 patch / delete / write_file / remove_file) is **staged** instead of committed —
 a SKILL.md is too large to review inline, so staging applies regardless of
-whether the write came from a foreground turn or the background review.
+whether the write came from a foreground turn or the background review. It
+doesn't cover direct edits of skill files by the generic file tools or the
+terminal.
 Staged writes survive restarts under `~/.hermes/pending/skills/` and are
 reviewed with the same familiar approve/deny flow as dangerous commands:
 
@@ -14529,6 +14544,13 @@ This is the answer to "the agent saved a wrong assumption about me": set
 `write_approval: true`, and every save — especially the unprompted background
 ones — waits for your yes/no before it ever enters your profile.
 
+The gate covers writes made through the `memory` tool. It is not a file-system
+lock: in a foreground turn the generic file tools (`write_file`, `patch`) and the
+terminal can still edit `MEMORY.md` / `USER.md` directly. The background review
+cannot by default: its tool whitelist denies those write tools, so its saves
+reach the gate unless you name one in `auxiliary.background_review.extra_tools`
+(see [below](#allowing-a-narrowly-scoped-extra-review-tool-extra_tools)).
+
 A staged `patch` or `remove` (the background review stages these even with the
 gate off) records the full entry it targets, and `/memory pending` shows it.
 Approval applies to exactly that entry: if it changed after the write was staged,
@@ -14699,9 +14721,11 @@ skills:
   write_approval: false     # false = write freely (default) | true = require approval
 ```
 
-When `write_approval: true`, skill writes (create / edit / patch / write_file /
-delete) always **stage** regardless of origin. You review the one-line gist
-inline, but the full diff stays out-of-band:
+When `write_approval: true`, skill writes (the `skill_manage` actions create / edit / patch / write_file /
+remove_file / delete) always **stage** regardless of origin. Like the memory gate, it covers
+writes made through the `skill_manage` tool, not direct edits of skill files by
+the generic file tools or the terminal. You review the one-line gist inline, but
+the full diff stays out-of-band:
 
 ```
 /skills pending             # list staged skill writes + a one-line gist each
@@ -18649,6 +18673,20 @@ cron:
   wrap_response: false
 ```
 
+#### Per-job override
+
+A single job can override the global setting, for example to get one briefing delivered clean while every other job keeps its header. An override set on the job always wins; a job without one follows `cron.wrap_response`.
+
+From the CLI:
+
+```bash
+hermes cron create "0 8 * * *" "Morning briefing" --no-wrap-response   # deliver raw
+hermes cron edit <job_id> --wrap-response                               # force the wrapper on
+hermes cron edit <job_id> --inherit-wrap-response                       # follow the global setting again
+```
+
+Through the `cronjob` tool, set `wrap_response` to `on`, `off` or `inherit`. Leaving it out keeps the job's current setting, and a new job inherits. The dashboard API accepts `true`, `false` or `null` (inherit); any other value, including the string `"false"`, is rejected rather than stored.
+
 ### Push notifications (`cron.delivery.notify`)
 
 Cron output is a *final* delivery, not a progress message, so by default it is
@@ -18710,6 +18748,13 @@ Behaviour is **thread-preferred**, scoped to the job's own conversation:
   thread's session, so a reply in-thread continues with full context. A
   recurring job (e.g. a daily brief) opens a fresh thread per run, keeping each
   delivery's follow-up discussion isolated.
+  A job created *inside* a Telegram topic (or another thread) keeps delivering to
+  that topic instead, since its origin pins it. To give such jobs a fresh thread
+  per run too, set `platforms.telegram.extra.cron_fresh_thread_per_run: true`
+  (Telegram forum topics; Discord cannot nest a thread inside the job's thread,
+  so a Discord job created in a thread keeps delivering there). It only affects
+  deliveries back to the job's own topic; an explicit `chat_id:thread_id` target
+  is never overridden.
 - **DM-only platforms** (WhatsApp, Signal, SMS): no threads exist, so the brief
   is mirrored into the target DM session instead (the origin DM, or the home DM
   for fallback and bare-platform jobs) — the DM itself is the continuation surface.
@@ -19384,6 +19429,8 @@ Cron jobs run in a completely fresh agent session. The prompt must contain every
 ## Security
 
 Scheduled task prompts are scanned for prompt-injection and credential-exfiltration patterns at creation and update time. Prompts containing invisible Unicode tricks, SSH backdoor attempts, or obvious secret-exfiltration payloads are blocked.
+
+A `curl` that sends an `Authorization` header built from a secret variable is blocked for every host, `api.github.com` included. For GitHub API calls from a scheduled job, have the prompt use `gh api ...` (the `gh` CLI uses its own stored login; with a container or profile `HOME`, log in under that home), or put the request in a [script](#no-agent-mode-script-only-jobs) under `~/.hermes/scripts/` and give it a token through [`terminal.env_passthrough`](#giving-a-script-a-credential) under a name of your own (e.g. `MY_GITHUB_PAT`). `GITHUB_TOKEN` and `GH_TOKEN` are Hermes-managed credentials and are never passed through. Skill bodies attached with `--skill` get the looser assembled-prompt scan, so the bundled GitHub skills' authenticated `curl` examples still load.
 
 ---
 
@@ -21503,6 +21550,13 @@ target is that same chat (and topic), a missing `--user-id` is filled with the s
 `group_sessions_per_user` (the default), that keeps the wake in the participant's own session instead
 of a second, shared one. Subscriptions to any other chat or topic never take the caller's id, and
 neither does one given an explicit `--user-id-alt`.
+
+Without `--thread-id`, the subscription targets the caller's own topic when it subscribes its own chat
+from inside a gateway session. Otherwise it takes the thread of this task's existing subscription to the
+same chat; when several exist, it takes the lowest thread id and names the others on stderr. A Telegram
+DM target with nothing to infer from warns that the ping goes to the DM root.
+`notify-unsubscribe` without `--thread-id` removes the matching row the same way: the chat's root-lane
+subscription when there is one, else the caller's own topic, else the chat's only threaded subscription.
 
 **Discord threads under `profile_routes`:** when the gateway multiplexes profiles and routes a *channel*
 to a profile, a subscription created from the CLI for a *thread* in that channel needs the thread's route
@@ -25733,7 +25787,8 @@ DISCORD_ALLOWED_USERS=284102345871466496
 voice:
   record_key: "ctrl+b"            # Key to start/stop recording
   max_recording_seconds: 120       # Maximum recording length
-  auto_tts: false                  # Auto-enable TTS when voice mode starts
+  auto_tts: false                  # Enable automatic spoken replies in gateway chats
+  auto_tts_mode: "all"             # "all" (legacy default) | "voice_only"
   beep_enabled: true               # Play record start/stop beeps
   silence_threshold: 200           # RMS level (0-32767) below which counts as silence
   silence_duration: 3.0            # Seconds of silence before auto-stop
@@ -27567,7 +27622,7 @@ tts:
 
 **Supported `output_format` values:** `mp3` (default), `wav`, `ogg`, `flac`, `m4a`, `aac`, `amr`, `opus`. Your command must actually produce that format (e.g. via `ffmpeg`); Hermes only validates the declared value and names the output file accordingly. An unknown value falls back to `mp3`. The chosen format is also exposed to the command as the `{format}` placeholder.
 
-**Subprocess environment:** command providers (TTS and STT) run with Hermes secrets scrubbed from the child environment — gateway bot tokens, LLM provider API keys, and internal relay credentials are removed; `PATH`, `HOME`, locale, and other normal variables are kept. If your command template needs its own API key from the environment (e.g. a `curl` one-liner), list the variable names under `env_passthrough` in the provider config:
+**Subprocess environment:** command providers (TTS and STT) run with Hermes secrets scrubbed from the child environment — gateway bot tokens, LLM provider API keys, and internal relay credentials are removed; `PATH`, `HOME`, locale, and other normal variables are kept. If your command template needs its own API key from the environment (e.g. a `curl` one-liner), list the variable names under `env_passthrough` in the provider config. Hermes-managed provider keys such as `OPENAI_API_KEY` are refused there (dropped with a log warning); give the command's key its own variable name:
 
 ```yaml
 tts:
@@ -28799,7 +28854,7 @@ Without an installed service, the gateway Hermes starts for you (Hermes Desktop,
 :::tip Picking up new credentials after `hermes auth add` / `hermes auth reset`
 Agents run as threads inside the one gateway process; the only child processes are tool subprocesses (terminal commands, browsers), which never hold provider credentials. A running gateway also re-reads the `openai-codex` login it seeded from `auth.json` the next time its pool selects that entry after it had gone `exhausted` or `dead` (entries added with `hermes auth add openai-codex` are independent accounts and are not resynced). When you want every session on the fresh login at once, restart the gateway — but prefer the drain-aware path over a bare kill:
 
-- `hermes gateway restart` asks the gateway (SIGUSR1) to refuse new turns, waits up to `agent.restart_after_turn_timeout` (default 1800 s) for in-flight turns to finish, exits, and lets launchd's `KeepAlive` relaunch it; the new process reads `auth.json` from scratch.
+- `hermes gateway restart` asks the gateway (SIGUSR1) to restart when idle: it keeps serving, exits at the first moment no work is in flight (warning every `agent.restart_after_turn_timeout` seconds, default 1800, with what it is still waiting on), and lets launchd's `KeepAlive` relaunch it; the new process reads `auth.json` from scratch.
 - `launchctl kickstart -k gui/$UID/ai.hermes.gateway` sends SIGTERM instead: the gateway interrupts in-flight chat turns after `agent.restart_drain_timeout` (default `0` — immediately; the user is told and the turn resumes on their next message), gives cron runs and api_server (`/v1`) runs `agent.cron_drain_timeout` (default 30 s), kills tool subprocesses and exits, then launchd relaunches it. Nothing from the old process survives, so a session that still fails with `401` after the relaunch is talking to a different gateway process — check `hermes gateway status` (and `launchctl list | grep hermes`) for a second PID, such as a manually started `hermes gateway run`, and stop that one too.
 :::
 
@@ -28969,6 +29024,8 @@ gateway:
 ```
 
 Disable it on noisy or low-priority platforms while leaving it on for your primary chat. The notification is sent once per restart, regardless of how many sessions were in flight.
+
+A notice that cannot go out yet is kept, not dropped. This covers the home-channel notice and the "restarted successfully" reply to the chat that sent `/restart`. A platform can still be reconnecting, or Telegram can be waiting for its first successful poll. The gateway sends the notice once that platform reconnects or its send path is ready. A `/restart` reply still undelivered 30 minutes later is discarded.
 
 ### Typing indicators
 
@@ -29777,7 +29834,7 @@ At the moment only the `platforms.<name>.extra` form is deep-merged into the pla
 
 When `base_url` is set, Hermes:
 
-- Builds the python-telegram-bot client against the local server
+- Builds the python-telegram-bot client against the local server. A bare server URL (`http://127.0.0.1:8081`) gets the Bot API's `/bot` path (and `/file/bot` for `base_file_url`) appended; a URL with any path of its own (`…/bot`, a reverse proxy's `/telegram/`) is used as written
 - Auto-lifts its internal document/audio size cap from 20 MB → 2 GB
 - Reports the active limit in the "too large" error message (`Maximum: 2048 MB.`) so it's obvious which mode you're in
 - Sends through the same server outside the gateway too: `hermes send`, the `send_message` tool and cron deliveries that fall back to the standalone sender
@@ -30388,7 +30445,19 @@ gateway:
 
 When enabled, Hermes attaches Telegram's `LinkPreviewOptions(is_disabled=True)` to every outgoing message, including the streaming preview edits and the final edit of a streamed reply (edits that resolve a button prompt, such as an approval card, don't carry it yet), and falls back to the legacy `disable_web_page_preview` parameter on older `python-telegram-bot` versions.
 
-**Long replies and flood control.** A reply longer than Telegram's 4,096-character limit is sent as numbered parts (`(1/3)`, `(2/3)`, …). A part boundary that falls inside bold, italic, underline, strikethrough or spoiler text closes the style at the end of one part and reopens it at the start of the next, so both parts keep the formatting. Sends to one chat are delivered one reply at a time, so a scheduled report and a DM answer landing together cannot interleave their parts, and a file upload cannot land between two parts of the text it accompanies. If Telegram's flood control refuses a part mid-way, Hermes resumes from the refused part once the penalty passes instead of re-sending the parts already on screen, and while a chat is inside a known penalty window further sends to it fail closed locally (no extra requests that would lengthen the penalty). A penalty longer than the gateway's inline wait cap is handed to the delivery ledger, which redelivers the reply with a "part of it may already have arrived above" note. File attachments (documents, photos, videos, voice) follow the same rule: a short penalty is waited out and the upload retried; a longer one schedules a single native re-upload once the window has passed, and you only see the "Couldn't deliver the file attachment" notice if that re-upload is refused too. An upload that never reached Telegram (a connect or pool failure) or that Telegram answered with its own 5xx error is retried up to three times with a short backoff. If all three fail, you get the "Couldn't deliver the file attachment" notice. An upload that may already be in the chat (the connection dropped or timed out after the file was sent) is never re-sent and posts no failure notice; it is reported as unconfirmed, so the `send_message` tool and cron delivery do not re-send it either.
+**Reply anchor on split replies.** With the default `reply_to_mode: first`, the first part of a reply quotes the message it answers. Some Telegram Desktop/TDLib clients render that first part as an unsupported message when the reply is split into several parts. To send split replies without the quote (single-message replies keep it, and DM topics always keep it because the topic is routed by it):
+
+```yaml
+gateway:
+  platforms:
+    telegram:
+      extra:
+        anchor_multipart_replies: false   # default: true
+```
+
+This covers split MarkdownV2 replies and split Rich Messages. A streamed reply (`transport: edit`) picks its anchor when the first preview is sent, before its final length is known, and Telegram cannot remove a reply anchor by editing, so a streamed reply that later overflows keeps the quote on its first part.
+
+**Long replies and flood control.** A reply longer than Telegram's 4,096-character limit is sent as numbered parts (`(1/3)`, `(2/3)`, …). A part boundary that falls inside bold, italic, underline, strikethrough or spoiler text closes the style at the end of one part and reopens it at the start of the next, so both parts keep the formatting. Sends to one chat are delivered one reply at a time, so a scheduled report and a DM answer landing together cannot interleave their parts, and a file upload cannot land between two parts of the text it accompanies. If Telegram's flood control refuses a part mid-way, Hermes resumes from the refused part once the penalty passes instead of re-sending the parts already on screen, and while a chat is inside a known penalty window further sends to it fail closed locally (no extra requests that would lengthen the penalty). That window survives a gateway restart: it is saved per bot in the profile home (`telegram_flood_cooldown_<bot id>.json`), so a restart during a ban does not fire straight back into it. A penalty longer than the gateway's inline wait cap is handed to the delivery ledger, which redelivers the reply with a "part of it may already have arrived above" note. File attachments (documents, photos, videos, voice) follow the same rule: a short penalty is waited out and the upload retried; a longer one schedules a single native re-upload once the window has passed, and you only see the "Couldn't deliver the file attachment" notice if that re-upload is refused too. An upload that never reached Telegram (a connect or pool failure) or that Telegram answered with its own 5xx error is retried up to three times with a short backoff. If all three fail, you get the "Couldn't deliver the file attachment" notice. An upload that may already be in the chat (the connection dropped or timed out after the file was sent) is never re-sent and posts no failure notice; it is reported as unconfirmed, so the `send_message` tool and cron delivery do not re-send it either.
 
 ## Group Allowlisting
 
@@ -30427,7 +30496,7 @@ Behavior:
 - `TELEGRAM_GROUP_ALLOWED_USERS` only authorizes the listed senders in groups/forums. They still can't DM the bot unless listed in `TELEGRAM_ALLOWED_USERS`.
 - A chat in `TELEGRAM_GROUP_ALLOWED_CHATS` authorizes every member of that chat, regardless of sender.
 - Use `*` in any of these to allow any sender/chat.
-- Edits to these lists in `config.yaml` apply to the next message with no gateway restart: a user you remove is refused from their next message or button tap. This holds for every profile a multiplexed gateway (`gateway.multiplex_profiles`) serves, including the host profile it was started with. A value set in `.env`, an external secret source or the gateway's own environment still wins over `config.yaml`.
+- Edits to these lists in `config.yaml` apply to the next message with no gateway restart: a user you remove is refused from their next message or button tap. This holds for every profile a multiplexed gateway (`gateway.multiplex_profiles`) serves, including the host profile it was started with. A value set in `.env` or an external secret source still wins over `config.yaml`; one only inherited from the gateway's process environment does not.
 - This layers on top of existing mention/pattern triggers and on top of `group_topics` + `ignored_threads`.
 
 ### Migration from before PR #17686
@@ -31761,7 +31830,7 @@ Semantics:
 
 This is the preferred pattern when the moderation team churns — new moderators get access the moment the role is granted, with no `.env` edit or gateway restart.
 
-**Editing the lists in `config.yaml` takes effect on the next message.** `discord.allowed_roles`, `discord.allow_from` and the channel lists are re-read when `config.yaml` changes, with no gateway restart: a role or user you remove is refused from their next message, slash command or button click. This holds for every profile a multiplexed gateway (`gateway.multiplex_profiles`) serves, including the host profile it was started with. A value set in `.env`, an external secret source or the gateway's own environment still wins over `config.yaml`. Adding the *first* role or username to a bot connected without the Server Members intent still needs a restart, because the intent is chosen at connect. A username added later is matched only after the next reconnect resolves it to an ID.
+**Editing the lists in `config.yaml` takes effect on the next message.** `discord.allowed_roles`, `discord.allow_from` and the channel lists are re-read when `config.yaml` changes, with no gateway restart: a role or user you remove is refused from their next message, slash command or button click. This holds for every profile a multiplexed gateway (`gateway.multiplex_profiles`) serves, including the host profile it was started with. A value set in `.env` or an external secret source still wins over `config.yaml`; one only inherited from the gateway's process environment does not. Adding the *first* role or username to a bot connected without the Server Members intent still needs a restart, because the intent is chosen at connect. A username added later is matched only after the next reconnect resolves it to an ID.
 
 ### Mention Control
 
@@ -44365,6 +44434,7 @@ voice:
   submit_mode: "direct"  # TUI: direct | draft
   max_recording_seconds: 120
   auto_tts: false
+  auto_tts_mode: "all"  # all (legacy default) | voice_only
   beep_enabled: true
   silence_threshold: 200
   silence_duration: 3.0
@@ -54602,6 +54672,7 @@ external update owner. See [Updating & Uninstalling](../getting-started/updating
 | `--no-backup` | Skip all pre-update backups for this run (both the quick state snapshot and the full zip), regardless of `updates.pre_update_backup`. |
 | `--backup` | Force a **full** pre-update backup for this run: the quick state snapshot plus a complete zip of `HERMES_HOME` (config, auth, sessions, skills, pairing data). The default mode is `quick` — a lightweight state snapshot only. Set the permanent mode via `updates.pre_update_backup: quick | full | off` in `config.yaml`. |
 | `--yes`, `-y` | Assume yes for interactive prompts such as config migration and stash restore. API-key entry is skipped; run `hermes config migrate` separately for those. |
+| `--force` | Linux/macOS: stop every gateway this update owns at once instead of waiting for in-flight work to drain (choose it when starting the update; it cannot interrupt an update already waiting): running turns, background subagents and tool/background processes are interrupted, a gateway still alive after ~12 s is killed, then the update runs and the gateways restart on the new code. On Windows it only lets the update proceed when another `hermes.exe` is detected; the Windows pause still drains (it does not bypass the venv-holder guard; see `--force-venv`). |
 
 Additional behavior:
 
@@ -55573,7 +55644,7 @@ After installation, tab completion works for:
 
 # Environment Variables Reference
 
-Hermes reads environment variables from the process environment and, for user-managed secrets, from `~/.hermes/.env`. Keep API keys, bot tokens, OAuth secrets, and other credentials in `.env`; prefer `config.yaml` for non-secret behaviour settings when a config key exists. Some variables below are process-only overrides or internal bridge variables and should not be committed to `.env` just because they are documented here. Values written by the platform YAML bridge (and the Telegram/Signal mention fallbacks) are refreshed when that config changes, including across a daemon replacement. After a successful full YAML load, a removed key also retracts its unchanged bridge-owned value; failed loads do not trigger this cleanup, and explicit process, user `.env`, or managed `.env` values still take precedence. The bridge tracks what it wrote in `HERMES_BRIDGED_<NAME>` variables holding a SHA-256 digest of the value, never the value itself, and they are removed from every agent subprocess; a process export whose value happens to equal the bridge's own earlier write is treated as the bridge's and follows `config.yaml`.
+Hermes reads environment variables from the process environment and, for user-managed secrets, from `~/.hermes/.env`. Keep API keys, bot tokens, OAuth secrets, and other credentials in `.env`; prefer `config.yaml` for non-secret behaviour settings when a config key exists. Some variables below are process-only overrides or internal bridge variables and should not be committed to `.env` just because they are documented here. Values written by the platform YAML bridge (and the Telegram/Signal mention fallbacks) are refreshed when that config changes, including across a daemon replacement. After a successful full YAML load, a removed key also retracts its unchanged bridge-owned value; failed loads do not trigger this cleanup. For a setting the platform YAML bridge copies into the environment (mention gating, reactions, allowlists and the other bridged platform keys), an explicit key in `config.yaml` replaces a value inherited from the process environment (a launcher, a service manager, a parent shell); a value set in your `.env`, the managed `.env` or an external secret source still takes precedence over `config.yaml`. A setting an adapter reads from its environment directly, outside the bridge (for example `WHATSAPP_REPLY_PREFIX`), still prefers the environment value. The bridge tracks what it wrote in `HERMES_BRIDGED_<NAME>` variables holding a SHA-256 digest of the value, never the value itself, and they are removed from every agent subprocess; a process export whose value happens to equal the bridge's own earlier write is treated as the bridge's and follows `config.yaml`.
 
 ## LLM Providers
 
@@ -56340,7 +56411,7 @@ Advanced per-platform knobs for throttling the outbound message batcher. Most us
 | `HERMES_TELEGRAM_TEXT_BATCH_SPLIT_DELAY_SECONDS` | Delay between split chunks when a single Telegram message exceeds the length limit (default: `2.0`). |
 | `HERMES_SIMPLEX_TEXT_BATCH_DELAY` | Quiet-period seconds (default: `0.8`) used to concatenate rapid-fire inbound text messages into a single MessageEvent — same pattern as Telegram's text batching. |
 | `HERMES_TELEGRAM_MEDIA_BATCH_DELAY_SECONDS` | Grace window before flushing queued Telegram media (default: `0.6`). |
-| `HERMES_TELEGRAM_FOLLOWUP_GRACE_SECONDS` | Seconds after a turn starts during which a plain Telegram text follow-up joins the queue instead of interrupting or redirecting that turn (default `3`; `0` disables the grace). Commands and media are not held. |
+| `HERMES_TELEGRAM_FOLLOWUP_GRACE_SECONDS` | Seconds after a turn starts during which a plain Telegram text or voice-note follow-up joins the queue instead of interrupting or redirecting that turn (default `3`; `0` disables the grace). Commands and other media are not held. |
 | `HERMES_TELEGRAM_HTTP_CONNECT_TIMEOUT` / `_READ_TIMEOUT` / `_WRITE_TIMEOUT` / `_POOL_TIMEOUT` | Override the underlying `python-telegram-bot` HTTP timeouts (seconds). |
 | `HERMES_TELEGRAM_INIT_TIMEOUT` | Per-attempt cap (seconds) on the Telegram `initialize()` connect chain during gateway startup, so an unreachable fallback-IP chain can't block startup indefinitely (default: `30`). |
 | `HERMES_TELEGRAM_HTTP_POOL_SIZE` | Max concurrent HTTP connections to the Telegram API. |
@@ -61382,6 +61453,8 @@ For **Telegram topics**, use `telegram:<chat_id>:<thread_id>` (e.g., `telegram:-
 By default (`cron.wrap_response: true`), cron deliveries are wrapped with:
 - A header identifying the cron job name and task
 - A footer noting the agent cannot see the delivered message in conversation
+
+`_should_wrap_cron_response(job, user_cfg)` in `cron/scheduler_delivery.py` makes the decision: a bool `wrap_response` stored on the job overrides the global setting, and `None` (the default) inherits it. `normalize_wrap_response` in `cron/jobs_tristate.py` only ever stores true, false or None.
 
 The `[SILENT]` prefix in a cron response suppresses delivery entirely — useful for jobs that only need to write to files or perform side effects.
 
@@ -73318,9 +73391,9 @@ Each kind's OS, key, presence and locator are one `LOCATION_KINDS` entry in `her
 | `version.kind` | `pe_resource` \| `plist` \| `uninstall_registry` \| `none` | default `none`; `pe_resource`/`uninstall_registry` only under `win32`, `plist` only under `darwin` | `.version_kind` |
 | `version.display_name_prefix` | str | required when `uninstall_registry` | `.version_arg` |
 | `liveness.kind` | `server_json` \| `none` | default `none` | `.liveness_kind` |
-| `liveness.path` | str | required when `server_json` | `.liveness_path` |
-| `liveness.pid_key` / `url_key` / `token_key` | str | defaults `pid` / `http` / `token` | `.liveness_*_key` |
-| `liveness.endpoint_path` | str | default `/mcp`; the path used for `initialize`, never the one in the file | `.endpoint_path` |
+| `liveness.path` | str | required when `server_json`; same rule as `location` (rooted or `~` / `%VAR%` / `$VAR` prefix; no `..` segment or URL scheme) | `.liveness_path` |
+| `liveness.pid_key` / `url_key` / `token_key` | str | defaults `pid` / `http` / `token`; simple key names only (`[A-Za-z0-9_.-]+`) | `.liveness_*_key` |
+| `liveness.endpoint_path` | str | default `/mcp`; a plain path starting with `/`, charset `[A-Za-z0-9._~/-]`; no `@`, `?`, `#`, whitespace, or scheme. It is appended to the loopback URL from the runtime file, never the one in the file | `.endpoint_path` |
 
 When `requires.app` is true, an OS missing from `app:` gives `unsupported_os`.
 
@@ -86761,6 +86834,8 @@ Membership — the section's id **and name** — is stored in each Bot's profile
 ## Creating a Bot
 
 Hit **New Agent** in the roster. The quick path is three fields — **Name**, **Title**, **Description** — and the Bot exists in seconds, introducing itself as the first message of its new Bot Chat.
+
+Creation warnings stay visible after the dialog closes and the Bot Chat opens, with the profile and machine identified. Dismiss them individually or with **Clear all**. If model setup is still needed, the **Configure model** action remains available too. The dashboard likewise keeps creation warnings in a dismissible result card rather than a short-lived success toast.
 
 An **Advanced** disclosure opens the full capabilities surface:
 
