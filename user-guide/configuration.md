@@ -136,10 +136,12 @@ database:
   # Use delete on filesystems where WAL is unsafe (network mounts). On
   # virtiofs/9p bind mounts (Docker Desktop, Podman on macOS, OrbStack)
   # Hermes detects the mount and creates fresh databases in delete mode
-  # automatically. Note: an existing on-disk WAL database is never
-  # live-downgraded — Hermes keeps WAL and logs an error telling you the
+  # automatically. On Linux NFS/CIFS/SMB/sshfs mounts, a fresh database
+  # also starts in delete mode unless this key is set (set `wal` to force
+  # WAL there). Note: an existing on-disk WAL database is never
+  # live-downgraded — Hermes keeps WAL and logs a warning telling you the
   # configured delete did not apply (or that the WAL database sits on a
-  # cross-VM mount). To convert an existing database, stop
+  # cross-VM or network mount). To convert an existing database, stop
   # every process using it and run
   # `hermes sessions set-journal-mode delete` (see Sessions).
   journal_mode: wal
@@ -1427,6 +1429,8 @@ goals:
 
 Hermes has separate timeout layers for streaming, plus a stale detector for non-streaming calls. The stale detectors auto-adjust for local providers only when you leave them at their implicit defaults.
 
+External-process providers (a model reached through a CLI child process, such as the Claude subscription DirectSDK plugin or an ACP agent) get the same "Local providers" column below, for every model, because the child sends nothing until the model's first token. One exception: a non-streaming call to an external process is bounded by the request timeout (1800s by default) instead of being left unbounded, so a child that stops reading its input cannot hang Hermes. They are not treated as a local server anywhere else: a context rejection compresses and retries, and Hermes does not probe them for Ollama or llama.cpp.
+
 | Timeout | Default | Local providers | Config / env |
 |---------|---------|----------------|--------------|
 | Socket read timeout | 120s | Auto-raised to 1800s | `HERMES_STREAM_READ_TIMEOUT` |
@@ -1445,7 +1449,7 @@ The **Responses first-event watchdog** (Codex / `codex_responses` transport, inc
 
 The **stream max lifetime** is an opt-in cap on the total wall-clock time of one streaming response. The stale detector resets on every chunk, so a stream that keeps sending data but never finishes (a gateway trickling chunks, a runaway generation) is never cut. Set `agent.stream_max_lifetime` (seconds) to cut such a stream; the connection is killed the same way a stale kill is, and the retry or partial-response continuation takes over. It never fires before the effective stale-stream timeout, and a cut attempt does not count toward the stale-stream circuit breaker (`HERMES_STREAM_STALE_GIVEUP`), since the provider was responding. The cap covers Chat Completions and Anthropic Messages streams only; Codex/Responses streams (`codex_responses`, including custom providers declared with the Responses transport) and Bedrock streams are not capped. Leave it at `0` (the default) if you run long reasoning turns that legitimately stream for a long time.
 
-The **stale non-stream detection** kills non-streaming calls that produce no response for too long. By default Hermes disables this on local endpoints to avoid false positives during long prefills. If you explicitly set `providers.<id>.stale_timeout_seconds`, `providers.<id>.models.<model>.stale_timeout_seconds`, or `HERMES_API_CALL_STALE_TIMEOUT`, that explicit value is honored even on local endpoints.
+The **stale non-stream detection** kills non-streaming calls that produce no response for too long. By default Hermes disables this on local endpoints to avoid false positives during long prefills. If you explicitly set `providers.<id>.stale_timeout_seconds`, `providers.<id>.models.<model>.stale_timeout_seconds`, or `HERMES_API_CALL_STALE_TIMEOUT`, that explicit value is used as-is, even on local endpoints and above 50k tokens: the context-size raise (150s above 50k tokens, 240s above 100k) applies only to the implicit default.
 
 The **post-terminal stream drain** bounds how long a Codex/Responses stream keeps reading after its terminal `response.completed` frame (a courtesy so the relay finalizer can run). Some relays never close the SSE socket after the terminal frame; without a bound the turn wedged until the stale-stream watchdog fired and discarded the already-billed response, then retried. After `agent.stream_drain_timeout` seconds the stream is closed and the completed response is returned. Endpoints that close the connection normally finish the drain immediately and never wait this long; set `0` to skip the drain entirely.
 

@@ -3963,10 +3963,12 @@ database:
   # Use delete on filesystems where WAL is unsafe (network mounts). On
   # virtiofs/9p bind mounts (Docker Desktop, Podman on macOS, OrbStack)
   # Hermes detects the mount and creates fresh databases in delete mode
-  # automatically. Note: an existing on-disk WAL database is never
-  # live-downgraded — Hermes keeps WAL and logs an error telling you the
+  # automatically. On Linux NFS/CIFS/SMB/sshfs mounts, a fresh database
+  # also starts in delete mode unless this key is set (set `wal` to force
+  # WAL there). Note: an existing on-disk WAL database is never
+  # live-downgraded — Hermes keeps WAL and logs a warning telling you the
   # configured delete did not apply (or that the WAL database sits on a
-  # cross-VM mount). To convert an existing database, stop
+  # cross-VM or network mount). To convert an existing database, stop
   # every process using it and run
   # `hermes sessions set-journal-mode delete` (see Sessions).
   journal_mode: wal
@@ -5254,6 +5256,8 @@ goals:
 
 Hermes has separate timeout layers for streaming, plus a stale detector for non-streaming calls. The stale detectors auto-adjust for local providers only when you leave them at their implicit defaults.
 
+External-process providers (a model reached through a CLI child process, such as the Claude subscription DirectSDK plugin or an ACP agent) get the same "Local providers" column below, for every model, because the child sends nothing until the model's first token. One exception: a non-streaming call to an external process is bounded by the request timeout (1800s by default) instead of being left unbounded, so a child that stops reading its input cannot hang Hermes. They are not treated as a local server anywhere else: a context rejection compresses and retries, and Hermes does not probe them for Ollama or llama.cpp.
+
 | Timeout | Default | Local providers | Config / env |
 |---------|---------|----------------|--------------|
 | Socket read timeout | 120s | Auto-raised to 1800s | `HERMES_STREAM_READ_TIMEOUT` |
@@ -5272,7 +5276,7 @@ The **Responses first-event watchdog** (Codex / `codex_responses` transport, inc
 
 The **stream max lifetime** is an opt-in cap on the total wall-clock time of one streaming response. The stale detector resets on every chunk, so a stream that keeps sending data but never finishes (a gateway trickling chunks, a runaway generation) is never cut. Set `agent.stream_max_lifetime` (seconds) to cut such a stream; the connection is killed the same way a stale kill is, and the retry or partial-response continuation takes over. It never fires before the effective stale-stream timeout, and a cut attempt does not count toward the stale-stream circuit breaker (`HERMES_STREAM_STALE_GIVEUP`), since the provider was responding. The cap covers Chat Completions and Anthropic Messages streams only; Codex/Responses streams (`codex_responses`, including custom providers declared with the Responses transport) and Bedrock streams are not capped. Leave it at `0` (the default) if you run long reasoning turns that legitimately stream for a long time.
 
-The **stale non-stream detection** kills non-streaming calls that produce no response for too long. By default Hermes disables this on local endpoints to avoid false positives during long prefills. If you explicitly set `providers.<id>.stale_timeout_seconds`, `providers.<id>.models.<model>.stale_timeout_seconds`, or `HERMES_API_CALL_STALE_TIMEOUT`, that explicit value is honored even on local endpoints.
+The **stale non-stream detection** kills non-streaming calls that produce no response for too long. By default Hermes disables this on local endpoints to avoid false positives during long prefills. If you explicitly set `providers.<id>.stale_timeout_seconds`, `providers.<id>.models.<model>.stale_timeout_seconds`, or `HERMES_API_CALL_STALE_TIMEOUT`, that explicit value is used as-is, even on local endpoints and above 50k tokens: the context-size raise (150s above 50k tokens, 240s above 100k) applies only to the implicit default.
 
 The **post-terminal stream drain** bounds how long a Codex/Responses stream keeps reading after its terminal `response.completed` frame (a courtesy so the relay finalizer can run). Some relays never close the SSE socket after the terminal frame; without a bound the turn wedged until the stale-stream watchdog fired and discarded the already-billed response, then retried. After `agent.stream_drain_timeout` seconds the stream is closed and the completed response is returned. Endpoints that close the connection normally finish the drain immediately and never wait this long; set `0` to skip the drain entirely.
 
@@ -10048,7 +10052,7 @@ What Hermes does about it (since v2026.9.14):
   1. Stop every Hermes process that uses the database, then run a one-time offline conversion with the Python that ships in the image (it has no `sqlite3` shell): `docker exec hermes python3 -c "import sqlite3; print(sqlite3.connect('/opt/data/state.db').execute('PRAGMA journal_mode=DELETE').fetchone()[0])"`. Set `database.journal_mode: delete` in `config.yaml` so a later open does not switch it back to WAL.
   2. Move the data directory onto a native volume — a named Docker volume (`-v hermes-data:/opt/data`) lives on the VM's own ext4 filesystem and supports WAL normally.
 
-Detection reads `/proc/self/mountinfo` inside the container, so it works regardless of the host operating system. It does not classify NFS, SMB, or generic FUSE mounts; on those, set `database.journal_mode: delete` explicitly. Hermes does not offer SQLite's `locking_mode=EXCLUSIVE` as an alternative because the gateway, cron, and worker processes open the database concurrently.
+Detection reads `/proc/self/mountinfo` inside the container, so it works regardless of the host operating system. NFS, CIFS/SMB and sshfs mounts are detected separately: a fresh database there starts in rollback (`DELETE`) journal mode unless `database.journal_mode` is set (set `wal` to force WAL), because every WAL shared-memory lock is a network round trip and concurrent connections stall on it. An existing WAL database on one keeps WAL, logs a one-time warning at startup with the `hermes sessions set-journal-mode delete` remedy, and is flagged by `hermes doctor`. Generic FUSE mounts are not classified; on those, set `database.journal_mode: delete` explicitly. Hermes does not offer SQLite's `locking_mode=EXCLUSIVE` as an alternative because the gateway, cron, and worker processes open the database concurrently.
 
 ### Immutable install tree
 
@@ -16667,6 +16671,8 @@ hermes plugins enable my-plugin              # add to allow-list
 hermes plugins disable my-plugin             # remove from allow-list + add to disabled (bundled platforms:
                                              # either spelling works, e.g. photon-platform or platforms/photon)
 hermes plugins capabilities [my-plugin]      # declared vs granted capabilities
+hermes plugins idle-tasks [my-plugin]        # background idle jobs plugins registered: last run, next run
+hermes plugins idle-tasks my-plugin --pause suggest   # stop one until --resume
 hermes plugins check-updates                 # read-only: is any installed plugin outdated?
 hermes plugins adopt my-plugin               # track a self-cloned plugin dir (read its git origin)
 hermes plugins trust-update-url my-plugin    # confirm a changed update_url after review
@@ -16873,8 +16879,8 @@ working but are **deprecated** in favor of the consent flow:
 
 A gate is open when *either* the capability is granted *or* the legacy key is
 set — existing configs keep working unchanged.
-`llm.side_question` has no legacy key: it is open only when declared and
-granted through the consent flow.
+`llm.side_question` and `llm.session_fork` have no legacy key: each is open
+only when declared and granted through the consent flow.
 
 :::warning Not a sandbox
 Capabilities are a **consent and audit layer**, not isolation. Plugins run as
@@ -18072,6 +18078,24 @@ hermes cron create "0 9 * * 1-5" --timezone America/New_York "US market open bri
 - An offset-less one-shot timestamp (`2026-06-01T09:00:00`) is also read in the job's zone; a timestamp that carries its own offset is already an instant.
 - Changing the zone recomputes `next_run_at` immediately, so the next fire happens at the new zone's wall clock.
 - An `interval` job has a fixed duration and no wall clock, so a pin has no effect on it.
+- The run-time line the job's prompt carries (`[CURRENT RUN TIME: ...]`) is stated in the pinned zone, so a 09:00 New York job is told 09:00 EST, not the profile's local time. `hermes cron list`, `/cron list` and `cronjob(action="list")` show the pinned zone next to the schedule.
+
+### Pinned and local-time jobs in a shipped profile
+
+A [profile distribution](../profile-distributions.md) can ship both kinds of job in one `cron/jobs.json`. Jobs that pin `timezone` fire on that zone's wall clock for every installer. Jobs without it follow each user's own `timezone:` in their `config.yaml`. Leave `timezone:` out of the shipped `config.yaml` if users should keep their own zone: `hermes profile update` preserves a user's `config.yaml` by default.
+
+```json
+{
+  "jobs": [
+    {"id": "premarket0001", "name": "pre-market", "prompt": "US pre-market update before the 09:30 NYSE open.",
+     "schedule": "0 9 * * 1-5", "timezone": "America/New_York", "deliver": "origin"},
+    {"id": "morningbrf01", "name": "morning-brief", "prompt": "My personal morning brief.",
+     "schedule": "0 7 * * *", "deliver": "origin"}
+  ]
+}
+```
+
+With this file a London user gets the pre-market update at 14:00 (13:00 during the week in between, when the UK has left summer time and the US has not), a Hong Kong user at 21:00 or 22:00, and a Los Angeles user at 06:00. All three get the morning brief at 07:00 their own time. Install and update reject a shipped job whose `timezone` is not an IANA zone and name the job, so a typo cannot silently become each user's local time. Write a job with `hermes cron create ... --timezone America/New_York` in the authoring profile and commit the resulting `cron/jobs.json`, or write it by hand: `schedule` may be the same string `hermes cron create` takes, and the scheduler fills in `next_run_at` and the runtime fields. Give every shipped job a stable `id`, because update matches on it.
 
 ## Catch-up window
 
@@ -23082,7 +23106,7 @@ Payload fields below are the exact event-specific fields supplied by each call s
 | `transform_terminal_output` | Transform | After bounded foreground process capture, before final output limiting; first string replaces output. | `command`, `output`, `returncode`, `task_id`, `env_type` | Command/output may contain credentials. |
 | `pre_transcription` | Transform | Fired by the STT dispatcher after provider resolution and before any backend (built-in, command-type, or plugin-registered) is invoked; dict results are applied in registration order, last-writer-wins per field (`prompt`, `language`, `model`; `file_path` is read-only). | `file_path`, `provider`, `model`, `language`, `prompt`, `source` | The final prompt is uploaded to the configured STT provider with the audio — keep secrets out of hook returns. |
 | `pre_llm_call` | Directive/control | Once per turn before the loop; all valid string/`{"context": ...}` returns are joined and injected into the user message; the first valid `{"action": "block", "message": ...}` ends the turn before any inference request. | `session_id`, `task_id`, `turn_id`, `user_message`, `conversation_history`, `is_first_turn`, `model`, `platform`, `parent_session_id`, `sender_id` | Full user message and conversation history. |
-| `post_llm_call` | Observer | Successful, non-interrupted turn finalization; return ignored. | `session_id`, `task_id`, `turn_id`, `user_message`, `assistant_response`, `conversation_history`, `model`, `platform`, `side_question_token` | Full prompt, response, and history. |
+| `post_llm_call` | Observer | Successful, non-interrupted turn finalization; return ignored. | `session_id`, `task_id`, `turn_id`, `user_message`, `assistant_response`, `conversation_history`, `model`, `platform`, `side_question_token`, `review_signals` | Full prompt, response, and history. |
 | `transform_llm_output` | Transform | Before `post_llm_call` and final delivery; first non-empty string replaces the response. | `response_text`, `session_id`, `model`, `platform` | Full final assistant text. |
 | `pre_verify` | Directive/control | At the bounded edited-code verify gate; first valid continue/block-stop directive keeps the turn going. | `session_id`, `platform`, `model`, `coding`, `attempt`, `final_response`, `changed_paths` | Draft response and changed paths. |
 | `pre_api_request` | Observer | Per provider attempt, immediately before the request; return ignored. | `task_id`, `turn_id`, `api_request_id`, `session_id`, `user_message`, `conversation_history`, `platform`, `model`, `provider`, `base_url`, `api_mode`, `api_call_count`, `retry_count`, `request_messages`, `message_count`, `tool_count`, `approx_input_tokens`, `request_char_count`, `max_tokens`, `started_at`, `middleware_trace`, `request` | High sensitivity: legacy `user_message`, `conversation_history`, and `request_messages` are intentionally raw; prefer sanitized `request`. |
@@ -23414,13 +23438,35 @@ def my_callback(session_id: str, user_message: str, assistant_response: str,
 | `conversation_history` | `list` | Copy of the full message list after the turn completed |
 | `model` | `str` | The model identifier |
 | `platform` | `str` | Where the session is running |
-| `side_question_token` | `str \| None` | One-use token for [`ctx.side_question`](../../developer-guide/plugin-llm-access.md#asking-the-sessions-own-agent-ctxside_question), shared by every plugin of the session's profile; `None` unless a loaded plugin holds the `llm.side_question` capability, and always `None` for cron runs and subagent turns |
+| `side_question_token` | `str \| None` | One-use token for [`ctx.side_question`](../../developer-guide/plugin-llm-access.md#asking-the-sessions-own-agent-ctxside_question) or [`ctx.fork_session`](../../developer-guide/plugin-llm-access.md#forking-the-sessions-own-agent-ctxfork_session) (one request per turn), shared by every plugin of the session's profile; `None` unless a loaded plugin holds the `llm.side_question` or `llm.session_fork` capability, and always `None` for cron runs and subagent turns |
+| `review_signals` | `dict` (read-only) | The self-learning cadence this turn ended on, see [below](#review_signals) |
 
 **Fires:** In `agent/turn_finalizer.py` (`finalize_turn()`, called by `run_conversation()` in `agent/conversation_loop.py`), after the tool loop exits with a final response. Guarded by `if final_response and not interrupted` — so it does **not** fire when the user interrupts mid-turn or the agent hits the iteration limit without producing a response.
 
 **Return value:** Ignored.
 
 **Use cases:** Syncing conversation data to an external memory system, computing response quality metrics, logging turn summaries, triggering follow-up actions.
+
+<a id="review_signals"></a>
+**`review_signals`** describes the counters behind Hermes' own background memory/skill review, so a plugin that does after-turn work can follow the user's self-learning cadence instead of counting tool calls itself. The hook fires before the review decision; the due flags are the exact values that decision then uses.
+
+| Key | Type | Meaning |
+|-----|------|---------|
+| `tool_iterations_since_skill_review` | `int` | Agent-loop iterations since the last skill review or `skill_manage` call (the value the trigger compared; it resets after the hook when `skill_review_due`) |
+| `user_turns_since_memory_review` | `int` | User turns since the last memory review or `memory` call (already reset to `0` on a turn where `memory_review_due`) |
+| `skill_review_due` | `bool` | The skill trigger fired this turn (`skills.creation_nudge_interval` reached and `skill_manage` available) |
+| `memory_review_due` | `bool` | The memory trigger fired this turn (`memory.nudge_interval` reached, built-in memory available) |
+| `background_review_enabled` | `bool` | A due trigger actually forks the review: `auxiliary.background_review.enabled`, not a cron run, not a subagent |
+| `skill_nudge_interval` | `int` | `skills.creation_nudge_interval` (0 = off) |
+| `memory_nudge_interval` | `int` | `memory.nudge_interval` (0 = off) |
+
+Hermes forks its review when `background_review_enabled and (skill_review_due or memory_review_due)`. The mapping is shared by every callback and cannot be modified.
+
+```python
+def on_post_llm_call(review_signals=None, side_question_token=None, **kwargs):
+    if review_signals and review_signals["skill_review_due"]:
+        ...  # the user's skill cadence is due: do the plugin's own skill follow-up now
+```
 
 **Example — sync to external memory:**
 
@@ -24531,7 +24577,7 @@ Fires for a failed provider attempt with status/retry timing, an `error` object,
 
 #### `pre_auxiliary_call` / `post_auxiliary_call`
 
-Auxiliary LLM calls — session titling, context compression, MoA advisors and the aggregator, vision, approval classification, memory and other side tasks — run outside the main tool-calling loop and do **not** fire `pre_api_request` / `post_api_request` (those stay turn-scoped, so a trace-per-turn plugin never sees side traffic by accident). Subscribe to `pre_auxiliary_call` / `post_auxiliary_call` instead: they fire once per physical provider attempt (retries and fallbacks included) with the same payload shape plus `aux_task` (the task name, e.g. `title_generation`, `compression`, `moa_aggregator`, `vision`, `plugin_side_question` for a plugin's [`ctx.side_question`](../../developer-guide/plugin-llm-access.md#asking-the-sessions-own-agent-ctxside_question), which also carries the asking plugin's `plugin_id`). `session_id` / `task_id` / `turn_id` are the parent turn's when the call runs under one, empty otherwise; `api_request_id` (`aux-…`) is shared by every attempt of one logical call and `retry_count` distinguishes them. Both are observer-only and fail-open: a raising or timed-out callback is logged and the auxiliary task proceeds. `post_auxiliary_call` carries `error` / `error_type` when the attempt raised and `streaming: True` (with `usage`/`response` `None`) when the response is handed back as a stream.
+Auxiliary LLM calls — session titling, context compression, MoA advisors and the aggregator, vision, approval classification, memory and other side tasks — run outside the main tool-calling loop and do **not** fire `pre_api_request` / `post_api_request` (those stay turn-scoped, so a trace-per-turn plugin never sees side traffic by accident). Subscribe to `pre_auxiliary_call` / `post_auxiliary_call` instead: they fire once per physical provider attempt (retries and fallbacks included) with the same payload shape plus `aux_task` (the task name, e.g. `title_generation`, `compression`, `moa_aggregator`, `vision`, `plugin_side_question` for a plugin's [`ctx.side_question`](../../developer-guide/plugin-llm-access.md#asking-the-sessions-own-agent-ctxside_question) and `plugin_fork` for each request of a plugin's [`ctx.fork_session`](../../developer-guide/plugin-llm-access.md#forking-the-sessions-own-agent-ctxfork_session), both of which also carry the plugin's `plugin_id`). `session_id` / `task_id` / `turn_id` are the parent turn's when the call runs under one, empty otherwise; `api_request_id` (`aux-…`) is shared by every attempt of one logical call and `retry_count` distinguishes them. Both are observer-only and fail-open: a raising or timed-out callback is logged and the auxiliary task proceeds. `post_auxiliary_call` carries `error` / `error_type` when the attempt raised and `streaming: True` (with `usage`/`response` `None`) when the response is handed back as a stream.
 
 ### `on_skill_lifecycle`
 
@@ -53459,25 +53505,26 @@ config_overrides:
 hermes debug share [options]
 ```
 
-Upload a debug report (system info + recent logs) to a paste service and get a shareable URL. Useful for quick support requests — includes everything a helper needs to diagnose your issue.
+Upload a debug summary to a public paste service and get a shareable URL, or (with `--nous`) send the full redacted logs to private Nous storage.
 
 | Option | Description |
 |--------|-------------|
-| `--lines <N>` | Number of log lines to include per log file (default: 200). |
+| `--lines <N>` | Log lines per file: scanned for the summary's error counts, and included (redacted) with `--nous` / `--local` (default: 200). |
 | `--expire <days>` | dpaste.com fallback retention in days (minimum 1; default: 1). paste.rs pastes are always deleted after 6 hours; dpaste.com pastes cannot be deleted early. |
 | `--nous` | Upload to Nous-internal diagnostics storage instead of a public paste service. Use this when Nous support asks for a private diagnostic bundle. |
 | `--local` | Print the report locally instead of uploading. |
-| `--no-redact` | Disable upload-time secret redaction. By default, uploads are redacted. |
+| `--no-redact` | Disable secret redaction of the logs sent with `--nous` or printed with `--local`. It has no effect on the public paste, which never carries log text. |
+| `--yes` | Skip the confirmation prompt (required when stdin is not a TTY). |
 
-The report includes system info (OS, Python version, Hermes version), recent agent, gateway, GUI/dashboard, and desktop logs (512 KB limit per file), plus the update and Desktop update hand-off logs when present, and redacted API key status. By default, uploads are redacted so secrets are not included; this covers the system dump (including config values such as `fallback_providers` entries and credentials in their URLs) as well as the logs, and the gateway `/debug` report too.
+**Public paste (default).** The upload is an allowlisted summary, never log lines or message text: Hermes, Python and OS versions; install kind; names of connected platforms and configured built-in toolsets; which `config.yaml` keys are set (key names only, no values; user-named entries such as providers or MCP servers are counted, not named); and counts of warnings/errors by logger, exception class and HTTP status from the recent log tails. The same summary is what the gateway `/debug upload` command and the dashboard **Share debug report** button upload. Public uploads go to paste.rs, falling back to dpaste.com.
 
-Default uploads use public paste services tried in order: paste.rs, dpaste.com. `--nous` uploads the same debug bundle to private Nous diagnostics storage instead; the returned viewer link is for the Nous team and auto-deletes after 14 days.
+**Private bundle (`--nous`).** The full debug report, the system dump and the agent, gateway, GUI/dashboard and desktop logs (512 KB per file), plus the update and Desktop update hand-off logs when present, go to private Nous diagnostics storage. Secrets are redacted unless `--no-redact` is set; other personal data in the logs (names, IDs, message text) is not. The returned viewer link is only for the Nous team and auto-deletes after 14 days. `--local` prints the same bundle without uploading anything.
 
 ### Examples
 
 ```bash
 hermes debug share              # Upload debug report, print URL
-hermes debug share --lines 500  # Include more log lines
+hermes debug share --lines 500  # Scan more log lines for the summary
 hermes debug share --expire 30  # Keep a dpaste.com fallback paste for 30 days
 hermes debug share --nous       # Upload a private diagnostics bundle for Nous support
 hermes debug share --local      # Print report to terminal (no upload)
@@ -54054,6 +54101,7 @@ Unified plugin management — general plugins, memory providers, and context eng
 | `enable <name>` | Enable a disabled plugin. |
 | `disable <name>` | Disable a plugin without removing it. |
 | `list` (alias: `ls`) | List installed plugins with enabled/disabled status. |
+| `idle-tasks [name] [--pause TASK \| --resume TASK]` | List the idle tasks plugins registered with `ctx.register_idle_task` in this profile (status, run count, last and next run, last summary or error), or pause/resume one task of the named plugin. |
 | `doctor [path-or-id] [--ci]` | Validate a native plugin through the real manifest parser, loader, and registration path. `--ci` exits 1 on errors. |
 | `pack install <path-or-url> [--force]` | Install a plugin pack (`hermes-pack.yaml`) — a declarative set of plugins each pinned to an exact 40-character commit SHA. Shows a mandatory review screen (every plugin, source, pinned ref, declared capabilities), asks one confirmation for the pack contents, then runs ordinary pinned installs. Each plugin's declared capabilities still go through the standard per-plugin consent — a pack never bulk-grants. Partial failures are reported per plugin; exits non-zero when any plugin failed. Interactive only (no `--yes`). |
 | `pack export [--enabled-only] [--name NAME]` | Emit a pack YAML on stdout from the current install: repo + exact SHA of each git-installed plugin plus sanitized non-secret `plugins.entries` config. Local-only plugins (no git provenance) are listed as warning comments, never as installable entries. Secrets, capability grants, and `allow_*` gates are always stripped. |
@@ -54839,7 +54887,7 @@ The messaging gateway supports the following built-in commands inside Telegram, 
 | `/deny` | Reject a pending dangerous command. |
 | `/update` | Update Hermes Agent to the latest version. |
 | `/restart` | Gracefully restart the gateway after draining active runs. When the gateway comes back online, it sends a confirmation to the requester's chat/thread. |
-| `/debug [upload]` | Bare `/debug` shows the privacy notice and uploads nothing; `/debug upload` uploads the summary report (system info + log tails) and returns a shareable link. |
+| `/debug [upload]` | Bare `/debug` shows the privacy notice and uploads nothing; `/debug upload` uploads an allowlisted summary (versions, config key names, error counts; no log or message text) to a public paste and returns a shareable link; full logs go only to private storage via `hermes debug share --nous`. |
 | `/help` | Show messaging help. |
 | `/<skill-name>` | Invoke any installed skill by name. |
 
@@ -58317,7 +58365,7 @@ Look at the CLI startup line — it shows the detected context length (e.g., `�
 
 **Local servers (llama.cpp, Ollama) that go silent instead of erroring:** when a provider rejects a request as too large, Hermes compacts the conversation and rebuilds the request. Hermes re-measures the *complete* rebuilt request (system prompt + tool schemas + messages) before retrying, and runs further bounded compaction passes if it is still over the threshold. If the request still cannot fit, the turn ends with `Context length exceeded: compression could not reduce the rebuilt request below the safe threshold` rather than sending an oversized request that llama.cpp would silently truncate (`stop processing: n_tokens = 65535, truncated = 1` in the server log). If you hit that message, the fix is almost always the configured `context_length` above: make it match the server's actual `-c` / `--ctx-size`.
 
-**"The model server rejected this request as too large, but this conversation is only about N tokens…":** a local server (localhost, LAN, Tailscale) said "context exceeded" without quoting any measurement, while Hermes's own estimate of the request is far below the window it knows for the model — so it does **not** compress or blame the conversation, and the turn stays retryable. On single-slot local servers (LM Studio, Ollama) this is almost always another request holding the server's context at that moment — typically a background memory review from an earlier session (`thread=bg-review` in `logs/agent.log`). Wait a moment and `/retry`. If it recurs with no other Hermes process running, the server is loading the model with a smaller window than Hermes assumes: raise the server's context setting or lower `model.context_length` to match it. Hosted providers never get this message: they have no shared slot to wait out, so the same rejection there means the route's real window is smaller than Hermes assumes, and Hermes compresses and retries instead.
+**"The model server rejected this request as too large, but this conversation is only about N tokens…":** a local server (localhost, LAN, Tailscale) said "context exceeded" without quoting any measurement, while Hermes's own estimate of the request is far below the window it knows for the model — so it does **not** compress or blame the conversation, and the turn stays retryable. On single-slot local servers (LM Studio, Ollama) this is almost always another request holding the server's context at that moment — typically a background memory review from an earlier session (`thread=bg-review` in `logs/agent.log`). Wait a moment and `/retry`. If it recurs with no other Hermes process running, the server is loading the model with a smaller window than Hermes assumes: raise the server's context setting or lower `model.context_length` to match it. Hosted providers never get this message, including external-process providers such as the Claude subscription DirectSDK plugin: they have no shared slot to wait out, so the same rejection there means the route's real window is smaller than Hermes assumes, and Hermes compresses and retries instead.
 
 To fix context detection, set it explicitly:
 
@@ -64564,7 +64612,7 @@ handler does; `client-local (cli_only)` commands are terminal/UI features of a c
 | `/copy` | refused | HermesCLI._handle_copy_command | local | unavailable: terminal | slash.exec: refused | client-local (cli_only) |
 | `/cron` | read (bare / `list`; add/edit/pause/resume/run/remove control, from the classic CLI's own command socket only) | HermesCLI._handle_cron_command | slash.exec | unavailable: terminal | slash.exec | client-local (cli_only) |
 | `/curator` | control | HermesCLI._handle_curator_command | slash.exec | unavailable: advanced | slash.exec |  |
-| `/debug` | control | HermesCLI._handle_debug_command | slash.exec | slash.exec | slash.exec | `/debug upload` uploads logs to a public paste (bare `/debug` is the privacy notice) |
+| `/debug` | control | HermesCLI._handle_debug_command | slash.exec | slash.exec | slash.exec | `/debug upload` uploads a summary to a public paste (bare `/debug` is the privacy notice) |
 | `/deny` | control | messaging-only: unknown command | slash.exec | slash.exec | slash.exec | messaging-only |
 | `/diff` | read | HermesCLI._handle_diff_command | slash.exec | slash.exec | slash.exec |  |
 | `/discard` | refused | HermesCLI._handle_discard_command | slash.exec: refused | slash.exec: refused | prompt.resolve_unknown |  |
@@ -67767,6 +67815,8 @@ Model provider plugins are the third kind of **provider plugin**. The others are
 
 Steps 2 and 3 are **per profile home**: one process that serves several profiles (the multiplex gateway a local Desktop attaches to, a `hermes serve` backend) resolves the plugins of whichever profile's `$HERMES_HOME` is bound at lookup time, and a plugin installed in one profile is not visible from another. Install the plugin in every profile that should use it (`hermes -p <profile> plugins install ...`).
 
+Updates reach a running process too. `hermes plugins update`, the dashboard and Desktop update, and the gateway's auto-apply tick all end in a forced plugin sweep, which re-scans the profile's provider plugins. A plugin whose tree changed (its catalog pin in `.hermes-catalog.json`, else the mtimes of its Python files and manifest) is dropped whole, package and submodules, then imported again, so its profiles re-register from the new version. New requests use it; a client already built keeps its objects, and anything it imports afterwards comes from the new package, never a mix of the two versions.
+
 **User plugins override bundled plugins of the same name** because `register_provider()` is last-writer-wins. Drop a `$HERMES_HOME/plugins/model-providers/gmi/` directory to replace the built-in GMI profile without touching the repo.
 
 ## Directory structure
@@ -69680,10 +69730,29 @@ the call with reason `plugin_rpc_failed`.
 
 #### Inheriting a built-in slot
 
-`inherit_from` names a built-in auxiliary task (`compression`, `mcp`,
-`vision`, ...) or a task your plugin (or one loaded before it) already
-registered. Your task then uses that slot's model until the operator pins
-one on your task directly:
+`inherit_from` names a built-in auxiliary task the model picker lists
+(`compression`, `mcp`, `vision`, `curator`, ...), `background_review`, or a
+task your plugin (or one loaded before it) already registered. Other core
+`auxiliary.*` blocks are not bases. Your task then uses that slot's model
+until the operator pins one on your task directly.
+
+**Following a built-in slot's model needs the operator's grant.** The
+slot's route (`provider`, `model`, `base_url`, `api_key`, `api_mode`, the
+key env, `reasoning_effort`, `extra_body`, `fallback_chain`) carries over
+only when the operator sets `allow_task_override` for your plugin, the
+same grant that lets `task=` name a built-in slot. Without it your task
+inherits the slot's other settings (such as `timeout`) and runs on its
+own route: your `defaults`, else the active main model. Declare it in
+your setup instructions when your task should follow the user's review or
+curator model:
+
+```yaml
+plugins:
+  entries:
+    my-plugin:
+      llm:
+        allow_task_override: true
+```
 
 ```python
 def register(ctx):
@@ -69701,6 +69770,9 @@ def register(ctx):
   classifier follows on its next call, per profile.
 - **Precedence:** the inherited base, then the plugin's `defaults`, then the
   operator's `auxiliary.<task>` block.
+- **A chain counts as its root.** Inheriting another plugin's task that
+  inherits a built-in slot carries that slot's route only when your plugin
+  holds the grant too.
 - **An operator pin wins as a whole route.** Once `auxiliary.classifier` sets a
   non-`auto` provider, a model or a `base_url`, the provider, model, endpoint,
   key and reasoning effort all come from that block; nothing from the base's
@@ -69809,6 +69881,7 @@ path-derived key for nested plugins (`image_gen/openai`,
 | `agent_id=`     | denied  | `allow_agent_id_override: true`  |
 | `profile=`      | denied  | `allow_profile_override: true`   |
 | built-in `task=` | denied  | `allow_task_override: true`      |
+| route inherited from a built-in slot | stripped | `allow_task_override: true` |
 
 Each override is independently gated. Granting `allow_model_override`
 does **not** also grant `allow_provider_override` — a plugin trusted
@@ -69956,6 +70029,206 @@ Observability plugins see the call as an auxiliary call:
 `aux_task="plugin_side_question"` and `plugin_id` set to the asking
 plugin, and the turn-scoped `pre_api_request` /
 `post_api_request` do not fire for it.
+
+## Forking the session's own agent (`ctx.fork_session`)
+
+:::caution Experimental
+`ctx.fork_session` and [`ctx.register_idle_task`](#idle-tasks-ctxregister_idle_task) are
+experimental. Their signatures and the fork handle's shape may change in a later release; keep
+the handle inside one small function of your plugin that returns plain data, and do not store it
+past the turn. Treat `fork_session` as optional: it returns `None` when the request is refused
+(no `llm.session_fork` grant, a bad, expired or spent token, a tool outside the allowlist), and it
+is not available everywhere. Under `plugins.isolation: host` a third-party plugin's
+`ctx.fork_session` exists but raises `PluginHostUnsupported` (a `RuntimeError`), because the handle
+tracks a thread of the live session agent inside the Hermes process. A plugin that degrades to
+"no fork" on `None` or an exception keeps working in both places.
+:::
+
+`ctx.side_question` gets one text reply. `ctx.fork_session` runs a
+bounded background copy of the session's agent instead: the same
+system prompt, `tools[]`, memory and conversation, on the warm prompt
+cache, working through a multi-step prompt that may call the plugin's
+own tools it names. It is the pattern Hermes uses for its own background
+memory/skill review, opened to plugins. A typical use: after a turn
+that created or edited a skill, ask the fork whether the skill is worth
+sharing, and let it call the plugin's own tool that offers the share.
+
+```python
+import json
+import threading
+
+
+def register(ctx):
+    def offer_share(args, turn_origin=None, **kwargs):
+        if turn_origin != "plugin_fork:wisdom":
+            return json.dumps({"error": "only the background check may offer a share"})
+        ...  # present the approval card for args["skill"]
+        return json.dumps({"offered": True})
+
+    ctx.register_tool("wisdom_offer_share", "wisdom", OFFER_SCHEMA, offer_share)
+
+    def on_post_llm_call(side_question_token=None, review_signals=None, **kwargs):
+        if side_question_token is None or not (review_signals or {}).get("skill_review_due"):
+            return
+        handle = ctx.fork_session(
+            side_question_token,
+            "Did this session create or change a skill the team would benefit from? "
+            "If so, call wisdom_offer_share once for it; otherwise answer 'no'.",
+            tools=["wisdom_offer_share"], max_iterations=4)
+        if handle is not None:  # runs in the background; never wait inside the hook
+            threading.Thread(target=lambda: handle.wait(600) and ctx.state.set(
+                "last_check", handle.outcome), daemon=True).start()
+
+    ctx.register_hook("post_llm_call", on_post_llm_call)
+```
+
+```yaml
+capabilities:
+  - llm.session_fork
+```
+
+The consent screen shows: "Run a background copy of your agent after a
+turn. It sees the whole session, including memory, can use the
+plugin's own tools, and spends your main model's tokens."
+
+### Signature and rules
+
+`ctx.fork_session(token, prompt, *, tools=(), max_iterations=8,
+input_budget=None, task=None, timeout=None)` returns a handle, or `None`
+when nothing was started.
+
+* `token` is `post_llm_call`'s `side_question_token`: the [lease
+  rules](#lease-rules) above apply unchanged. One token backs one request
+  per turn, a side question *or* a fork, shared by every plugin;
+  unattended turns (cron, subagents) get none; another profile's plugin
+  gets `None` and does not spend it. A plugin without `llm.session_fork`
+  gets `None` and does not spend it either, nor does a request naming a
+  tool outside the fork allowlist (below); every other `None` spends it.
+* `prompt` is a non-empty string of at most **8192 characters**, sent as
+  the fork's user message. The system prompt and `tools[]` stay
+  byte-identical to the session's, so the first request is mostly cache
+  reads.
+* `tools` lists the tool names the fork may call, drawn from the fork
+  allowlist: the names whose call reaches the handler this plugin
+  registered with `register_tool` (the name's current registration is
+  this plugin's, and Hermes dispatches it to the tool registry), plus
+  the core tools Hermes marks fork-safe in one central list (currently
+  none). Every other tool is outside it: another plugin's tools, every
+  MCP tool, and every core tool not marked fork-safe, including
+  `delegate_task`, `message_agent`, `cronjob_manage` and the Kanban
+  tools. A name Hermes dispatches before the tool registry is outside
+  it even when the plugin registered it, because the call would never
+  reach the plugin's handler: an agent-level tool, a legacy alias, the
+  Tool Search bridge, any `connectors__<connector>__<tool>` name, and
+  the session's memory-provider and context-engine tools. Naming a tool
+  outside the allowlist returns `None` without spending the token. A
+  tool's handler can start work the fork cannot follow (a subagent, a
+  remote agent task, a cron run, a detached worker, an MCP server's
+  sampling request), and that work would keep neither the fork's tool
+  list nor its auto-denied approvals; a plugin's own handler already
+  runs the plugin's code.
+* Each named tool must also be in the session, else the call returns
+  `None` and spends the token: advertised in its `tools[]`, or deferred
+  behind Tool Search (on by default, and plugin tools defer by default),
+  in which case the session's `tools[]` carry the `tool_call` bridge in
+  its place. The fork still *sees* every session tool, byte for byte
+  (cache parity); calls outside the list are refused at dispatch with a
+  message naming the allowed tools.
+* A deferred tool is called through `tool_call`, and the plugin does not
+  need to know which of its tools are deferred: Hermes appends one line
+  to the prompt telling the model to call the tool through `tool_call`
+  with its name, followed by the tool's parameters. Inside the fork
+  `tool_call` only carries a call to a named tool: a `tool_call` to any
+  other tool (the plugin's own unnamed tools, another plugin's tool, a
+  core tool, a connector) is refused at dispatch, and `tool_search` and
+  `tool_describe` stay refused, since the prompt line already names the
+  tool and its parameters. When the fork
+  starts, the allowlist is read again against the live session and a
+  tool that stopped being the plugin's own, or that the session now
+  serves before the registry, is refused at dispatch too. An empty list
+  means a tool-less fork.
+* `max_iterations` caps the fork's loop (1 to 16). The fork's aggregate
+  input tokens are bounded like the background review's
+  (`auxiliary.background_review.max_input_tokens`, default 75% of the
+  context window); `input_budget` can only lower that bound.
+* Dangerous-command approvals are auto-denied, and nothing the fork does
+  is written to the transcript or the session database.
+* The fork is cancelled as soon as the session starts its next turn,
+  whether it is running, starting or still deferred; a deferred fork
+  then never launches. `timeout` (seconds, at most 1800) adds a wall
+  clock. Both are cooperative: they interrupt the fork, which stops at
+  its next interrupt check, and the handle settles when the fork's
+  worker exits. A provider call that ignores the interrupt holds the
+  handle open until it returns, so wait with a bound (`handle.wait(t)`).
+* `task` names one of this plugin's own
+  [`register_auxiliary_task`](#task-routed-auxiliary-calls) lanes: the
+  fork then runs on that lane's model, resolved like
+  `auxiliary.background_review` (a different model starts cache-cold and
+  sees a digest of the conversation). A task the plugin did not register
+  returns `None`. Without `task` the fork runs on the session's model. A
+  lane with `inherit_from="background_review"` follows the user's review
+  model only under `allow_task_override` ([Inheriting a built-in
+  slot](#inheriting-a-built-in-slot)).
+* On a runtime Hermes manages locally (the bundled llama-server), the fork
+  waits for the machine to go idle like the background review
+  (`outcome == "deferred"`); a newer deferred fork of the same plugin for
+  the same session replaces the queued one (`"superseded"`).
+
+### The handle
+
+`handle.done`, `handle.cancelled`, `handle.outcome`, `handle.result` (the
+fork's final text, or `None`), `handle.actions` (the whitelisted tool
+names it called, in order; a call through `tool_call` lists the tool it
+carried), `handle.wait(timeout)` and `handle.cancel()`.
+`outcome` is one of `deferred`, `running`, `ok`, `cancelled`,
+`superseded`, `timeout`, `budget_exhausted`, `error`, `error:spawn` (the
+fork's worker thread could not start; `fork_session` returns the settled
+handle rather than raising) or `refused:<reason>`: `parent_gone` (the
+session agent was released before the fork started), `moa` (a
+Mixture-of-Agents runtime), `agent_provider` (an agent-as-provider
+runtime that runs its own tools) or `runtime_changed` (the session
+switched model or provider since the turn). The handle never exposes the fork agent itself.
+
+### Telling a fork from the live agent
+
+A tool handler called inside the fork receives the keyword
+`turn_origin="plugin_fork:<plugin id>"` (declare it, or accept
+`**kwargs`); calls the live agent makes carry no `turn_origin`. The
+example above uses it so the live agent cannot fire the plugin's
+share-offer tool on its own.
+
+Usage is billed to the session as `plugin_fork:<plugin id>`. Each of the
+fork's provider requests fires `pre_auxiliary_call` /
+`post_auxiliary_call` with `aux_task="plugin_fork"` and `plugin_id`, never
+the turn-scoped `pre_api_request` / `post_api_request`.
+
+## Idle tasks (`ctx.register_idle_task`)
+
+Experimental, like `fork_session` (see the note [above](#forking-the-sessions-own-agent-ctxfork_session)).
+`ctx.register_idle_task(name, fn, *, interval_hours, min_idle_hours=2, first_run="defer")` runs a
+session-less job of the plugin on the skill curator's idle schedule; the full rules are in
+[Run a job when Hermes is idle](./plugins/index.md#run-a-job-when-hermes-is-idle-ctxregister_idle_task).
+The contract a task's `fn` is written against:
+
+* `fn` runs on its own thread, in the profile that registered it. The host's poll (gateway
+  housekeeping, CLI/TUI startup, the `hermes serve` maintenance tick) starts it and returns at
+  once; it never waits for the run and sets no time limit of its own.
+* Keep a run short: give it its own time limit, and work in small batches with a checkpoint in the
+  plugin's data so the next run picks up where this one stopped.
+* Keep a run idempotent: a run cut off by a restart leaves no record and runs again later from the
+  start, so running the same batch twice must do no harm.
+* When gateway housekeeping stops (gateway shutdown, or the multiplexer restarting in the same
+  process), no new run starts and the gateway waits a few seconds for a run in flight, then stops
+  without it. Plugin code cannot be stopped and `fn` gets no stop signal, so a run still going goes
+  on in the background; when it ends it records nothing (the task's state stays as it was before
+  the run, so the task runs again later) and releases its claim. Hermes guarantees only that no
+  run starts and no task state is written after the stop; keep a run short.
+* No second run of a task starts while one is in flight. A claim whose process has died (a crash
+  or a kill) is taken over at the next poll; a claim whose owner cannot be checked (one written on
+  another machine) counts as abandoned after an hour. An exception is caught, logged and recorded as
+  `last_status: error`; it never reaches the host.
+* Model calls from `fn` go through `ctx.llm` and its trust gate. `fn` has no turn, so it gets no
+  `side_question_token` and cannot fork the session.
 
 ## Where this fits in the plugin surface
 
@@ -70394,6 +70667,8 @@ Known capability ids: `tools.override`, `llm.provider_override`,
 `llm.model_override`, `llm.agent_id_override`, `llm.profile_override`,
 `llm.task_override`, `llm.side_question` (ask the session's own agent after
 a turn, see [Plugin LLM Access](../plugin-llm-access.md#asking-the-sessions-own-agent-ctxside_question)),
+`llm.session_fork` (run a bounded background copy of the session's agent, see
+[Plugin LLM Access](../plugin-llm-access.md#forking-the-sessions-own-agent-ctxfork_session)),
 `gateway.platform_actions` (see `hermes_cli/plugin_capabilities.py` for the
 canonical registry). Unknown ids are ignored. The older per-capability
 config keys (`plugins.entries.<id>.allow_tool_override`, …) still work but
@@ -70874,6 +71149,8 @@ def unit_convert(args: dict, **kwargs) -> str:
 4. **Accept `**kwargs`:** Hermes injects context keywords (`task_id`, `session_id`, `conversation_id`,
    `user_task`, `parent_agent`, ...) and only forwards the ones your signature names, so `def handler(args)`
    works; `**kwargs` is how you opt into the full, additively growing context.
+   Inside a plugin's [session fork](../plugin-llm-access.md#forking-the-sessions-own-agent-ctxfork_session)
+   the handler also receives `turn_origin="plugin_fork:<plugin id>"`; live-turn calls carry none.
 5. **Key per-conversation state on `conversation_id`:** `session_id` names the current transcript
    segment, and a rotating compression (`compression.in_place: false`) replaces it mid-conversation.
    `conversation_id` is the id of the conversation's first session and does not change. `/new` and
@@ -71589,7 +71866,7 @@ Each hook is documented in full on the **[Event Hooks reference](../../user-guid
 | [`pre_tool_call`](../../user-guide/features/hooks.md#pre_tool_call) | Before any tool executes | `tool_name: str, args: dict, task_id: str` | optional directive: `{"action": "block", "message": ...}` vetoes the call; `{"action": "approve", "message": ...}` escalates to the human-approval gate |
 | [`post_tool_call`](../../user-guide/features/hooks.md#post_tool_call) | After any tool returns | `tool_name: str, args: dict, result: str, task_id: str, duration_ms: int` | ignored |
 | [`pre_llm_call`](../../user-guide/features/hooks.md#pre_llm_call) | Once per turn, before the tool-calling loop | `session_id: str, user_message: str, conversation_history: list, is_first_turn: bool, model: str, platform: str` | [context injection](#pre_llm_call-context-injection) |
-| [`post_llm_call`](../../user-guide/features/hooks.md#post_llm_call) | Once per turn, after the tool-calling loop (successful turns only) | `session_id: str, user_message: str, assistant_response: str, conversation_history: list, model: str, platform: str` | ignored |
+| [`post_llm_call`](../../user-guide/features/hooks.md#post_llm_call) | Once per turn, after the tool-calling loop (successful turns only) | `session_id: str, user_message: str, assistant_response: str, conversation_history: list, model: str, platform: str, side_question_token: str \| None, review_signals: dict` | ignored |
 | `pre_api_request` | Before each raw provider API request (several per turn when the model calls tools) | `session_id: str, model: str, provider: str, base_url: str, api_mode: str, api_call_count: int, message_count: int, tool_count: int, approx_input_tokens: int, max_tokens: int, request: dict` | ignored |
 | `post_api_request` | After each raw provider API request returns | `pre_api_request` fields plus `api_duration: float, finish_reason: str, response_model: str \| None, usage: dict, response: dict, assistant_content_chars: int, assistant_tool_call_count: int` | ignored |
 | `api_request_error` | A provider API call raised | correlation fields plus `status_code: int \| None, retry_count: int \| None, max_retries: int \| None, retryable: bool \| None, reason: str \| None, error: dict, request: dict` | ignored |
@@ -72131,6 +72408,57 @@ authorization (the right profile, the owner of a local session, a superseded con
 Beyond that, any client the gateway authenticated can call any plugin method with any params. Hermes does
 not check callers per method (`SECURITY.md` §2.6, rule 4): treat a plugin method like a plugin tool, validate
 its params, and never expose through it more than the plugin's own data and actions.
+
+### Follow the user's self-learning cadence (`review_signals`)
+
+After every successful turn, `post_llm_call` carries `review_signals`: the counters behind Hermes' own background memory/skill review (`skills.creation_nudge_interval`, `memory.nudge_interval`) and whether that review is due and enabled this turn. A plugin with after-turn work of its own (judging the skills a turn touched, say) can run on the same cadence the user already tuned instead of counting tool calls itself:
+
+```python
+def register(ctx):
+    def on_post_llm_call(review_signals=None, **kwargs):
+        if not review_signals or not review_signals["background_review_enabled"]:
+            return  # cron run, subagent, or the user turned background review off
+        if review_signals["skill_review_due"]:
+            ...  # the same turn Hermes reviews skills on
+
+    ctx.register_hook("post_llm_call", on_post_llm_call)
+```
+
+The hook fires before Hermes decides, and the due flags are the values that decision uses. Keys and semantics: [`post_llm_call`](../../user-guide/features/hooks.md#review_signals). To do that work the way Hermes' own review does (a background copy of the session's agent with a narrow tool list), pair the signal with [`ctx.fork_session`](../plugin-llm-access.md#forking-the-sessions-own-agent-ctxfork_session).
+
+### Run a job when Hermes is idle (`ctx.register_idle_task`)
+
+Experimental: the signature may change in a later release ([details](../plugin-llm-access.md#idle-tasks-ctxregister_idle_task)).
+
+Some work has no turn to hang off: re-scoring your plugin's data once a day, suggesting a cleanup, compacting a cache. `ctx.register_idle_task` runs it on the same scheduler as the skill [curator](../../user-guide/features/curator.md), from the same places (gateway housekeeping for every served profile, CLI/TUI startup, the `hermes serve` maintenance tick):
+
+```python
+def register(ctx):
+    def suggest(run):
+        # run.name, run.idle_for_seconds, run.last_run_at (ISO or None), run.run_count
+        candidates = ctx.state.get("candidates", [])
+        if not candidates:
+            return None
+        result = ctx.llm.complete(
+            messages=[{"role": "user", "content": f"Rank these for promotion: {candidates}"}],
+            task="suggest",  # a task this plugin registered with ctx.register_auxiliary_task
+        )
+        ctx.state.set("ranking", result.text)
+        return f"ranked {len(candidates)} skills"  # optional summary, shown by `hermes plugins idle-tasks`
+
+    ctx.register_idle_task("suggest", suggest, interval_hours=24, min_idle_hours=2)
+```
+
+`register_idle_task(name, fn, *, interval_hours, min_idle_hours=2, first_run="defer")` returns a `PluginRegistration` (dispose it to stop polling). A task runs when:
+
+- the host has been idle `min_idle_hours` (gateway housekeeping and CLI startup count as fully idle, `hermes serve` measures chat inactivity);
+- `interval_hours` (floored to 1) have passed since its last run. The first poll records "now" and waits one interval, like the curator, so an install or update never runs the job straight away; `first_run="immediate"` runs it on the first idle poll instead;
+- it is not paused (`hermes plugins idle-tasks <plugin> --pause <task>`);
+- no other run of it is in flight, in this process or another one.
+
+`fn` runs on its own thread, in the profile that registered it, and the host does not wait for it: the poll returns at once, and no second run of the task starts while one is in flight. Keep a run short and safe to repeat: when the gateway stops, a run still going records nothing and runs again later ([shutdown contract](../plugin-llm-access.md#idle-tasks-ctxregister_idle_task)). An exception is logged and recorded as `last_status: error` and never reaches the host. State lives in the plugin's data dir, `<data dir>/idle-tasks/<name>.json` (`last_run_at`, `run_count`, `paused`, `last_summary`, `last_status`, `last_error`), so each profile schedules its own copy.
+
+No capability gates this: the scheduler only calls your own function. Anything privileged that function does goes through its own gate (model calls through the [`ctx.llm` trust gate](../plugin-llm-access.md#trust-gate), and so on).
 
 ### Send raw CDP commands to the agent's browser
 
@@ -73206,6 +73534,14 @@ the gallery. There is no separate listing to maintain.
    however clean its code. A general-purpose tool such as a browser, downloader
    or media player is fine; one that ships with those sources built in, or whose
    description points users at them, is not.
+20. **No coin or token promotion.** A plugin built around one coin, token or
+   NFT collection that is not a broadly adopted asset (its price, trading,
+   launch, airdrop, holder rewards or promotion), and a plugin used to promote
+   its maker's own token, is declined. Memecoin boards, coin launchpads and
+   airdrop or free-mint farming tools fall under this rule. Fine: stablecoins
+   such as USDC, payments (x402 and similar), multi-coin wallets, exchanges and
+   markets, price tickers, safety and scam checks, and broadly adopted assets
+   such as Bitcoin, Ethereum and Solana.
 <!-- admission-rules:end -->
 
 ## Updating your entry
@@ -96005,7 +96341,7 @@ same auth gate as the rest of `/api/`.
 | `GET /api/curator` · `PUT .../paused` · `POST .../run` | Skill-curator status + pause/resume + run |
 | `GET /api/portal` | Nous Portal auth + Tool Gateway routing (read-only) |
 | `POST /api/ops/prompt-size` · `/dump` · `/config-migrate` | Diagnostics (backgrounded) |
-| `POST /api/ops/debug-share` | Upload a redacted debug report + full logs to a public paste and return the URLs (synchronous). Body: `{consent: true, redact?, lines?}`; without `"consent": true` it returns `400` and uploads nothing |
+| `POST /api/ops/debug-share` | Upload the allowlisted debug summary (no log lines or message text) to a public paste and return the URL (synchronous). Body: `{consent: true, redact?, lines?}`; without `"consent": true` it returns `400` and uploads nothing |
 | `PUT /api/webhooks/{name}/enabled` | Enable / disable a webhook route |
 | `POST /api/skills/hub/install` · `/uninstall` · `/update` | Skills hub actions (backgrounded) |
 | `GET /api/skills/hub/search` | Search the skill hub across all sources |
@@ -105347,6 +105683,8 @@ skills/.*
 This mirrors the [hard-excluded paths](#whats-not-in-a-distribution-ever) that the installer strips on its end. Anything else you want to keep out of the repo (scratch files, large assets, local-only skills) should also go in here.
 
 For cron, commit only `cron/jobs.json`. Hermes treats every other entry under `cron/` as runtime state (locks, ledgers, output, suggestions, and future scheduler sidecars) and never installs or replaces it from a distribution. Root-level hidden entries under `skills/` are likewise local Hermes bookkeeping; hidden files inside an authored skill directory remain part of that skill.
+
+A shipped job can pin its own `timezone` (for example a 09:00 `America/New_York` market update that every installer gets at the same instant) while the others follow each user's profile timezone. See [Pinned and local-time jobs in a shipped profile](./features/cron.md#pinned-and-local-time-jobs-in-a-shipped-profile).
 
 ### Step 4 — Push to a git repo
 
