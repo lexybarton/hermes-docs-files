@@ -235,6 +235,7 @@ Repo: https://github.com/NousResearch/hermes-agent
 - [Gateway local sessions](https://hermes-agent.nousresearch.com/docs/developer-guide/gateway-local-sessions): Local CLI/TUI sessions as canonical gateway admissions
 - [Gateway Monitoring](https://hermes-agent.nousresearch.com/docs/developer-guide/gateway-monitoring): Health export, structured diagnostics, fleet queries and how to extend the monitoring plane
 - [Gateway Session Lifecycle](https://hermes-agent.nousresearch.com/docs/developer-guide/gateway-session-lifecycle): SessionSource, SessionEntry, SessionStore, session-key rules and multi-user isolation in the gateway
+- [Gateway over SSH: client contract](https://hermes-agent.nousresearch.com/docs/developer-guide/gateway-ssh-clients): How an SSH-tunnel client (Desktop or mobile SSH mode) reaches the gateway with hermes gateway attach and hermes gateway tickets
 - [Hosted rooms across local profile owners](https://hermes-agent.nousresearch.com/docs/developer-guide/hosted-profile-owners)
 - [Image Generation Provider Plugins](https://hermes-agent.nousresearch.com/docs/developer-guide/image-gen-provider-plugin): How to build an image-generation backend plugin for Hermes Agent
 - [macOS bundle updates](https://hermes-agent.nousresearch.com/docs/developer-guide/macos-bundle-updates)

@@ -6937,6 +6937,7 @@ Secret redaction and the website blocklist:
 ```yaml
 security:
   redact_secrets: true           # Redact API key patterns in tool output and logs (on by default)
+  redact_phone_numbers: true     # Mask E.164 phone numbers in replies sent to chats (on by default)
   website_blocklist:             # See Website Blocklist section below
     enabled: false
     domains: []
@@ -6944,6 +6945,7 @@ security:
 ```
 
 - `redact_secrets` — when `true`, automatically detects and redacts patterns that look like API keys, tokens, and passwords in tool output before it enters the conversation context and logs. **On by default**. Set to `false` explicitly only when you need raw credential-like strings for debugging or redactor development. Reading a secret-bearing file (`.env`-style files, shell rc/profile files, the Hermes `config.yaml` under `HERMES_HOME` and its `backups/config/` copies) with `read_file`, `search_files` or a terminal `cat`/`grep` also masks credential-shaped assignments (`SOME_API_TOKEN: …`) with a non-reusable `«redacted-secret»` marker, whatever the value looks like; ordinary source and project config files keep only the vendor-prefix patterns so fixtures such as `MAX_TOKENS: 100` are never mangled.
+- `redact_phone_numbers` — when `true` (default), phone numbers in E.164 form (`+15551234567`) are masked (`+155****4567`) in the agent's replies and in everything the gateway sends to a chat platform, even with `redact_secrets: false`. Set it to `false` on a trusted single-operator setup whose assistant must show exact phone numbers (a contact list, a call log). Only E.164 numbers are affected: API keys, bot tokens, bearer tokens, passwords and every other secret pattern stay masked in chat, and logs and tool output keep masking phone numbers. Any value other than `true` or `false` keeps them masked and logs a warning.
 
 Earlier releases also had `tirith_*` keys for a bundled command scanner; it was removed and upgrading drops those keys. Content-level command checks are described in [Content-Level Command Checks](security.md#content-level-command-checks).
 
@@ -14106,7 +14108,7 @@ The flag is stored as `"locked": true` on the skill's entry in `~/.hermes/skills
 What a lock is not:
 
 - It is a **policy check, not a sandbox.** The terminal check reads the command's write targets; a script that writes into the skill through its own logic, or `execute_code`, is not inspected. Pair it with filesystem permissions if you need a hard boundary.
-- If `.usage.json` is corrupt, the background passes are refused (fail closed) while normal turns proceed, so one broken file does not freeze every skill edit. Repair it, or run `hermes curator unlock <skill>` to rewrite it.
+- If `.usage.json` is damaged (unparsable, or not a JSON object), the agent can't tell which skills are locked: `write_file`, `patch` and `terminal` refuse writes into every skill and into the record, and the background passes refuse every `skill_manage` change, while a normal turn's `skill_manage` still proceeds so one broken file does not freeze every skill edit. `hermes curator lock`/`unlock` and the Desktop switch refuse to rewrite it as well, so the locks it may still hold are not lost: repair the JSON, or move the file aside (that drops every lock, pin and usage count in the profile).
 - It does **not** stop `hermes update` / `hermes skills update` from refreshing a bundled or hub skill you have not modified; those are your commands, not agent writes.
 
 ## Usage telemetry
@@ -15722,7 +15724,7 @@ This means your existing Cursor conventions automatically apply when using Herme
 Context files are loaded by `build_context_files_prompt()` in `agent/prompt_builder.py`:
 
 1. **Scan working directory** — checks for `.hermes.md` → `AGENTS.md` → `CLAUDE.md` → `.cursorrules` (first match wins)
-2. **Content is read** — each file is read as UTF-8 text
+2. **Content is read** — each file is read as UTF-8 text. A file (or symlink) whose resolved target lies outside the project (the git root, else the working directory) or is on the file read deny-list is skipped. When that root is your home directory or above (a dotfiles repo at `$HOME`, or a session started in `$HOME`), the target must instead stay inside the file's own directory. Subdirectory context files follow the same rule, with the session's working directory as the root
 3. **Security scan** — content is checked for prompt injection patterns
 4. **Truncation** — files exceeding the character cap are head/tail truncated (70% head, 20% tail, with a marker in the middle). The cap is an explicit `context_file_max_chars` from config.yaml when set; otherwise it scales dynamically with the model's context window (floor 20,000 chars, ceiling 500,000)
 5. **Assembly** — all sections are combined under a `# Project Context` header
@@ -16727,6 +16729,9 @@ Hermes records Git install source and revision in `.install-metadata.json`.
 Unpinned tracked installs compare the saved source's remote HEAD, or a matching
 saved `update_url` feed. Pinned installs remain pinned. Self-cloned directories
 need `hermes plugins adopt NAME` before they become tracked installations.
+A plugin directory that is a link to a checkout somewhere else is never
+tracked, because Hermes does not change files outside the plugins directory:
+pull updates in that checkout, and delete the link to remove the plugin.
 Manually copied or provenance-drifted directories receive diagnostic guidance.
 Pip entry-point plugins can report an owning distribution's available version;
 that check does not turn them into Git-managed installs.
@@ -17211,6 +17216,10 @@ What changes in `host` mode:
   model-provider profiles that build their own SDK client (`create_client`), terminal backends (the
   backend's commands fail with this reason; the `singularity` plugin is one), streaming and websocket
   dashboard endpoints, and plugins that monkeypatch Hermes modules. Run those with `isolation: in_process`.
+- **No cookies.** A hosted plugin's API answers are served from the gateway's own address, so Hermes
+  drops any `Set-Cookie` header they carry (logging it once per plugin) rather than let a plugin set or
+  overwrite the dashboard's cookies. This also applies to another profile's plugins, which always run in
+  a host.
 
 **Locking it for a shared deployment.** `plugins.isolation` is ordinary profile config, so whoever can
 edit a profile's `config.yaml` can turn it off. When the profiles belong to people you are isolating from
@@ -30049,6 +30058,15 @@ If you work on several long-running projects, topics keep their context separate
 
 Each topic gets its own conversation session, history, and context — completely isolated from the others.
 
+With BotFather **Threaded Mode** on, Telegram also stamps a thread id on ordinary DM messages (a reply inside a thread, or a client that opens a new thread per question), and by default each of those threads is its own session too. If one DM keeps fanning out into parallel sessions you didn't ask for, set `platforms.telegram.extra.dm_threads: shared`: the whole DM becomes one session (one history, one turn at a time), and replies still go back to the thread each message came from. Topics declared in `extra.dm_topics` and `/topic` multi-session lanes stay isolated either way. The default, `per_thread`, keeps one session per thread; any other value logs a warning and is treated as `per_thread`.
+
+```yaml
+platforms:
+  telegram:
+    extra:
+      dm_threads: shared   # per_thread (default) | shared
+```
+
 ### Configuration
 
 :::caution Prerequisites
@@ -30727,6 +30745,24 @@ Unlike Discord (where reactions are additive), Telegram's Bot API replaces all b
 :::tip
 If the bot doesn't have permission to add reactions in a group, the reaction calls fail silently and message processing continues normally.
 :::
+
+## Typing Indicator
+
+While a turn runs, the bot shows "typing…" by calling `sendChatAction` every few seconds. Some
+Telegram clients move the view while that indicator is on, so your last message can appear to
+jump up the chat until the reply arrives ([#40885](https://github.com/NousResearch/hermes-agent/issues/40885)).
+To turn the indicator off for Telegram:
+
+```yaml
+gateway:
+  platforms:
+    telegram:
+      extra:
+        typing_indicator: false   # default true
+```
+
+With it off, the bot makes no `sendChatAction` calls at all. Replies, progress messages and
+reactions still work as before.
 
 ## Per-Channel Prompts
 
@@ -39289,7 +39325,7 @@ A [portable plugin package](../../developer-guide/plugins/index.md#portable-agen
 
 ## MCP Elicitation Support
 
-MCP servers can ask the user for structured input mid-tool-call via the `elicitation/create` protocol (mcp Python SDK ≥ 1.11.0). Hermes routes **form-mode** elicitations through its existing approval surface — an interactive prompt in the CLI/TUI, or approval buttons on gateway platforms like Telegram and Slack — so the request reaches you wherever the session lives. Each answer covers that one request, so the prompt offers only Allow Once and Deny. YOLO and `approvals.mode: off` do not answer these for you: the server is asking you a question, not asking permission. **URL-mode** elicitations (where a server points you at an external URL) are declined as unsupported.
+MCP servers can ask the user for structured input mid-tool-call via the `elicitation/create` protocol (mcp Python SDK ≥ 1.11.0). Hermes asks **form-mode** elicitations on the session's own clarify surface — the question panel in the CLI/TUI, a card in Desktop, the clarify prompt on messaging platforms — so the request reaches you wherever the session lives. Each field the server asks for becomes a question (choices for enums and yes/no fields, free text otherwise); answers are checked against the server's schema (whole numbers, ranges, lengths, `email`/`uri`/`date`/`date-time` formats) and a wrong answer is asked again, twice at most, before the form is declined. Skipping every field (with no defaults to fall back on) declines; dismissing the prompt cancels. Your answers go to that MCP server only, not into the conversation. A form with no fields is a yes/no question. Where no clarify surface is bound, the request falls back to the approval prompt, which can only answer forms that a single Allow Once can fill. YOLO and `approvals.mode: off` do not answer these for you: the server is asking you a question, not asking permission. Cron and other unattended sessions decline. **URL-mode** elicitations (where a server points you at an external URL) are declined as unsupported.
 
 Elicitation is **enabled by default** per server. Configure it under the `elicitation` key:
 
@@ -39299,10 +39335,10 @@ mcp_servers:
     command: "my-mcp-server"
     elicitation:
       enabled: true    # default: true
-      timeout: 300     # seconds to wait for your answer (default: 300)
+      timeout: 300     # seconds to wait for your answer, for the whole form (default: 300)
 ```
 
-The 5-minute default timeout mirrors the gateway approval default so users on async surfaces have time to respond before the server gives up. Per-server metrics (requests, accepted, declined, errors) are tracked on the handler.
+The 5-minute default timeout mirrors the gateway approval default so users on async surfaces have time to respond before the server gives up. Once it passes, the server is told the request was cancelled and no further question of that form is asked; a question already on screen stays until you answer or dismiss it (or the clarify timeout ends it), and that late answer is discarded. Per-server metrics (requests, accepted, declined, errors) are tracked on the handler.
 
 ## MCP Events (experimental)
 
@@ -49012,6 +49048,23 @@ owner's `instance_id`, and expires after 30 seconds. `attach` prints it to stdou
 process only; it never logs it. Run `attach` again for each new connection and each reconnect.
 A client that speaks the control socket itself gets the same verdict and ticket without the spawn:
 see [Local control socket](#local-control-socket-public-client-contract).
+A client that reaches the host over SSH also needs HTTP tickets, and a WebSocket ticket that is
+not bound to one profile (`hermes gateway tickets`): see
+[Gateway over SSH: client contract](./gateway-ssh-clients.md).
+
+Every `attach` reply from a parsed invocation, success or refusal, also carries
+`"start_context": {"windows_service_session": <bool>}`. It is `true` when the caller runs elevated
+in Windows session 0, which is what an administrator's OpenSSH login gets, and `false` everywhere
+else, including off Windows. A gateway such a login spawns itself inherits both, so the user's own
+desktop apps are refused with `gateway_other_session` until it exits. A registered Scheduled Task is
+the exception: `--start` runs it, and it starts the gateway in the signed-in user's session at normal
+integrity. `attach --start` still starts the gateway and exits as before, and prints a one-line
+warning on stderr first. A remote client that
+sees `true` should run `attach` without `--start` (a gateway the user's own session started
+serves both), and when none is running ask the user to start Hermes from a normal
+(non-administrator) window on that machine's desktop. Do not suggest `hermes gateway install`
+there: approved through the administrator prompt it can start the gateway elevated, which normal
+windows are refused by as well (`gateway_elevated`).
 
 With no owner to attach, the JSON adds `message` and has no `url` or `ticket`. `message` is
 the verdict Ink shows: `gateway <state>: <reason_code>` (`not ready` when there is no code),
@@ -49536,6 +49589,13 @@ with `ON DELETE RESTRICT`: deleting or pruning a session retires its terminal le
 rows in the same transaction and refuses while work is live or `unknown`. An input that
 was `started` when its owner died becomes `unknown` at the next owner start and is never
 replayed; its later inputs wait until it is resolved (`prompt.resolve_unknown`).
+
+The `runtime_epoch` row is the store's owner fence: the gateway captures it once at boot
+and every write is checked against it, so bumping it is a takeover. Only the profile's lock
+holder may take it over — `begin_runtime_epoch()` refuses a bump while another process
+holds the profile's `gateway.lock` flock, because a stray bump leaves the running gateway
+permanently behind the fence: every write on that store then fails with `stale_epoch` until
+it restarts, and `/reset` does not recover it (#142330).
 
 `hermes sessions recover` copies the row-bearing tables above into the
 recovered database (FTS indexes and `schema_version` are regenerated), including
@@ -52847,6 +52907,7 @@ Subcommands:
 | `run` | Run the gateway in the foreground. Recommended for WSL, Docker, and Termux. |
 | `ensure` | Discover or request a local session runtime without installing a service or replacing an existing owner. Emits JSON; see below. |
 | `attach` | Give a local client the gateway's WebSocket URL and one single-use session ticket for this profile. Emits JSON; see below. |
+| `tickets` | Mint single-use HTTP and WebSocket tickets for a client that reaches the gateway over SSH. Emits JSON; see below. |
 | `start` | Start the installed systemd/launchd background service. |
 | `stop` | Stop the service (or foreground process). |
 | `restart` | Restart the service. |
@@ -52910,6 +52971,17 @@ the JSON carries `message` (the `gateway <state>: <reason>` lines, with the reme
 one), the same text goes to stderr, and the exit code is `ensure`'s for that verdict. The Ink TUI
 attaches through the same code. Details and the dial rules:
 [Gateway internals: `hermes gateway attach`](../developer-guide/gateway-internals.md#hermes-gateway-attach).
+
+`hermes gateway tickets (--probe | --serve) [--json]` is for a client that reaches the gateway
+over SSH and calls its HTTP API through a forwarded port. `--probe` prints
+one JSON line (`protocol`, the ticket `purposes` it mints, `windows_service_session`) and touches
+no gateway. `--serve` prints a hello line with the running gateway's endpoint, then answers each
+stdin line `{"id": ..., "purpose": "native-http"}` with one stdout line holding a single-use
+ticket, until stdin closes. A line may add `"profile": "<name>"` for another profile the same
+gateway serves. `{"id": ..., "purpose": "interactive"}` gets the WebSocket's ticket for a socket
+that reaches every profile the gateway serves. It never starts a gateway, and tickets go to stdout only, never to a log. The line
+protocol and the client rules:
+[Gateway over SSH: client contract](../developer-guide/gateway-ssh-clients.md).
 
 ## `hermes lsp`
 
@@ -54767,7 +54839,7 @@ Type `/` in the CLI to open the autocomplete menu. Built-in commands are case-in
 | `/egress [status]` | Show Docker egress proxy status — enabled/configured/running state, credential source, token mappings, uncovered providers, and next remediation step. Works in CLI, TUI, Desktop chat, and messaging gateway. |
 | `/redraw` | Force a full UI repaint (recovers from terminal drift after tmux resize, mouse selection artifacts, etc.) |
 | `/status` | Show session info — model, provider, profile, session ID, working directory, title, created/updated timestamps, token totals, agent-running state — followed by a local **Session recap** block (recent user/assistant turn counts, tool result count, top tools used, last few files touched, the latest user prompt, and the latest assistant reply). The recap is computed locally from the in-memory conversation; no LLM call, no prompt-cache impact. |
-| `/context [all]` (alias: `/ctx`) | Visual context-window breakdown. On the CLI/TUI: a 5×20 glyph block grid (each cell ≈ 1% of the model window) plus an estimated per-category table — system prompt, tool definitions, rules, skills index, MCP, subagents, memory, conversation — versus free space. On messaging platforms: a usage gauge with auto-compression threshold/headroom, compression stats, cumulative throughput, and the same category table in plain text. On the CLI, messaging platforms, and TUI/Desktop sessions on a compute host, the output ends with a per-file **Context files** listing (.hermes.md, AGENTS.md chain, CLAUDE.md, .cursorrules + .cursor/rules/*.mdc, SOUL.md) showing each file's token estimate and whether it was loaded, truncated over `context_file_max_chars`, shadowed by a higher-priority context type, blocked by the injection scan, empty/unreadable, or suppressed by the install-tree guard — the answer to "why is my CLAUDE.md ignored?". `/context all` appends per-skill and per-toolset cost listings (index cost vs SKILL.md load cost; schema tokens per toolset). Read-only and computed locally — no LLM call, no prompt-cache impact. |
+| `/context [all]` (alias: `/ctx`) | Visual context-window breakdown. On the CLI/TUI: a 5×20 glyph block grid (each cell ≈ 1% of the model window) plus an estimated per-category table — system prompt, tool definitions, rules, skills index, MCP, subagents, memory, conversation — versus free space. On messaging platforms: a usage gauge with auto-compression threshold/headroom, compression stats, cumulative throughput, and the same category table in plain text. On the CLI, messaging platforms, and TUI/Desktop sessions on a compute host, the output ends with a per-file **Context files** listing (.hermes.md, AGENTS.md chain, CLAUDE.md, .cursorrules + .cursor/rules/*.mdc, SOUL.md) showing each file's token estimate and whether it was loaded, truncated over `context_file_max_chars`, shadowed by a higher-priority context type, blocked by the injection scan, empty/unreadable, skipped because it resolves outside the project (or to a protected file), or suppressed by the install-tree guard — the answer to "why is my CLAUDE.md ignored?". `/context all` appends per-skill and per-toolset cost listings (index cost vs SKILL.md load cost; schema tokens per toolset). Read-only and computed locally — no LLM call, no prompt-cache impact. |
 | `/agents` (alias: `/tasks`) | Show active agents and running tasks across the current session. |
 | `/bg <prompt>` | Run a prompt in a separate background session. The agent processes your prompt independently — your current session stays free for other work. Results appear as a panel when the task finishes. See [CLI Background Sessions](../user-guide/cli.md#background-sessions). |
 | `/btw <question>` | Ask a quick side question **about the current conversation** without interrupting it. A one-shot auxiliary LLM call answers from a read-only snapshot of the transcript — the live session's history and prompt cache are untouched, and the current turn keeps running. For independent work with a fresh context, use `/bg`. |
@@ -66113,6 +66185,201 @@ compaction, suspension and crash recovery retain their separate lifecycle roles.
 
 ---
 
+<!-- source: website/docs/developer-guide/gateway-ssh-clients.md -->
+# Gateway over SSH: client contract
+
+# Gateway over SSH: client contract
+
+This page is for authors of a client that reaches a Hermes host over SSH: it runs commands on
+the host, forwards the gateway's loopback port, and then talks to the gateway as a local client
+would. Two commands on the host give it everything it needs:
+
+| Command | Gives the client |
+|---------|------------------|
+| [`hermes gateway attach --json`](./gateway-internals.md#hermes-gateway-attach) | The gateway's loopback endpoint and one single-use WebSocket ticket. With `--start` it starts a gateway when none is running. |
+| `hermes gateway tickets --probe --json` | Whether this host has the `tickets` command, which ticket purposes it mints, and whether this login is a Windows service session. |
+| `hermes gateway tickets --serve --json` | Single-use tickets over one long-lived SSH channel: one per HTTP request, and (on a host that lists `interactive`) the WebSocket's ticket for every profile. |
+
+Both commands work for the profile the command runs in (`HERMES_HOME`, or `hermes -p <name>`).
+A `--serve` request can name another profile that the same gateway serves.
+A non-interactive SSH command often does not have `hermes` on its `PATH`; the client has to
+locate the binary.
+
+## `hermes gateway tickets --probe --json`
+
+Starts nothing and contacts no gateway. Exits `0` and prints one JSON line:
+
+```json
+{"protocol": 1, "purposes": ["native-http", "native-profile-create", "native-profile-registry", "interactive"],
+ "windows_service_session": false}
+```
+
+(Shown wrapped here; on the wire it is one line.) `protocol` is the version of the `--serve` line
+protocol below. `purposes` lists the ticket purposes `--serve` mints. Read them and ignore keys you
+do not know: later versions add keys.
+
+A host that lists `native-profile-registry` also accepts the `profile` field of a request (see
+below). A host that lists only `native-http` ignores `profile` and mints for the profile the
+command runs in, so do not send `profile` to it.
+
+A host that lists `interactive` mints the WebSocket's ticket too (see
+[The WebSocket ticket](#the-websocket-ticket)). A host that does not list it answers
+`unsupported_purpose`; dial the WebSocket with the ticket `attach` returned there.
+
+`windows_service_session` is `true` when this login runs elevated in Windows session 0 (an
+administrator's OpenSSH login); it is `false` everywhere else, and a host that does not report the
+key is treated as `false`. It is the value `attach --json` reports in
+`start_context.windows_service_session`. See client rule 2.
+
+A host whose Hermes predates this command exits non-zero and prints no JSON on stdout. That is
+the signal to use the client's previous SSH path.
+
+## `hermes gateway tickets --serve --json`
+
+Run it once per connection and keep its SSH channel open. It finds the running gateway for the
+profile as `attach` without flags does. It never starts one: run `attach --start` first.
+
+All lines are single-line JSON objects, one per line, on stdout (replies) and stdin (requests).
+
+**First line.** When a gateway is ready:
+
+```json
+{"type": "hello", "protocol": 1,
+ "endpoint": {"api_origin": "http://127.0.0.1:<port>", "profile_id": "...", "instance_id": "...",
+              "authority_epoch": 1, "runtime_protocol": 1, "supervisor": "none",
+              "capabilities": ["..."], "control_home": null, "code_sha": "..."}}
+```
+
+(Shown wrapped here; on the wire it is one line.) `endpoint` is the same object `attach --json` returns in its `endpoint` field. Check that its
+`instance_id` equals the one your `attach` returned: if it differs, the gateway was replaced in
+between, so attach again.
+
+When there is no gateway to use, the first line is an error and the command exits non-zero with
+the exit code `hermes gateway ensure` gives that verdict (`5` when absent):
+
+```json
+{"type": "error", "error": {"code": "absent", "reason_code": null, "message": "gateway absent: not ready"}}
+```
+
+`code` is the discovery state (`absent`, `starting`, `draining`, `incompatible`, `inaccessible`,
+`conflict`), `reason_code` is the reason `attach` gives for it (for example
+`gateway_other_session`) or `null`, and `message` is the text `attach` shows for the same verdict.
+
+**Requests.** After the hello, write one line per ticket you need:
+
+```json
+{"id": 7, "purpose": "native-http"}
+```
+
+`id` is an integer or a string of your choice. `purpose` is one of the probe's `purposes`.
+An optional `"profile": "<name>"` asks for a ticket for another profile of the same gateway (see
+[Profiles](#profiles)); without it the ticket is for the profile the command runs in. Leave the
+key out to mean that: `"profile": null` is refused, not read as absent. A request line may be at most 65536 bytes (64 KiB),
+not counting its line ending (LF or CRLF); a longer line is discarded as it is read and gets one `invalid_request`
+reply. Each request line gets exactly one reply line, in order, carrying your `id`:
+
+```json
+{"id": 7, "ok": true, "ticket": "<ticket>", "expires_in": 30}
+{"id": 7, "ok": false, "error": {"code": "ticket_unavailable", "message": "..."}}
+```
+
+| `error.code` | Meaning |
+|--------------|---------|
+| `invalid_request` | The line is not a JSON object with an integer or string `id`, is nested too deeply to parse, or is longer than 65536 bytes (64 KiB, line ending excluded). The reply's `id` is `null`. The channel stays open. |
+| `invalid_request` (with your `id`) | `profile` is present and is not a string holding a valid profile name (`null` included), or `profile` is present at all on an `interactive` request. |
+| `unsupported_purpose` | `purpose` is missing or not in the probe's `purposes`. |
+| `unknown_profile` | No profile of that name exists on the host. |
+| `profile_not_served` | The profile exists, but the running gateway does not serve it (it has a gateway of its own, or is parked). Only answered when the same gateway, still `ready`, lists the profiles it serves and this one is not among them; otherwise the refusal is `ticket_unavailable`. The channel is still good for other profiles. |
+| `ticket_unavailable` | The gateway did not mint the ticket: it stopped, was replaced, or refused. Close the channel, run `attach` again and open a new one. |
+
+Close stdin to end the command; it exits `0`.
+
+### Profiles
+
+One gateway usually serves every profile of the host, and each ticket is bound to one of them.
+The gateway answers `403` with `{"detail": "profile_scope_mismatch"}` when a request selects a
+profile other than its ticket's. So name, in the ticket request, the profile the HTTP request
+selects:
+
+| HTTP request | `purpose` | `profile` |
+|--------------|-----------|-----------|
+| Selects a profile with `?profile=<name>`, a JSON body `"profile": "<name>"`, a `/api/profiles/<name>/...` path, or `recents_profile=<name>` on `/api/profiles/sessions/sidebar` | `native-http` | `<name>` |
+| Selects none | `native-http` | omit |
+| `POST /api/profiles` (create a profile) | `native-profile-create` | omit |
+| `PATCH` or `DELETE /api/profiles/<name>` (rename or delete) | `native-profile-registry` | `<name>` |
+
+`profile` is the profile's name as `GET /api/profiles` lists it; the root profile is `default`.
+These are the tickets the Desktop app uses for the same requests on its local connection, minted
+the same way, with the same limits:
+
+- A `native-http` ticket never creates, renames or deletes a profile (`403`).
+- A `native-profile-create` ticket is accepted by `POST /api/profiles` only, and a
+  `native-profile-registry` ticket by `PATCH`/`DELETE` of the one profile it names only. Every
+  other route answers `401` to them.
+- The profile the gateway itself runs in cannot be deleted or moved. Renaming `default` only sets
+  its display name.
+
+Creating, renaming or deleting a profile makes the gateway rescan what it serves. For a moment
+after it, a ticket request can fail with `ticket_unavailable` or `profile_not_served`, or a
+request with `401`; retry.
+
+### The WebSocket ticket
+
+```json
+{"id": 8, "purpose": "interactive"}
+{"id": 8, "ok": true, "ticket": "<ticket>", "expires_in": 30}
+```
+
+An `interactive` ticket opens the gateway's WebSocket (`/api/ws`), as the ticket `attach` returns
+does: dial `attach`'s `url` with the subprotocols `attach`'s `protocol` and
+`hermes-gateway-ticket.<ticket>`. The difference is its reach. The ticket `attach` returns is bound
+to the profile `attach` ran in, and the gateway answers `profile_mismatch` to any frame on that
+socket whose `profile` names another one. An `interactive` ticket from `--serve` is the one the
+Desktop app asks for on its local connection: one socket on which each frame's `profile` selects
+any profile that gateway serves (a profile it does not serve is still `profile_mismatch`). So one
+connection is enough for every profile.
+
+It takes no `profile`: a request that carries the key is refused with `invalid_request`. Like every
+ticket it is single-use (it opens one socket), expires `expires_in` seconds after it was minted,
+and is bound to that gateway instance. The HTTP API answers `401` to it. Request a new one for
+every dial, including a reconnect.
+
+**Using an HTTP ticket.** Send it on one HTTP request to the forwarded `api_origin`, in the
+`X-Hermes-Gateway-Ticket` header, with no `Origin` header. A ticket is single-use: it
+authenticates exactly one request, expires `expires_in` seconds after it was minted, and is bound
+to one profile and to that gateway instance. Request a fresh ticket for every HTTP request. The
+ticket `attach` returns is for the WebSocket only; the HTTP API answers `401` to it.
+
+Tickets are credentials. The command writes them to its stdout only, never to stderr or a log;
+a client must not log them either.
+
+## Client rules
+
+1. **Probe first.** Run `hermes gateway tickets --probe --json` (one SSH exec). If it fails or
+   does not print JSON, use your previous SSH path unchanged. Once the probe has succeeded, never
+   fall back: show a gateway refusal (authorization, draining, another session, profile) to the user.
+2. **A Windows service session only attaches.** If the probe reports
+   `"windows_service_session": true`, run `attach --json` only, never `--start`. If the gateway
+   is absent, tell the user to start Hermes from a normal (non-administrator) window on that
+   machine's desktop. Do not suggest `hermes gateway install`: it can start the gateway elevated,
+   which that user's own windows are then refused by. A host that does not report the key is
+   treated as `false`.
+3. **Otherwise run `attach --start --json` on every connect and reconnect.** A gateway started
+   this way exits after about 10 idle minutes. Allow a long first timeout: a first run after an
+   update can take most of a minute.
+4. **Forward the returned loopback port** over SSH and dial the WebSocket, as in
+   [`hermes gateway attach`](./gateway-internals.md#hermes-gateway-attach). When the probe's
+   `purposes` list `interactive`, dial with an `interactive` ticket from your `--serve` channel
+   ([The WebSocket ticket](#the-websocket-ticket)), so the one socket serves every profile;
+   otherwise dial with the ticket `attach` returned, which serves the profile `attach` ran in.
+5. **Keep one `hermes gateway tickets --serve --json` channel open** and, for HTTP, request one
+   ticket per request, with the purpose and profile [that request needs](#profiles). A new SSH exec per ticket costs seconds; a request on an
+   open channel does not.
+6. **One path per connection.** Never mix the gateway path with your previous one in the same
+   connection.
+
+---
+
 <!-- source: website/docs/developer-guide/hosted-profile-owners.md -->
 # Hosted rooms across local profile owners
 
@@ -74167,26 +74434,32 @@ const gw = new GatewayClient({
 
 Other options (`terminalConnectFailure`, `attachUrl`, `sidecarUrl`, timeouts, `toolProgress`, `onLifecycle`, `text`, `fallbackWebSocket`) are documented on `GatewayClientOptions`. Browser-safe modules stay in `apps/shared/src/`; Node-only ones (the client, `prompt-history`) are in `apps/shared/src/node/`, and `apps/shared/src/node/boundary.test.ts` fails if the package's program ever includes a file from another workspace.
 
-### Method catalog (selected)
+### Which methods the shared gateway answers
 
-```
-prompt.submit           prompt.background       session.steer
-session.create          session.list            session.active_list
-session.activate        session.close           session.interrupt
-session.history         session.compress        session.branch
-session.title           session.usage           session.status
-clarify.lock            config.set / config.get commands.catalog
-client.capabilities     gateway.capabilities    ping
-command.resolve         command.dispatch        cli.exec
-reload.mcp              reload.env              process.stop
-delegation.status       subagent.interrupt      subagent.steer
-spawn_tree.save / list / load
-terminal.resize         clipboard.paste         image.attach
-```
+On the shared gateway's `/api/ws` socket (the one `hermes gateway attach --json` opens), the socket answers the heartbeat `gateway.ping` itself, and every other frame goes to the session authority first. A method the authority does not serve can still reach an older handler in `tui_gateway/server.py`, but only for a connection whose ticket carries the full interactive grant (an attach ticket does). The older handler is never used for a method that acts on the whole process, or for a `session.*`, `prompt.*` or `message.*` method other than a few store-wide reads and the foreign-history import (`session.most_recent`, `session.active_list`, `session.events.stats`, `session.foreign.*`; `tui_gateway/ws_legacy_fallback.py`). Everything else gets `-32601`.
+
+The OpenRPC document's `x-canonical-methods` (53 names) is not the list of methods a client may call. It lists the methods with a `hermes-gateway-v1` wire model of their own (`tui_gateway/contracts/canonical*.py`). The authority also serves methods whose wire is the same as the older catalog's (`RpcMethods` in the generated TypeScript), and validates those against that model.
+
+Build on the methods the gateway serves. The methods answered by an older handler have no owner decision yet (`tests/hermes_cli/serve_handler_ledger.json`, `decision: undecided`), so treat `-32601` from one of them as "not available here". The lists below are generated from the dispatch tables:
+
+<!-- gateway-methods:start -->
+<!-- Generated by scripts/gen_serve_handler_ledger.py from the /api/ws dispatch tables. Do not edit. -->
+
+**Method families served by the gateway (one name per pattern)** (1): `plugin.{plugin_id}.{name}`
+
+**Served for a call about a session the client holds; an account-wide call uses the older handler** (4): `connection.respond`, `connectors.connect`, `connectors.operation.status`, `connectors.operation.wake`
+
+**Refused (`-32601`)** (16): `agents.list`, `session.activate`, `session.archive`, `session.branch`, `session.branch_stored`, `session.branch_whole`, `session.close`, `session.compress`, `session.cwd.set`, `session.delete`, `session.set_hidden`, `session.status`, `session.title`, `session.undo`, `session.usage`, `session.workspace.move`
+
+**Served by the gateway** (110): `a2a.forward`, `approval.pending`, `approval.received`, `approval.respond`, `bot_relay.cancel`, `bot_relay.deliver`, `bot_relay.outbox.drain`, `bot_relay.reply`, `bot_relay.roster.sync`, `bot_relay.settle`, `clarify.lock`, `clarify.respond`, `command.dispatch`, `command.observe`, `commands.catalog`, `complete.path`, `complete.slash`, `config.get`, `config.set`, `cron.cancel`, `cron.recover`, `cron.status`, `cron.submit`, `delegation.pause`, `file.attach`, `groups.approve`, `groups.attachment.download`, `groups.attachment.upload`, `groups.capabilities`, `groups.context`, `groups.continue`, `groups.create`, `groups.disband`, `groups.discard`, `groups.list`, `groups.log`, `groups.peer.invite`, `groups.peer.register`, `groups.peer.revoke`, `groups.rename`, `groups.retry`, `groups.send`, `groups.state`, `groups.stop`, `handoff.fail`, `handoff.request`, `handoff.state`, `image.attach_bytes`, `kanban.run`, `llm.oneshot`, `message.react`, `model.options`, `onboarding.skip`, `onboarding.start`, `ping`, `plugins.list`, `preview.restart`, `process.kill`, `process.list`, `process.stop`, `profiles.list`, `prompt.background`, `prompt.btw`, `prompt.cancel`, `prompt.receipt`, `prompt.replace_queued`, `prompt.resolve_unknown`, `prompt.steer_queued`, `prompt.submit`, `reload.env`, `reload.mcp`, `rollback.diff`, `rollback.list`, `rollback.restore`, `rollback.session_diff`, `runtime.describe`, `session.active_list`, `session.automation`, `session.context_breakdown`, `session.control`, `session.control.read`, `session.create`, `session.detach`, `session.events.since`, `session.export`, `session.history`, `session.info`, `session.interrupt`, `session.list`, `session.mutate`, `session.prune`, `session.redirect`, `session.resume`, `session.save`, `session.stats`, `session.steer`, `session.transcript`, `setup.runtime_check`, `setup.status`, `shell.exec`, `skills.reload`, `slash.exec`, `subagent.interrupt`, `subagent.list`, `subagent.steer`, `subagent.tail`, `tools.show`, `worker.adopt`, `worker.persist`, `worker.register`
+
+**Answered by an older handler** (160): `billing.auto_reload`, `billing.charge`, `billing.charge_status`, `billing.keep_going_on_credits`, `billing.state`, `billing.step_up`, `browser.manage`, `cli.exec`, `client.capabilities`, `clipboard.paste`, `command.resolve`, `config.show`, `connectors.accounts`, `connectors.accounts.remove`, `connectors.accounts.rename`, `connectors.catalog`, `connectors.list`, `connectors.policy.get`, `connectors.policy.set`, `connectors.tools`, `cron.manage`, `delegation.status`, `diagnostics.share_nous`, `display.install`, `display.lease.acquire`, `display.lease.release`, `display.observe`, `display.start`, `display.status`, `display.stop`, `display.switchSandboxImage`, `display.thumbnail`, `free_tier.ack_notice`, `free_tier.challenge_result`, `free_tier.claim_nudge`, `free_tier.provision`, `free_tier.status`, `gateway.capabilities`, `groups.demote`, `groups.promote`, `groups.replica_state`, `groups.replicate`, `i18n.catalog`, `i18n.languages`, `image.attach`, `image.detach`, `image.generate`, `image.render`, `input.detect_drop`, `insights.get`, `learning.delete`, `learning.detail`, `learning.edit`, `learning.frames`, `machine.facts`, `mcp.catalog`, `mcp.servers.add`, `mcp.servers.list`, `mcp.servers.oauth.callback`, `mcp.servers.oauth.cancel`, `mcp.servers.oauth.poll`, `mcp.servers.oauth.start`, `mcp.servers.remove`, `mcp.servers.set_api_key`, `mcp.servers.status`, `mcp.servers.test`, `model.disconnect`, `model.save_key`, `onboarding.set_run`, `onboarding.state`, `paste.collapse`, `pdf.attach`, `pet.cancel`, `pet.cells`, `pet.disable`, `pet.export`, `pet.gallery`, `pet.generate`, `pet.generate.status`, `pet.hatch`, `pet.info`, `pet.info.meta`, `pet.remove`, `pet.rename`, `pet.scale`, `pet.select`, `pet.thumb`, `plugins.catalog.lookup`, `plugins.manage`, `profiles.configure`, `profiles.create`, `profiles.describe`, `profiles.get_asset`, `profiles.set_asset`, `project.facts`, `projects.add_folder`, `projects.archive`, `projects.create`, `projects.delete`, `projects.discover_repos`, `projects.for_cwd`, `projects.get`, `projects.list`, `projects.project_sessions`, `projects.record_repos`, `projects.remove_folder`, `projects.set_active`, `projects.set_primary`, `projects.tree`, `projects.update`, `request.answer`, `session.events.stats`, `session.foreign.import`, `session.foreign.list`, `session.foreign.preview`, `session.most_recent`, `shared_metrics.desktop_daily`, `shared_metrics.desktop_dislike`, `shared_metrics.desktop_feature_use`, `shared_metrics.desktop_friction`, `shared_metrics.desktop_onboarding`, `shared_metrics.set`, `shared_metrics.slash_command`, `shared_metrics.startup_latency`, `shared_metrics.status`, `shared_metrics.update_run`, `skills.manage`, `spawn_tree.list`, `spawn_tree.load`, `spawn_tree.save`, `subagent.roster`, `subscription.change`, `subscription.preview`, `subscription.resume`, `subscription.state`, `subscription.upgrade`, `system.battery`, `terminal.resize`, `tools.configure`, `tools.list`, `toolsets.list`, `usage.bars`, `vault.add`, `vault.list`, `vault.lock`, `vault.preview.fill`, `vault.remove`, `vault.source.set`, `vault.sources`, `vault.unlock`, `verification.status`, `voice.record`, `voice.toggle`, `voice.tts`, `wake.feed`, `wake.pause`, `wake.resume`, `wake.start`, `wake.status`, `wake.stop`
+
+<!-- gateway-methods:end -->
 
 Plugins add `plugin.<plugin_id>.<name>` methods (`ctx.register_rpc`) and session events of type `plugin.<plugin_id>.<event>` (`ctx.emit_to_session`); an owner serving them lists `plugin-rpc-v1` in `runtime.describe`'s `capabilities`. See [plugin RPC methods and session events](./plugins/index.md#talk-to-your-own-frontend-plugin-rpc-methods-and-session-events).
 
-`session.active_list`, `session.activate`, and `session.close` are the process-local live-session controls used by the TUI session switcher. Use `session.list` / `/resume` for saved transcript discovery; use the active-session methods only for sessions that are currently open in the TUI gateway process.
+`session.active_list`, `session.activate`, and `session.close` are the live-session controls of a standalone `tui_gateway` process (stdio or its own WebSocket). On the shared gateway, `session.activate` and `session.close` are refused: use `session.resume` and `session.detach`. Use `session.list` for saved conversations.
 
 On the shared gateway's `hermes-gateway-v1` socket, a session picker reads stored conversations without attaching: `session.list` takes a `workspace` folder filter and, with `picker: true`, returns each row's `preview`, `last_reply`, `cwd`, `git_branch`, `workspace`, `last_active_at` and `pinned`; with `scope: "stored"` it also takes a `query` (title or id text) and pages with `cursor` / `next_cursor` (capability `session-list-cursor-v1`); `session.transcript({session_id, subagent_id?, cursor?, limit?, order?})` pages a conversation's display rows across its compression lineage from the oldest or the newest, each compaction handoff a `row_kind: "compaction"` row at its position (`{rows, next_cursor, reset}`, opaque cursor, at most 2 MiB a page); an oldest-order cursor also polls for rows written since (`reset: true` when the rows it covered changed shape), and `subagent_id` reads a delegated child of the session. None of them subscribes the caller or starts an agent. Details: [Gateway local sessions](./gateway-local-sessions.md).
 
@@ -81030,6 +81303,8 @@ model:
 
 With `AZURE_ANTHROPIC_KEY` set in `~/.hermes/.env`. Hermes detects `azure.com` in the base URL and short-circuits around the Claude Code OAuth token chain so the Azure key is used directly with `x-api-key` auth.
 
+Hermes never sends the Claude Code OAuth token to an `azure.com` host, from the runtime resolver (under `anthropic`, `claude` or `claude-code`, with `model.base_url`, `--base-url` or `delegation.base_url`) or model discovery: with no Azure key the resolver stops with `No Azure Anthropic API key found`. Keys added with `hermes auth add anthropic` are recorded for `api.anthropic.com` and do not serve a Foundry URL; use `model.api_key`, `key_env` or `AZURE_ANTHROPIC_KEY`. Detection is by the `azure.com` host suffix only: sovereign-cloud hosts (`*.azure.us`, `*.azure.cn`) and proxies in front of Foundry are not recognised.
+
 `key_env` is the canonical snake_case field name; `api_key_env` (and the camelCase `keyEnv` / `apiKeyEnv`) are accepted as aliases. If both `key_env` and `AZURE_ANTHROPIC_KEY`/`ANTHROPIC_API_KEY` are set, the `key_env`-named env var wins.
 
 ## Model discovery
@@ -87069,7 +87344,7 @@ canonical Bot Chat transcript, and a stable `--idempotency-key` makes a retry
 return the original run instead of starting duplicate work. Use `peer stop`
 with that exact run ID to interrupt it without targeting another turn.
 
-Once a peer is registered, the messaging protocol taught to every Bot Chat (`agent.bot_mode_protocol`) automatically includes the peer roster, and `message_agent` accepts peer targets directly — `message_agent(target="spark/researcher", …)`, or `target="spark"` for the peer's main agent — so **your bots learn on their own** that teammates exist on other machines and how to reach them. Registering or removing a peer refreshes each Bot Chat's protocol on its next message (capability epoch).
+Once a peer is registered, the messaging protocol taught to every Bot Chat (`agent.bot_mode_protocol`) automatically includes the peer roster, and `message_agent` accepts peer targets directly — `message_agent(target="spark/researcher", …)`, or `target="spark"` for the peer's main agent (if that bare name is also a local bot's folder id or friendly name, it is refused as ambiguous: use `spark/<agent>` for the peer, or a name only the local bot answers to) — so **your bots learn on their own** that teammates exist on other machines and how to reach them. Registering or removing a peer refreshes each Bot Chat's protocol on its next message (capability epoch).
 
 Requirements: the peer machine runs the `api_server` gateway platform with a strong `API_SERVER_KEY`; reachability is your network's business (LAN, Tailscale, VPN). The key is a credential and lives in `~/.hermes/.env` as `HERMES_PEER_<NAME>_KEY`; peer names/URLs live in `config.yaml` under `bot_peers`.
 
@@ -104673,7 +104948,11 @@ POST http://host:8644/webhooks/<route>
 POST http://host:8644/p/coder/webhooks/<route>
 ```
 
-An unknown or unconfigured profile in the prefix returns `404`. The shared
+An unknown or unconfigured profile in the prefix returns `404`. On the
+`api_server` listener the body is
+`{"error": "Unknown or unconfigured profile", "code": "profile_unknown"}`;
+clients should key on `code` (gateways before it send the `error` sentence
+alone). The shared
 listener is the default profile's `api_server` port (or its `webhook` port when
 no API server is enabled); it serves three kinds of profile-prefixed paths:
 
@@ -107758,7 +108037,7 @@ hermes gateway install
 
 What happens under the hood:
 
-1. `schtasks /Create /SC ONLOGON /RL LIMITED /TN Hermes_Gateway` — registers a task that runs at your login with standard (non-elevated) permissions. No UAC prompt.
+1. `schtasks /Create /TN Hermes_Gateway /XML <file>` — registers a logon-triggered task whose XML principal (`InteractiveToken`, `LeastPrivilege`) runs it at your login with standard (non-elevated) permissions. Registering it asks for UAC once; the task itself never runs elevated.
 2. If schtasks is blocked by group policy, falls back to writing a small `Hermes_Gateway.vbs` launcher (run hidden via `wscript.exe`) into `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup`. Same effect, slightly cruder. A VBScript is used rather than a `cmd.exe` shortcut because a console allocated at logon can receive a close event that kills the gateway before it finishes starting.
    Only one of the two is ever kept: a successful task install removes any Startup-folder entry (including a legacy `Hermes_Gateway.cmd`), the fallback is skipped while a task is still registered, and `hermes update` / `hermes doctor --fix` clean up older installs that have both, since both would launch the gateway at logon.
 3. Spawns the gateway **detached via `pythonw.exe`** — not `python.exe`. `pythonw.exe` has no console attached, which immunizes it against `CTRL_C_EVENT` broadcasts from sibling processes (a real issue that used to kill the gateway when you Ctrl+C'd anything in the same process group).

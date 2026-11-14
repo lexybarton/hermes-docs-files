@@ -235,6 +235,7 @@ Repo: https://github.com/NousResearch/hermes-agent
 - [Gateway local sessions](./developer-guide/gateway-local-sessions.md): Local CLI/TUI sessions as canonical gateway admissions
 - [Gateway Monitoring](./developer-guide/gateway-monitoring.md): Health export, structured diagnostics, fleet queries and how to extend the monitoring plane
 - [Gateway Session Lifecycle](./developer-guide/gateway-session-lifecycle.md): SessionSource, SessionEntry, SessionStore, session-key rules and multi-user isolation in the gateway
+- [Gateway over SSH: client contract](./developer-guide/gateway-ssh-clients.md): How an SSH-tunnel client (Desktop or mobile SSH mode) reaches the gateway with hermes gateway attach and hermes gateway tickets
 - [Hosted rooms across local profile owners](./developer-guide/hosted-profile-owners.md)
 - [Image Generation Provider Plugins](./developer-guide/image-gen-provider-plugin.md): How to build an image-generation backend plugin for Hermes Agent
 - [macOS bundle updates](./developer-guide/macos-bundle-updates.md)
