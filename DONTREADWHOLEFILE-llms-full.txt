@@ -12021,10 +12021,10 @@ checkpoints:
   max_file_size_mb: 10        # skip any single file larger than this
 
   # Auto-maintenance (on by default): sweep ~/.hermes/checkpoints/ in the
-  # background — the CLI on a helper thread right after launch, the gateway
-  # on its housekeeping tick — and delete project entries whose last_touch is
+  # background on the gateway's housekeeping tick (the CLI never runs it)
+  # and delete project entries whose last_touch is
   # older than retention_days. Runs at most once per min_interval_hours,
-  # tracked via a .last_prune marker. It never blocks the prompt or gateway
+  # tracked via a .last_prune marker. It never blocks gateway
   # startup: the `git gc` that reclaims space can take tens of seconds on a
   # large store. This sweep never deletes "orphan" entries (working directory
   # not found) — a missing workdir is ambiguous (deleted project vs. an
@@ -51205,7 +51205,7 @@ When you call `ctx.register_platform()`, the following integration points are ha
 | YAML config bridge | `apply_yaml_config_fn` translates `config.yaml` keys into env vars / extras |
 | Cron delivery | `cron_deliver_env_var` makes `deliver=<name>` work |
 | `hermes config` UI entries | `requires_env` / `optional_env` in `plugin.yaml` auto-populate |
-| send engine (`tools/send_message_tool.py`) | Routes through live gateway adapter |
+| send engine (`gateway/outbound/send.py`) | Routes through live gateway adapter |
 | Webhook cross-platform delivery | Registry checked for known platforms |
 | `/update` command access | `allow_update_command` flag |
 | Channel directory | Plugin platforms included in enumeration |
@@ -51848,7 +51848,7 @@ Six touchpoints:
 
 ### 7. Tools
 
-1. **`tools/send_message_tool.py`** — Add `"newplat": Platform.NEWPLAT` to platform map
+1. **`gateway/outbound/send.py`** — Add `"newplat": Platform.NEWPLAT` to platform map
 2. **`tools/cronjob_tools.py`** — Add `newplat` to the delivery target description string
 
 ### 8. Toolsets
@@ -52359,8 +52359,6 @@ hermes skills install owner/morning-brief
 ```
 
 Blueprints are one **source** of the unified Suggested Cron Jobs surface — the same place curated starter automations and (later) usage-pattern and integration suggestions appear. See [Suggested Cron Jobs](#suggested-cron-jobs) below.
-
-**Sharing an automation you built.** A blueprint loaded by a cron job (`hermes cron create --skill <name> ...`) can be exported back to a SKILL.md and published like any other skill, so an automation you tuned for yourself becomes a one-command install for someone else.
 
 The blueprint layer adds no new object type, store, or transport — the blueprint is a skill, the schedule is a cron job, and sharing is the existing publish/tap/index path.
 
@@ -78639,9 +78637,8 @@ local backend on this host, docker/ssh and `supports_streams` plugins through
 their exec prefix). Suspending a sandbox once its processes are idle-stopped,
 and network isolation between sandboxes, are yours.
 
-**Credentials** reach a hosted sandbox as broker references
-(`sandbox_scope.CredentialRef`), never as values from the secret store. No
-broker exists yet, so Hermes passes none.
+**Credentials** never reach a hosted sandbox as values from the secret store.
+No credential broker exists yet, so Hermes passes none.
 
 **Conformance.** `tools/environments/sandbox_conformance.py` holds the
 isolation checks Hermes runs against its recording stub backend
@@ -78972,7 +78969,7 @@ Each line in the file is a self-contained JSON object. There are two variants:
 ```
 
 The `tool_stats` and `tool_error_counts` dictionaries are normalized to include
-ALL possible tools (from `model_tools.TOOL_TO_TOOLSET_MAP`) with zero defaults,
+ALL possible tools (from `model_tools.get_all_tool_names()`) with zero defaults,
 ensuring consistent schema across entries for HuggingFace dataset loading.
 
 
@@ -105054,7 +105051,7 @@ using the default listener's existing credentials.
   is enabled only on a secondary profile. A shared-bot satellite (no bot of
   its own, reached through `profile_routes`) delivers through the shared bot
   only to a chat a route maps to it, the same rule as its cron jobs and its
-  `send_message` sends and reactions; any other target, including an unrouted
+  `send_message` sends; any other target, including an unrouted
   home channel, fails (502). On every platform except Telegram, Slack, Matrix
   and Mattermost (whose thread ids are scoped to a chat), a `thread_id` target
   needs a route that names that `thread_id`; a chat-only route does not cover
@@ -105217,7 +105214,7 @@ are resolved per profile as well. Kanban, profile-scoped skills/memory/SOUL, and
 model routing all behave per-profile exactly as they do with separate gateways.
 
 Outbound identity is per profile too. A turn running for profile `P` that calls
-the `send_message` tool (send, react, media) posts through `P`'s own bot;
+the `send_message` tool (send, media) posts through `P`'s own bot;
 so do the "Gateway shutting down/restarted" and `/update` notices for `P`'s
 sessions, `/loop` wakeups set from `P`'s chats, and the Discord
 unauthorized-slash operator alert of `P`'s Discord bot (to `P`'s home
@@ -105469,7 +105466,7 @@ delivery to that user's DM without an extra route. The routed profile does not n
 own `platforms.<platform>` block for this: the shared bot's authorization comes
 from the route, not from the satellite's config.
 
-A routed profile's `send_message` sends and reactions, and plugin
+A routed profile's `send_message` sends, and plugin
 `ctx.platform_actions`, follow the same target rule, with one addition: during a
 turn, the conversation that turn came from also qualifies whenever the inbound
 route matcher would hand it to that profile. That covers guild-only routes, a
