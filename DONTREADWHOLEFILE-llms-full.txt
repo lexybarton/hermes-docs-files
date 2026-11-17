@@ -41520,7 +41520,7 @@ When triggered, Hermes:
 
 The switch is seamless — your conversation history, tool calls, and context are preserved. The agent continues from exactly where it left off, just using a different model.
 
-Every surface (CLI, TUI, Desktop, messaging platforms) shows a notice the moment the switch happens, before the fallback model starts answering, for example: `⚠️ Model fallback: qwen4-max via alibaba could not respond (rate limit: HTTP 429: quota exceeded); using grok-5 via xai.` The parenthesis carries the provider's own error, shortened and with secrets masked. A switch decided while the chat is being set up (the primary's credentials fail before your message is sent) is announced at the start of that turn. The notice is display-only: it never enters the conversation the model reads. Like every warning, it is hidden when `display.suppress_warning_notifications` is on.
+Every surface (CLI, TUI, Desktop, messaging platforms) shows a notice the moment the switch happens, before the fallback model starts answering, for example: `⚠️ Model fallback: qwen4-max via alibaba could not respond (rate limit: HTTP 429: quota exceeded); using grok-5 via xai.` The parenthesis carries the provider's own error, shortened and with secrets masked. A switch decided while the chat is being set up (the primary's credentials fail before your message is sent) is announced at the start of that turn. The notice is display-only: it never enters the conversation the model reads. Like every warning, it is hidden when `display.suppress_warning_notifications` is on. Background turns that run without a message from you (a finished background process, a plugin's scheduled check) never show it, since most of them end without a reply; the switch is still written to the log. If the fallback is still answering when you next send a message (a quota error keeps it for a cooldown), that turn shows the notice before it runs.
 
 The same re-resolution happens when the CLI falls back at **startup** because the primary provider's auth fails before the first request: the fallback model is sent its own configured effort, not the primary's. An explicit `hermes chat --reasoning <level>` is kept across that startup switch — it is your intent for the run.
 
@@ -72070,6 +72070,20 @@ def wait_before_retry(response, fallback=5.0):
     time.sleep(fallback if seconds is None else seconds)
 ```
 
+### Send the Hermes User-Agent header
+
+`hermes_cli.version_info.hermes_user_agent(product)` returns `<product>/<Hermes version>`, for
+example `Hermes-Agent/0.23.1`, for the `User-Agent` header of a request your plugin sends. Pass the
+product name the service knows your integration by; the default is `hermes-cli`. Call it where the
+request is built, not at module level: on a source checkout it reads the version from git.
+
+```python
+from hermes_cli.version_info import hermes_user_agent
+
+def request_headers(api_key):
+    return {"Authorization": f"Bearer {api_key}", "User-Agent": hermes_user_agent("Hermes-Agent")}
+```
+
 ### Ship a language pack
 
 A plugin can add a UI language or override the wording of an existing one for every surface at once —
@@ -74207,6 +74221,7 @@ with a name allows that one name only.
 | `hermes_yaml` | `safe_dump` | plugins/index.md § Check file paths and read YAML with Hermes's own helpers |
 | `hermes_cli.urllib_security` | `open_credentialed_url` | plugins/index.md § Send a credentialed HTTP request without leaking it on redirect |
 | `agent.retry_utils` | `parse_retry_after_seconds` | plugins/index.md § Read a Retry-After header the way Hermes does |
+| `hermes_cli.version_info` | `hermes_user_agent` | plugins/index.md § Send the Hermes User-Agent header |
 | `hermes_cli.chat_launch` | `hermes_command` | user-guide/features/plugins.md § A plugin with its own chat client |
 | `hermes_cli.chat_launch` | `print_exit_summary` | user-guide/features/plugins.md § A plugin with its own chat client |
 | `hermes_cli.gateway_chat` | `shell_client_env` | user-guide/features/plugins.md § A plugin with its own chat client |
@@ -79367,6 +79382,8 @@ The tool exposes one schema across every backend. Providers ignore parameters th
 There is deliberately no `model` parameter: the backend and model are user configuration (`video_gen.provider` / `video_gen.model`), never an agent choice. Your `generate()` still receives `model=` — it is the configured model, resolved by the tool layer.
 
 The provider's `capabilities()` advertises which of these are honored. The agent sees the active backend's capabilities in the tool description, dynamically rebuilt when the user changes backend via `hermes tools`.
+
+Local image paths never reach your `generate()`: the tool layer reads them through Hermes' guarded resolver and passes `data:image/...;base64,...` URLs (HTTPS URLs and existing `data:` URLs arrive unchanged). If your API caps the request body, return `"max_inline_image_chars": N` from `capabilities()` and the tool layer downscales inlined images until they fit N characters in total; without it, images are sent at full size.
 
 ## Model families and endpoint routing (the FAL pattern)
 
