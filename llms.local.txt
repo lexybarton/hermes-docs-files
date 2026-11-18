@@ -161,6 +161,7 @@ Repo: https://github.com/NousResearch/hermes-agent
 - [Fallback Providers](./user-guide/features/fallback-providers.md): Configure automatic failover to backup LLM providers when your primary model is unavailable.
 - [Credential Pools](./user-guide/features/credential-pools.md): Pool multiple API keys or OAuth tokens per provider for automatic rotation and rate limit recovery.
 - [Buzz Integration](./integrations/buzz.md): All three ways to connect Hermes Agent to Buzz — Block's Nostr-based human+agent workspace
+- [NeMo Relay](./integrations/nemo-relay.md): Record Hermes model and tool calls, export traces, and configure NeMo Relay plugins
 - [Nous Portal](./integrations/nous-portal.md): One subscription, 300+ frontier models, and the Tool Gateway — the recommended way to run Hermes Agent
 
 ## Guides & Tutorials
