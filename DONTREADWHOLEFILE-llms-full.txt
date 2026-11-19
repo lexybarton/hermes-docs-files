@@ -46723,7 +46723,7 @@ Projects built on (or reviewed by) Hermes can keep reviewer checklists inside th
 ```
 .agents/
   checks/
-    security.md        # e.g. "grep the diff for shell interpolation; check subprocess calls quote args"
+    security.md        # e.g. "search the diff for shell interpolation; check subprocess calls quote args"
     migrations.md      # e.g. "every schema change ships a backfill and a rollback note"
     public-api.md      # e.g. "exported signatures changed? flag for semver review"
 ```
@@ -66910,8 +66910,7 @@ export MY_BACKEND_API_KEY=your-test-key
 hermes plugins enable my-backend
 
 # Pick it as the active provider
-echo "image_gen:" >> $HERMES_HOME/config.yaml
-echo "  provider: my-backend" >> $HERMES_HOME/config.yaml
+hermes config set image_gen.provider my-backend
 
 # Exercise it
 hermes -z "Generate an image of a corgi in a spacesuit"
@@ -69063,12 +69062,15 @@ for p in list_providers():
 
 ## Testing your plugin
 
-Point `HERMES_HOME` at a temp directory so you don't pollute your real config:
+Point `HERMES_HOME` at a temp directory so you don't pollute your real config, then
+write `$HERMES_HOME/plugins/model-providers/my-provider/__init__.py` (an agent uses
+`write_file`, which creates the directory):
 
 ```bash
 export HERMES_HOME=$HOME/.hermes/cache/scratch/hermes-plugin-test
-mkdir -p $HERMES_HOME/plugins/model-providers/my-provider
-cat > $HERMES_HOME/plugins/model-providers/my-provider/__init__.py <<'EOF'
+```
+
+```python
 from providers import register_provider
 from providers.base import ProviderProfile
 register_provider(ProviderProfile(
@@ -69077,8 +69079,9 @@ register_provider(ProviderProfile(
     base_url="https://api.my-provider.example.com/v1",
     auth_type="api_key",
 ))
-EOF
+```
 
+```bash
 export MY_API_KEY=your-test-key
 hermes -z "hello" --provider my-provider -m some-model
 ```
@@ -71222,6 +71225,18 @@ with open_persistence_reader(profile_scope().profile_dir) as store:
 ```
 
 [Session Storage](../session-storage.md#common-operations) shows the repositories in use.
+
+#### Turn helpers kept for pinned catalog plugins
+
+The same refactor moved a few turn helpers into `session_rules.turns`. The catalog's pinned OpenViking (2.1.2) and Honcho (1.2.0) memory plugins import them from their old place at load time, and a catalog repin does not change an installed plugin's source, so these exact names stay importable as an exception to the rule above:
+
+| Old import | Defined now in |
+|---|---|
+| `agent.message_content.flatten_message_text`, `_text_from_part` | `session_rules.turns` |
+| `agent.skill_commands.extract_user_instruction_from_skill_message` | `session_rules.turns` |
+| `hermes_state_common.TITLE_SOURCE_DERIVED`, `TITLE_SOURCE_LLM` | the values stored in `sessions.title_source` |
+
+They follow the `hermes_state` window: supported through v0.26 and removed no earlier than v0.27.0. No other moved name is carried. A plugin should import from `session_rules.turns` now.
 
 ## What you're building
 
