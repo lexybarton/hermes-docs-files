@@ -16770,6 +16770,8 @@ hermes plugins enable my-plugin              # add to allow-list
 hermes plugins disable my-plugin             # remove from allow-list + add to disabled (bundled platforms:
                                              # either spelling works, e.g. photon-platform or platforms/photon)
 hermes plugins capabilities [my-plugin]      # declared vs granted capabilities
+hermes plugins config my-plugin              # view and edit the plugin's settings (interactive editor);
+                                             # a terminal install also lists them and asks "Edit these now?"
 hermes plugins idle-tasks [my-plugin]        # background idle jobs plugins registered: last run, next run
 hermes plugins idle-tasks my-plugin --pause suggest   # stop one until --resume
 hermes plugins check-updates                 # read-only: is any installed plugin outdated?
@@ -54479,6 +54481,7 @@ Unified plugin management — general plugins, memory providers, and context eng
 | `remove <name>` (aliases: `rm`, `uninstall`) | Remove an installed plugin. |
 | `enable <name>` | Enable a disabled plugin. |
 | `disable <name>` | Disable a plugin without removing it. |
+| `config <name>` (aliases: `configure`, `settings`) | Interactive editor for the settings a plugin declares: every `config_schema` key (saved to `plugins.entries.<id>.settings`, checked against the schema) and every `requires_env` variable (saved to the profile's `.env`). Secret values are typed masked and never displayed or written to `config.yaml`. Without a terminal it prints each setting, its current value and where it is stored. `install` run from a terminal ends by listing the new plugin's settings and asking `Edit these now?` (default No; default Yes, with the missing ones named, when a `required` setting is still empty); scripts and `HERMES_NONINTERACTIVE` get a one-line pointer instead. |
 | `list` (alias: `ls`) | List installed plugins with enabled/disabled status. |
 | `idle-tasks [name] [--pause TASK \| --resume TASK]` | List the idle tasks plugins registered with `ctx.register_idle_task` in this profile (status, run count, last and next run, last summary or error), or pause/resume one task of the named plugin. |
 | `doctor [path-or-id] [--ci]` | Validate a native plugin through the real manifest parser, loader, and registration path. `--ci` exits 1 on errors. |
@@ -64454,7 +64457,7 @@ pipeline as a trust boundary.
 | React / state | `useValue`, `atom`, `computed`, `useQuery`, `useMutation`, `useQueryClient`, `queryClient`, `Contribute`, `WorkspacePageHeaderControl` |
 | Theming | `useTheme`, `requestTheme`, `setAccentOverride`, `$accentOverride`, `retintTheme`, `themeHue`, `DesktopTheme`, `DesktopThemeColors`, plus OKLCH math (`hexToOklch`, `oklchToHex`, `oklchToSrgb255`, `mixOklab`, `maxChroma`, `hueDelta`, `normalizeHex`) and sRGB measures (`contrastRatio` — `number | null`, null for unparseable input — `readableOn`) |
 | UI kit | `Button`, `Input`, `Textarea`, `Select*`, `Switch`, `Checkbox`, `SegmentedControl`, `Tabs*`, `Dialog*`, `ConfirmDialog`, `DropdownMenu*`, `ContextMenu*`, `Popover*`, `Tip`/`Tooltip*`, `Badge`, `Kbd`/`KbdGroup`, `SearchField`, `ScrollArea`, `Separator`, `Skeleton`, `GlyphSpinner`, `Loader`, `EmptyState`, `ErrorState`, `CopyButton`, `StatusDot`, `LogView`, `Codicon`, `DecodeText`, `SandboxedFrame` |
-| Helpers | `cn`, `icons`, `haptic`, `useI18n`, `profileColor`, `profileColorSoft`, `relativeTime`, `fmtDateTime`, `fmtDayTime`, `coarseElapsed`, `evaluateRuntimeReadiness`, `catalogProviderMatches` |
+| Helpers | `cn`, `icons`, `haptic`, `useI18n`, `profileColor`, `profileColorSoft`, `relativeTime`, `fmtDateTime`, `fmtDayTime`, `coarseElapsed`, `evaluateRuntimeReadiness`, `catalogProviderMatches`, `PROFILE_ID_ARG_RE` (the profile-id grammar) |
 
 The canonical, always-current export list is `apps/desktop/src/sdk/index.ts`.
 
@@ -71941,6 +71944,12 @@ Config and state have different owners: settings are user-visible behavior in
 `<HERMES_HOME>/plugin-data/`. Neither API exposes another plugin's namespace.
 
 ### Settings form in the Desktop
+
+The same declaration also gives your plugin a terminal editor: `hermes plugins config <name>`
+lists every `config_schema` key and every `requires_env` variable with its current value and
+edits them one at a time (choices and `bool` as pickers, `secret` and `secret: true` env
+entries masked). It saves through the same writers as the form below, so no CLI code is
+needed either. Give each key a `label` and `description`: they are all the user sees.
 
 Every key you declare in the manifest's `config_schema` renders as a row on the
 plugin's own page under the Desktop app's **Settings → Plugins** (the gear on the
@@ -82586,6 +82595,7 @@ The `hermes model` picker shows Gemini models maintained in Hermes' provider reg
 
 | Model | ID | Notes |
 |-------|----|-------|
+| Gemini 4 Neon | `gemini-4-neon` | Gemini 4 model with 1M context window, 64K single-request output (long decode up to 1M), and an `xhigh` thinking level. Paid tier only |
 | Gemini 4 Hydrogen | `gemini-4-hydrogen` | Fast Gemini 4 model for everyday coding and agentic work; same window and long decode as Argon, plus an `xhigh` thinking level. Free and paid tiers |
 | Gemini 4 Carbon | `gemini-4-carbon` | Strongest reasoning model; spends more thinking per turn than Argon, with the same window, long decode and price. Paid tier only |
 | Gemini 4 Argon | `gemini-4-argon` | Flagship reasoning model; shared 1M input+output window, long decode up to 1M output tokens |
@@ -82615,9 +82625,9 @@ Gemini 4 Carbon works the same way as Argon in everything below. Gemini 4 Argon 
 | `xhigh` | `high` | 262,144 tokens (long decode) |
 | `max`, `ultra` | `high` | 1,048,576 tokens minus the input (long decode) |
 
-Gemini 4 Hydrogen has a fourth level, `xhigh`: on Hydrogen, Hermes sends `xhigh` for the
-`xhigh`, `max` and `ultra` efforts, with the same output budgets as above. Google's own default
-level for Hydrogen is `high`.
+Gemini 4 Hydrogen and Gemini 4 Neon have a fourth level, `xhigh`: on Hydrogen and Neon, Hermes sends
+`xhigh` for the `xhigh`, `max` and `ultra` efforts, with the same output budgets as above. Google's
+own default level for Hydrogen and Neon is `high`.
 
 Without long decode a single request stops at 65,536 output tokens when streaming
 (32,768 non-streaming), thinking included. With `xhigh` or `max`, Hermes raises
@@ -82861,6 +82871,10 @@ Vertex requires the `google/` vendor prefix on model IDs. The `hermes model` pic
 | Model | ID |
 |-------|----|
 | Gemini 3.8 Flash | `google/gemini-3.8-flash` |
+| Gemini 4 Neon | `google/gemini-4-neon` |
+| Gemini 4 Hydrogen | `google/gemini-4-hydrogen` |
+| Gemini 4 Carbon | `google/gemini-4-carbon` |
+| Gemini 4 Argon | `google/gemini-4-argon` |
 | Gemini 3.7 Flash | `google/gemini-3.7-flash` |
 | Gemini 3.1 Pro Preview | `google/gemini-3.1-pro-preview` |
 | Gemini 3 Pro Preview | `google/gemini-3-pro-preview` |
@@ -82870,7 +82884,7 @@ Vertex requires the `google/` vendor prefix on model IDs. The `hermes model` pic
 | Gemini 2.5 Flash | `google/gemini-2.5-flash` |
 
 :::note `global` region for Gemini 3.x
-The Gemini 3.x preview models are served through the `global` endpoint. Regional endpoints (`us-central1`, etc.) may 404 them. Leave `region: global` unless you have a specific reason to pin a region.
+The Gemini 3.x preview models and the Gemini 4 models are served through the `global` endpoint. Regional endpoints (`us-central1`, etc.) may 404 them. Leave `region: global` unless you have a specific reason to pin a region.
 :::
 
 ## Switching Models Mid-Session
@@ -82884,7 +82898,7 @@ The Gemini 3.x preview models are served through the `global` endpoint. Regional
 
 ## Reasoning / Thinking
 
-Vertex exposes Gemini's thinking budget through the OpenAI-compatible surface. Hermes maps its reasoning-effort setting onto `extra_body.google.thinking_config` automatically, so `reasoning_effort` works the same way it does on other Gemini surfaces.
+Vertex exposes Gemini's thinking budget through the OpenAI-compatible surface. Hermes maps its reasoning-effort setting onto `extra_body.google.thinking_config` automatically, so `reasoning_effort` works the same way it does on other Gemini surfaces. On Gemini 4 Hydrogen and Neon, the `xhigh`, `max` and `ultra` efforts send the `xhigh` thinking level; Gemini 4 Argon and Carbon stop at `high`. Long decode (output past 64K) is not available on this surface.
 
 ## Diagnostics
 
