@@ -4739,6 +4739,17 @@ skills:
 
 Resolved once per session when the system prompt is first built (so the prompt stays cache-stable; edits apply to the next session). Missing or disabled skills warn and are skipped; `--ignore-rules` / `HERMES_IGNORE_RULES=1` suppresses the list. Profile-scoped. See [CLI — persistent auto-load](./cli.md#persistent-auto-load-via-config).
 
+### Skill index description width
+
+The system prompt lists every skill as `name: description`, and that description is the main signal the model uses to pick a skill. Each row shows the first 60 characters by default. Raise it when your skills put their trigger phrases past character 60:
+
+```yaml
+skills:
+  index_desc_limit: 200   # default: 60; accepted range 60–1024
+```
+
+Longer rows cost prompt tokens on every session (about one token per four extra characters, per skill whose description is longer than 60). `skill_manage`, `/learn` and the curator use the same width, so the agent may write descriptions up to it. Bundled skills still follow the 60-character authoring standard. Applies to new sessions; profile-scoped.
+
 ### Guard on agent-created skill writes
 
 When the agent uses `skill_manage` to create, edit, patch, or delete a skill, Hermes can optionally scan the new/updated content for dangerous keyword patterns (credential harvesting, obvious prompt injection, exfil instructions). The scanner is **off by default** — real agent workflows that legitimately touch `~/.ssh/` or mention `$OPENAI_API_KEY` were tripping the heuristic too often. Turn it back on if you want the scanner to prompt you before the agent's skill writes land:
@@ -11560,6 +11571,8 @@ terminal:
     - ANOTHER_TOKEN
 ```
 
+The [managed scope](./managed-scope.md) can set the same list (an administrator's, or a sandbox launcher's for the variables its children need); a managed list replaces the profile's, and provider credentials are refused from either.
+
 Both lists apply to `terminal`, `execute_code` and `no_agent` cron scripts alike. A declared variable is forwarded with the value of the profile the child runs for: when one process serves several profiles (multi-profile gateway, Desktop/dashboard backend) each profile's declared value comes from its own `.env` / secret sources, never from the process environment the launch profile populated, and the launch profile's `.env` credentials are dropped from a served profile's children.
 
 ### Credential File Passthrough (OAuth tokens, etc.) {#credential-file-passthrough}
@@ -11590,6 +11603,8 @@ terminal:
 ```
 
 Paths are relative to `~/.hermes/`. Files are mounted to `/root/.hermes/` inside the container. This list is read by `tools/credential_files.py` (`terminal.credential_files`) — it lives under the `terminal:` block but is loaded by the credential-files module, not the core terminal backend, so it isn't part of the bundled `DEFAULT_CONFIG` snapshot.
+
+The [managed scope](./managed-scope.md) can set this list too. From either source, Hermes's own credential stores (`.env`, `auth.json`, `mcp-tokens/` and the other files the agent is denied from reading) are never mounted: an entry that names one is skipped with a warning, as it is when a skill asks for it. The Google Workspace token files above are the exception a skill has as well.
 
 ### Borrowed CLI logins (Codex CLI, Claude Code) {#borrowed-cli-logins}
 
@@ -11705,6 +11720,8 @@ When on, web tools, the browser, vision URL fetches, gateway media downloads, cr
 
 The host-substring guard (which blocks lookalike Unicode domain tricks even when the underlying IP is public) stays on regardless of this setting.
 
+The [managed scope](./managed-scope.md) can pin this key (or the legacy `browser.allow_private_urls`). A pinned value decides this guard in either direction: `HERMES_ALLOW_PRIVATE_URLS` and the profile's own keys are read only when the managed scope pins neither. Cloud and CDP browsers also read `browser.allow_private_urls` as their own switch, so pin that key as well to hold them.
+
 #### What `allow_private_urls` covers, and what it doesn't
 
 The setting guards the fetches Hermes makes or hands to a remote browser; it does
@@ -11747,6 +11764,8 @@ security:
   fake_ip_ranges:
     - 198.18.0.0/15
 ```
+
+The [managed scope](./managed-scope.md) can declare the block too, for example a sandbox launcher whose proxy answers DNS this way; the rules below apply to a managed entry the same way.
 
 Empty by default, and narrower than `allow_private_urls`: only the declared blocks get the
 exemption, they should be ranges the local proxy owns (the dial still goes to the proxy, which
@@ -39364,11 +39383,17 @@ By default, MCP tools run sequentially — one at a time. If your MCP server exp
 ```yaml
 mcp_servers:
   docs:
-    command: "docs-server"
+    url: "https://mcp.example.com/mcp"
     supports_parallel_tool_calls: true
+    sampling:
+      enabled: false
+    elicitation:
+      enabled: false
 ```
 
-When `supports_parallel_tool_calls` is `true`, Hermes may execute multiple tools from that server at the same time within a single tool-call batch, just like it does for built-in read-only tools (web_search, read_file, etc.).
+When `supports_parallel_tool_calls` is `true`, Hermes admits tools from that server to parallel tool-call batches. Calls to the **same server** overlap on Streamable HTTP only when both sampling and elicitation are disabled. These callbacks carry server-wide state, so enabling either retains serialized RPCs. Both are enabled by default.
+
+Stdio, explicit legacy SSE (`transport: sse`), and automatic SSE fallback retain serialized RPCs even with the opt-in. Discovery, resource and prompt utilities keep their existing locking. The opt-in belongs to the calling profile, including when profiles share a connection. With the setting absent or `false`, calls remain serial. Tool approval and replay-safety rules are unchanged.
 
 :::caution
 Only enable parallel calls for MCP servers whose tools are safe to run at the same time. If tools read and write shared state, files, databases, or external resources, review the read/write race conditions before enabling this setting.
@@ -74855,7 +74880,7 @@ Build on the methods the gateway serves. The methods answered by an older handle
 
 **Served by the gateway** (112): `a2a.forward`, `approval.pending`, `approval.received`, `approval.respond`, `bot_delivery.list`, `bot_relay.cancel`, `bot_relay.deliver`, `bot_relay.outbox.drain`, `bot_relay.reply`, `bot_relay.roster.sync`, `bot_relay.settle`, `clarify.lock`, `clarify.respond`, `command.dispatch`, `command.observe`, `commands.catalog`, `complete.path`, `complete.slash`, `config.get`, `config.set`, `cron.cancel`, `cron.recover`, `cron.status`, `cron.submit`, `delegation.pause`, `file.attach`, `groups.approve`, `groups.attachment.download`, `groups.attachment.upload`, `groups.capabilities`, `groups.context`, `groups.continue`, `groups.create`, `groups.disband`, `groups.discard`, `groups.list`, `groups.log`, `groups.peer.invite`, `groups.peer.register`, `groups.peer.revoke`, `groups.rename`, `groups.retry`, `groups.send`, `groups.state`, `groups.stop`, `handoff.fail`, `handoff.request`, `handoff.state`, `image.attach_bytes`, `kanban.run`, `llm.oneshot`, `message.react`, `model.options`, `onboarding.skip`, `onboarding.start`, `ping`, `plugins.list`, `preview.restart`, `process.kill`, `process.list`, `process.stop`, `profiles.list`, `prompt.background`, `prompt.btw`, `prompt.cancel`, `prompt.receipt`, `prompt.replace_queued`, `prompt.resolve_unknown`, `prompt.steer_queued`, `prompt.submit`, `reload.env`, `reload.mcp`, `rollback.diff`, `rollback.list`, `rollback.restore`, `rollback.session_diff`, `runtime.describe`, `session.account_usage`, `session.active_list`, `session.automation`, `session.context_breakdown`, `session.control`, `session.control.read`, `session.create`, `session.detach`, `session.events.since`, `session.export`, `session.history`, `session.info`, `session.interrupt`, `session.list`, `session.mutate`, `session.prune`, `session.redirect`, `session.resume`, `session.save`, `session.stats`, `session.steer`, `session.transcript`, `setup.runtime_check`, `setup.status`, `shell.exec`, `skills.reload`, `slash.exec`, `subagent.interrupt`, `subagent.list`, `subagent.steer`, `subagent.tail`, `tools.show`, `worker.adopt`, `worker.persist`, `worker.register`
 
-**Answered by an older handler** (160): `billing.auto_reload`, `billing.charge`, `billing.charge_status`, `billing.keep_going_on_credits`, `billing.state`, `billing.step_up`, `browser.manage`, `cli.exec`, `client.capabilities`, `clipboard.paste`, `command.resolve`, `config.show`, `connectors.accounts`, `connectors.accounts.remove`, `connectors.accounts.rename`, `connectors.catalog`, `connectors.list`, `connectors.policy.get`, `connectors.policy.set`, `connectors.tools`, `cron.manage`, `delegation.status`, `diagnostics.share_nous`, `display.install`, `display.lease.acquire`, `display.lease.release`, `display.observe`, `display.start`, `display.status`, `display.stop`, `display.switchSandboxImage`, `display.thumbnail`, `free_tier.ack_notice`, `free_tier.challenge_result`, `free_tier.claim_nudge`, `free_tier.provision`, `free_tier.status`, `gateway.capabilities`, `groups.demote`, `groups.promote`, `groups.replica_state`, `groups.replicate`, `i18n.catalog`, `i18n.languages`, `image.attach`, `image.detach`, `image.generate`, `image.render`, `input.detect_drop`, `insights.get`, `learning.delete`, `learning.detail`, `learning.edit`, `learning.frames`, `machine.facts`, `mcp.catalog`, `mcp.servers.add`, `mcp.servers.list`, `mcp.servers.oauth.callback`, `mcp.servers.oauth.cancel`, `mcp.servers.oauth.poll`, `mcp.servers.oauth.start`, `mcp.servers.remove`, `mcp.servers.set_api_key`, `mcp.servers.status`, `mcp.servers.test`, `model.disconnect`, `model.save_key`, `onboarding.set_run`, `onboarding.state`, `paste.collapse`, `pdf.attach`, `pet.cancel`, `pet.cells`, `pet.disable`, `pet.export`, `pet.gallery`, `pet.generate`, `pet.generate.status`, `pet.hatch`, `pet.info`, `pet.info.meta`, `pet.remove`, `pet.rename`, `pet.scale`, `pet.select`, `pet.thumb`, `plugins.catalog.lookup`, `plugins.manage`, `profiles.configure`, `profiles.create`, `profiles.describe`, `profiles.get_asset`, `profiles.set_asset`, `project.facts`, `projects.add_folder`, `projects.archive`, `projects.create`, `projects.delete`, `projects.discover_repos`, `projects.for_cwd`, `projects.get`, `projects.list`, `projects.project_sessions`, `projects.record_repos`, `projects.remove_folder`, `projects.set_active`, `projects.set_primary`, `projects.tree`, `projects.update`, `request.answer`, `session.events.stats`, `session.foreign.import`, `session.foreign.list`, `session.foreign.preview`, `session.most_recent`, `shared_metrics.desktop_daily`, `shared_metrics.desktop_dislike`, `shared_metrics.desktop_feature_use`, `shared_metrics.desktop_friction`, `shared_metrics.desktop_onboarding`, `shared_metrics.set`, `shared_metrics.slash_command`, `shared_metrics.startup_latency`, `shared_metrics.status`, `shared_metrics.update_run`, `skills.manage`, `spawn_tree.list`, `spawn_tree.load`, `spawn_tree.save`, `subagent.roster`, `subscription.change`, `subscription.preview`, `subscription.resume`, `subscription.state`, `subscription.upgrade`, `system.battery`, `terminal.resize`, `tools.configure`, `tools.list`, `toolsets.list`, `usage.bars`, `vault.add`, `vault.list`, `vault.lock`, `vault.preview.fill`, `vault.remove`, `vault.source.set`, `vault.sources`, `vault.unlock`, `verification.status`, `voice.record`, `voice.toggle`, `voice.tts`, `wake.feed`, `wake.pause`, `wake.resume`, `wake.start`, `wake.status`, `wake.stop`
+**Answered by an older handler** (161): `billing.auto_reload`, `billing.charge`, `billing.charge_status`, `billing.keep_going_on_credits`, `billing.state`, `billing.step_up`, `browser.manage`, `cli.exec`, `client.capabilities`, `clipboard.paste`, `command.resolve`, `config.show`, `connectors.accounts`, `connectors.accounts.remove`, `connectors.accounts.rename`, `connectors.catalog`, `connectors.list`, `connectors.policy.get`, `connectors.policy.set`, `connectors.tools`, `cron.manage`, `delegation.status`, `diagnostics.share_nous`, `display.install`, `display.lease.acquire`, `display.lease.release`, `display.observe`, `display.start`, `display.status`, `display.stop`, `display.switchSandboxImage`, `display.thumbnail`, `free_tier.ack_notice`, `free_tier.challenge_result`, `free_tier.claim_nudge`, `free_tier.provision`, `free_tier.status`, `gateway.capabilities`, `groups.demote`, `groups.promote`, `groups.replica_state`, `groups.replicate`, `i18n.catalog`, `i18n.languages`, `image.attach`, `image.detach`, `image.generate`, `image.render`, `input.detect_drop`, `insights.get`, `learning.delete`, `learning.detail`, `learning.edit`, `learning.frames`, `machine.facts`, `mcp.catalog`, `mcp.servers.add`, `mcp.servers.list`, `mcp.servers.oauth.callback`, `mcp.servers.oauth.cancel`, `mcp.servers.oauth.poll`, `mcp.servers.oauth.start`, `mcp.servers.remove`, `mcp.servers.set_api_key`, `mcp.servers.status`, `mcp.servers.test`, `model.disconnect`, `model.save_key`, `onboarding.set_run`, `onboarding.state`, `paste.collapse`, `pdf.attach`, `pet.cancel`, `pet.cells`, `pet.disable`, `pet.export`, `pet.gallery`, `pet.generate`, `pet.generate.status`, `pet.hatch`, `pet.info`, `pet.info.meta`, `pet.remove`, `pet.rename`, `pet.scale`, `pet.select`, `pet.thumb`, `plugins.catalog.lookup`, `plugins.manage`, `profiles.configure`, `profiles.create`, `profiles.describe`, `profiles.get_asset`, `profiles.set_asset`, `project.facts`, `projects.add_folder`, `projects.archive`, `projects.create`, `projects.delete`, `projects.discover_repos`, `projects.for_cwd`, `projects.get`, `projects.list`, `projects.project_sessions`, `projects.record_repos`, `projects.remove_folder`, `projects.set_active`, `projects.set_primary`, `projects.tree`, `projects.update`, `request.answer`, `session.events.stats`, `session.foreign.import`, `session.foreign.list`, `session.foreign.preview`, `session.most_recent`, `shared_metrics.desktop_daily`, `shared_metrics.desktop_dislike`, `shared_metrics.desktop_feature_use`, `shared_metrics.desktop_friction`, `shared_metrics.desktop_long_frames`, `shared_metrics.desktop_onboarding`, `shared_metrics.set`, `shared_metrics.slash_command`, `shared_metrics.startup_latency`, `shared_metrics.status`, `shared_metrics.update_run`, `skills.manage`, `spawn_tree.list`, `spawn_tree.load`, `spawn_tree.save`, `subagent.roster`, `subscription.change`, `subscription.preview`, `subscription.resume`, `subscription.state`, `subscription.upgrade`, `system.battery`, `terminal.resize`, `tools.configure`, `tools.list`, `toolsets.list`, `usage.bars`, `vault.add`, `vault.list`, `vault.lock`, `vault.preview.fill`, `vault.remove`, `vault.source.set`, `vault.sources`, `vault.unlock`, `verification.status`, `voice.record`, `voice.toggle`, `voice.tts`, `wake.feed`, `wake.pause`, `wake.resume`, `wake.start`, `wake.status`, `wake.stop`
 
 <!-- gateway-methods:end -->
 
@@ -76412,8 +76437,66 @@ session/bot/profile names, paths and setting values never leave.
 | `hermes.desktop.action_use` | action (the app's built-in command/keybinding ids plus a few named buttons; plugin commands and numbered slot shortcuts are `other`, collapsed in the app before anything is kept), via (`click`/`shortcut`/`palette`/`menu`), count bucket | Which buttons and commands people press, and how: aggregated in the app per profile and reported once per finished day (no per-press rows). The row lands in the period of the day it describes, not the day it was sent; each day is recorded once per profile however many windows or backend restarts report it, and a day older than 8 days is dropped. |
 | `hermes.desktop.mode_use` | mode (`sessions`/`bots`), active-minutes bucket, messages-sent bucket, bot-count bucket | How Desktop time splits between Bot Mode and regular Sessions. One row per mode used that day, in that day's period (same once-per-profile-per-day latch as `action_use`); active time sums gaps between interactions of up to 5 minutes. |
 | `hermes.desktop.friction` | kind (`notice_dismissed`, `error_toast`, `renderer_crash`, `backend_disconnect`, `slow_frame`), detail (notice id, error category, crash reason, drop reason, frame-duration bucket) | What gets in the way. Error toasts carry only their code-defined category; renderer crashes are recorded by the app shell only when the crashed window's own profile collects, and reported by a window of that profile after it comes back; slow frames are long frames while the window is visible, capped per day. |
+| `hermes.desktop.long_frames.sum` | frame bucket (`50ms_to_100ms`, `100ms_to_250ms`, `250ms_to_1s`, `1s_to_5s`, `gte_5s`, or `none`), visible-minutes bucket | How often the Desktop window stutters. Every long animation frame (50 ms or more, as the browser reports them) while the window is visible is counted in the app per profile and reported once per finished day on its own call, so a backend that predates it still takes the day's other reports (same once-per-profile-per-day latch as `action_use`, kept separately). The value is the day's frame count in that bucket, never capped; each row carries the day's visible time so a rate is computable, and a visible day with no long frames reports one `none` row. |
 | `hermes.desktop.dislike` | signal (`quick_close`, `cancelled`, `setting_off_default`, `rage_click`, `undo`, `feature_disabled`), target, setting, direction | Signals that a feature is unwanted: a pane closed within 5s of opening, a dialog/flow backed out of, a setting moved to or away from its default (the key only; the backend compares the saved value to the default itself), three clicks on one control within a second, an undo, a shipped feature switched off. Capped per signal per day. |
 | `hermes.desktop.onboarding` | step (first-run steps: provider picker, sign-in, API key, local endpoint, model pick, choose later, free-tier screen, guided setup cards, consent, first message), event (`reached`/`completed`/`abandoned`) | Where first run stops. Each step event once per profile (latched in a small per-profile file); `abandoned` is a step still open when the app next starts. First run happens before the consent question, so until it is answered the app holds the step events in memory only (never on disk, never sent) and records them if the user opts in during that app session; a "no" or quitting first discards them. Switching collection off in the Desktop deletes those latches with the app's own copy. |
+
+Desktop visible-time spans are split at UTC midnight before a day is rolled or sent.
+The clock restarts on opt-in and profile changes; hidden and suspended time is excluded.
+Each renderer keeps its own journal. A finished day's report combines all windows'
+frame counts and visible time; overlapping visible windows contribute separately.
+Reporting waits for every pre-midnight cursor to close or **exceed** the 11-minute
+suspend limit (equality is still eligible). Persisted frames and checkpointed time
+survive a renderer crash; an unobserved crash/suspend tail is never invented.
+The UTC wall clock determines the usage day. A high-water mark prevents counting
+time twice after a backwards clock correction; observations of an already closed
+day are omitted rather than reassigned to another day.
+
+Publication, report freezing, acknowledgement, consent withdrawal and profile
+migration share one short ownership phase: Web Locks where available, otherwise
+an IndexedDB readwrite transaction. Network requests run outside that phase.
+The ordinary daily aggregate's complete read/modify/write shares that phase too,
+so a descheduled writer cannot restore old data beneath a recreated profile name.
+Daily RPC acknowledgements remain bound to their original cohort. Ordinary
+counters roll their UTC day at publication; frame timestamps retain their observed day.
+The first frame report is a verified, durable snapshot; concurrent sends and lost
+acknowledgements replay the same totals against the backend's first-day latch,
+not a correction that an older backend would ignore. A backend without the frame
+RPC still receives the day's other reports.
+A failed daily activity report does not block a completed frame journal, and its
+later retry does not resend acknowledged frames. Pending legacy frame contributions
+must be durably adopted before freezing that journal.
+
+Journals and pending reports expire after seven days. A renderer whose journal
+was pruned cannot resume its old ownership: the existing focus-time backend
+consent refresh must positively authorize a replacement collector. Coordination
+or persistence failures likewise stop that collector rather than retaining a
+frame-only reporter without visible time.
+
+Consent ownership is captured before an asynchronous status read or save. A fresh
+immutable local cohort permit is allocated before the RPC; it is not consent to
+collect. Only an accepted positive backend result can start a collector. Stale
+saved/read callbacks retain their original cohort across focus changes and
+renames. An off result revokes that cohort's transferred measurements, but cannot
+answer a newly recreated profile's offer or overwrite a newer owner's UI state.
+If a focus refresh retires a first-run or Settings save's cohort, that surface
+captures again and re-reads backend consent before applying it. It never
+replays an old saved opt-in over a newer withdrawal.
+These local keys are never telemetry dimensions or RPC fields.
+
+Rename waits for telemetry coordination before changing local tab/session
+ownership. A complete, verified quarantine copy is stored before retiring the
+source name. Interrupted destination writes retry only that immutable copy, never
+data collected by a newly recreated source profile. If storage cannot preserve
+an isolated copy, only those optional measurements are discarded; sessions and
+other user content are untouched. An unavailable coordinator or storage never
+turns a successful backend rename or consent save into a UI failure.
+
+When coordination fails, withdrawal may only remove its already-captured
+immutable permit, never resolve or replace the current owner's token. A fresh
+authorization uses a different permit. If the browser also denies that removal,
+durable deletion cannot be guaranteed; the affected renderer remains disabled.
+With neither Web Locks nor usable IndexedDB, optional collection stays paused.
 
 Sessions are summarized when they close (finalize, reset or process exit);
 delegated child sessions are not counted separately. Milestones latch in the
@@ -82145,7 +82228,7 @@ Cron jobs are fired by the gateway's background ticker thread, which ticks every
 
 If you're expecting jobs to fire automatically, you need a running gateway (`hermes gateway` for foreground, or `hermes gateway start` for the installed service). For one-off debugging, you can manually trigger a tick with `hermes cron tick` — but that tick still needs the gateway: it never starts one, and with no gateway running it skips agent jobs (logged, shown in `hermes cron list`) until the next tick after `hermes gateway start`.
 
-**Desktop app:** the desktop's primary backend runs its own ticker, and it ticks **every local profile's** cron store — so jobs on a secondary profile keep firing even while that profile's backend is asleep (the desktop puts idle profile backends to sleep after ~10 minutes). You do not need to keep a profile open for its scheduled jobs to run.
+**Desktop app:** a local Desktop attaches to this machine's gateway, which ticks **every local profile's** cron store, so jobs on a secondary profile fire whether or not that profile is open in the app. An SSH-connected Desktop's remote backend runs its own ticker over every profile on that host. You do not need to keep a profile open for its scheduled jobs to run.
 
 ### Check 4: Check the system clock and timezone
 
@@ -88923,6 +89006,7 @@ Manage providers, models, tools, and credentials from a real UI instead of editi
 - **Terminal font picker** — choose an installed font in **Settings → Appearance**. Nerd Fonts such as `MesloLGS NF` render Powerlevel10k separators and icons in both interactive and agent terminals; the setting is saved per profile.
 - **Reasoning Blocks** — **Settings → Chat → Reasoning Blocks** (`display.show_reasoning` in `config.yaml`) shows or hides the model's thinking in the transcript (off shows answers only). Open chats update as soon as the setting saves. Typing `/reasoning hide` or `/reasoning show` in the composer flips the same setting and the open transcript follows immediately.
 - **Reopen Last Chat on Launch** — by default the app picks up where you left off on cold start. Turn it off in **Settings → Appearance** (or set `display.resume_last_session: false` in `config.yaml`) to always begin with a fresh chat. Deep links and explicit destinations are never overridden either way.
+- **Open-only link** — `hermes://launch` opens Hermes Desktop (or brings a running window to the front) and does nothing else: anything after `launch` is ignored, so it never pre-fills, navigates, or opens a dialog. Use it for an "Open Hermes" button on a page or a shortcut.
 - **Auxiliary-model warning** — if you switch the main model to a new provider while auxiliary tasks (titling, summarization, and similar helpers) are still pinned to another provider, the app warns you so you don't unknowingly split work across two providers.
 - **Per-task reasoning effort** — each row under **Settings → Model → Auxiliary models** has a reasoning selector next to its provider/model pick: a level, **Off**, or **inherit · main model effort** (the default, which removes the task's override). It is saved as `auxiliary.<task>.reasoning_effort` in `config.yaml`, the same key `hermes model` writes, and shows in the row's summary when set. Use it to run frequent helpers such as compression or titling at low or no reasoning while the main agent stays at high.
 - **VS Code Marketplace themes** — beyond the built-in theme presets, the appearance settings include a live VS Code Marketplace search: pick any color theme and the app downloads, converts, and installs it as a desktop theme. The same importer is available from the command palette (*Install theme*), and imported themes can be removed again from the appearance settings.
