@@ -6300,6 +6300,8 @@ display:
   # notification; other terminals ignore it) and, inside Warp (TERM_PROGRAM=WarpTerminal with the CLI-agent
   # protocol advertised), a warp://cli-agent OSC 777 event (`stop` on completion, `permission_request` on
   # blocking prompts) so Warp's tab status and notification mailbox track Hermes. No extra keys needed.
+  program_status: true    # CLI + TUI: OSC 7501 Program Status reports (idle, working, blocked on approval/question/credential,
+                          # done, error) so terminals that track them show each Hermes tab's state; others ignore it
   show_reasoning: true    # Show model reasoning/thinking above each response (default: true; toggle with /reasoning show|hide). On a gateway reply that was streamed, it follows the answer as its own message
   streaming: false        # Stream tokens to terminal as they arrive (real-time output)
   show_cost: false        # Show estimated $ cost in the CLI status bar
@@ -27040,7 +27042,7 @@ When a user attaches an image — from the CLI clipboard, the gateway (Telegram/
 | **Vision-capable** (GPT-4V, Claude with vision, Gemini, Qwen-VL, MiMo-VL, DeepSeek Flash / V4.1-Flash, etc.) | Sent as **real pixels** using the provider's native image content format above. No text summary layer. |
 | **Text-only** (DeepSeek V4 Pro, DeepSeek V3, smaller open-source models, older chat-only endpoints) | Routed through the `vision_analyze` auxiliary tool — an auxiliary vision model describes the image, and the text description is injected into the conversation. |
 
-You don't configure this — Hermes looks up your current model's capability in the provider metadata and picks the right path automatically. The practical effect: you can switch between vision and non-vision models mid-session and image handling "just works" without changing your workflow. Text-only models get coherent context about the image rather than a broken multimodal payload they'd have to reject.
+You don't configure this — Hermes looks up your current model's capability in the provider metadata and picks the right path automatically. For models served through Nous Portal, that metadata is the image-input flag in the Portal's own model list. The practical effect: you can switch between vision and non-vision models mid-session and image handling "just works" without changing your workflow. Text-only models get coherent context about the image rather than a broken multimodal payload they'd have to reject.
 
 To override the automatic choice, set `agent.image_input_mode` in `config.yaml`:
 
@@ -72399,6 +72401,11 @@ state_file = plugin_data_dir("my-plugin") / "state.json"
 conn = plugin_db("my-plugin")
 conn.execute("CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY)")
 ```
+
+`plugin_data_dir()` raises `FileNotFoundError` when the active named profile
+was deleted or renamed while a session was still bound to it, instead of
+recreating that profile's directory. Catch it if your plugin writes from a
+background hook and should skip the write.
 
 One directory per plugin means every plugin's data is inspectable in one
 predictable place. Secrets don't belong here — credential reads go through
