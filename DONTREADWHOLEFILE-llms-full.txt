@@ -17643,6 +17643,7 @@ Hooks, tools and injected turns of every chat and every local session (CLI, TUI,
 - `os.getcwd()` is the gateway's own directory, shared by every session; Hermes never changes it. Use `ctx.session_cwd()` for the working directory of the session the hook or tool runs for: the workspace a CLI/TUI/Desktop session was started in, or the profile's terminal cwd for a chat (`""` when there is none). Pass it as `cwd=` to subprocesses. It reads the session from the running turn, so it works in code that runs for a session: turn hooks, tool handlers and approval hooks. Ingress hooks such as `pre_gateway_dispatch` run before the message is admitted to any session; there it returns the profile's terminal cwd, or `""` when none is configured.
 - `ctx.session_surface()` names the calling session's client: `"cli"`, `"tui"`, `"desktop"`, `"acp"`, or the messaging platform (`"telegram"`, …); `""` outside a session.
 - `hermes_cli.plugin_session.session_client()` returns the client that created the calling local session, as it named itself on `session.create` (`{"name": "my-client", "version": "1.2.0"}`; `version` only when sent), or `None`: outside a session, for a messaging chat, and for a client that sent no name (the TUI, Desktop, the classic CLI and ACP send none today). Under `plugins.isolation: host` the plugin's process has no session context, so read `info["client"]` in a system prompt section instead. The name is a label the client chose, not an authentication: never grant anything, or skip a check, because of it.
+- `hermes_cli.plugin_session.turn_client()` (also `ctx.turn_client()`) returns the client that submitted the turn running now, as its connection announced itself (`{"name": "hermes-desktop", "version": "2.1.0", "kind": "desktop"}`; `version` and `kind` only when sent), or `None`: outside a turn, in a delegated child, for a client that announced nothing, and for a messaging, cron or other automation turn. `hermes_cli.plugin_session.session_viewers()` (also `ctx.session_viewers()`) lists the clients attached to the calling session right now, one dict per connection: `name` and `kind` (`None` when it announced nothing), `idle_seconds` since the user's last input there (`None` when none was seen), `basis` (`"system"`: the device's idle clock, `"page"`: input inside the Hermes window, `"input"`: only what the gateway saw itself) and `can_alert` (whether that client can get the user's attention itself; `None` while no report of that client counts for this session, and a report that leaves it out says `True`). It is `[]` when the calling code is bound to no session, in a delegated child, in a managed worker, and when the session is not live. Under `plugins.isolation: host` the two forms answer differently: the module-level `plugin_session.turn_client()` / `session_viewers()` run in the plugin's own process, which has no gateway and no turn, so they always return `None` / `[]` there, while `ctx.turn_client()` / `ctx.session_viewers()` call back into the gateway with the calling hook's context and answer as they would in-process. Use the `ctx` form in a plugin that may run hosted; the module-level form answers only inside the gateway process. Both read the calling context, so they answer for the right session in turn hooks such as `post_llm_call` and `on_session_end`. In the plugin's own slash command no turn is running: `turn_client()` is `None` there, and `session_viewers()` answers for the session the command was typed in. A notification plugin uses them to skip a phone alert while the user is active at the client that sent the turn. Detect them with `getattr(plugin_session, "turn_client", None)`. Like `session_client()`, these are labels and reports the clients chose: never grant anything on them.
 - `print()` output goes to the gateway's `gateway-stdio.log`, not to your terminal. Use `logging` instead.
 - `input()` gets end-of-file: the gateway has no terminal. Ask through a tool result or a slash command.
 
@@ -63614,6 +63615,9 @@ host.skills.setEnabled(name, on, profile?)  // enable/disable a skill — the Ca
 host.toolsets.list(profile?)               // toolsets + enabled state
 host.toolsets.setEnabled(name, on, profile?)// enable/disable a toolset
 host.profiles.list(scope?: ProfileScope)   // the profile list the profile rail reads
+host.setProfileBackend({ plugin, profile, purpose?, prepare? | url, token })  // run a profile's backend yourself → { applied }
+host.clearProfileBackend({ plugin, profile, beforeApply? })  // give it back to this computer's backend → { applied }
+host.profileBackendFeatures                // { prepare, purpose, beforeApply }: what this build supports
 host.pluginDecisions                       // READ-ONLY atom: this window's plugin on/off decisions (frozen copies)
 host.i18n.registerAppLocale(id, { endonym?, rtl?, translations? })  // add a whole UI language (language pack); returns disposer
 host.i18n.languageOptions()                // [{ id, endonym, rtl, source }] — what the language switcher lists
@@ -63644,6 +63648,71 @@ programmatically. Feature-detect it (`typeof host.openWorkspace ===
 'function'`) and fall back to a regular contributed pane on older desktop
 builds — Bot Mode's group-chat rooms are the reference consumer (main-window
 takeover when available, in-panel view otherwise).
+
+`host.setProfileBackend()` routes one profile to a backend your plugin runs on
+this computer, typically a sandbox behind a loopback proxy. The app asks the
+user first in a native dialog that names your plugin and the profile, says the
+chats will run "on this computer", and shows your optional `purpose` (one line,
+at most 160 characters) as your plugin's own words. It accepts only
+`http://127.0.0.1`, `localhost` or `[::1]` addresses and refuses a profile that
+already connects to a remote host or runs through another plugin. It resolves
+`{ applied: false }` when the user declines.
+
+- Pass `url` and `token` for a backend that is already running, or `prepare`
+  to start it only after the user agrees: the app confirms, awaits
+  `prepare()` for `{ url, token }`, then switches without asking again. The
+  profile stays on this computer's backend until then. A Cancel never calls
+  `prepare`; if it throws, nothing changes and the error propagates.
+- A hook (`prepare`, `beforeApply`) may run for up to 10 minutes. The composer
+  and the queue hold messages for as long as it runs. A hook that has not
+  returned after 10 minutes loses the hold, and messages then go to the backend
+  the profile is still on. The user's answer is kept for 5 minutes: when a hook
+  returns later than that, the app asks once more before it switches.
+- On a switch, only that profile's chats reconnect, in place, in every open
+  window; each window stays on the profile it shows. A window connected to
+  another gateway is left as it is, also when the profile it shows there has
+  the same name. The profile rail marks it
+  Sandboxed, the app lists profiles from this computer for it, and it stops
+  copying desktop plugins out of that profile's home.
+- `host.clearProfileBackend()` routes the profile back after the same kind of
+  confirm. Pass `beforeApply` to stop your backend in between (and clear core's
+  `profiles_run_elsewhere` marker): the app asks, awaits `beforeApply()`, then
+  switches back without asking again. A profile that had its own local entry
+  (saved SSH settings) gets it back.
+- The app skips that home's desktop plugins only while the profile is routed
+  to your backend or marked. After the switch back the home is this computer's
+  again and is read like any other profile's: desktop plugins found in it are
+  copied out and loaded, and Hermes's own backend uses its `config.yaml`,
+  hooks, cron jobs and skills. If your sandbox can write the home, grant
+  `plugins/` and `desktop-plugins/` read-only inside it, and treat whatever
+  else it can write there as input the user's own backend will trust.
+- While core's `profiles_run_elsewhere/<profile>.json` marker names a profile,
+  the app refuses to start it on this computer, so a lost route fails closed.
+- While the profile's connection is down, the app asks
+  `GET /api/plugins/<plugin>/status` on the profile's route. Answer
+  `{ "state": "starting" | "restarting" | "stopping" }` for a planned
+  transition and `"running"` once the backend is back: the status bar and
+  composer then show "Restarting sandbox…" instead of offline. A request the
+  restart or the switch cut off waits for the backend and is sent again only
+  when a second run cannot repeat work: it was never written to the socket, it
+  is a read the app repeats (`session.resume`, `session.history`), or it
+  carries a `submission_id` or `input_id`. Any other request fails with the
+  connection's error, as it does without a plugin, and nothing sends it again.
+  Any other answer is a failure. With no planned transition, a request whose
+  connection went silent (a heartbeat timeout) is not sent again: its caller
+  gets the error.
+- The composer keeps a message away from a backend that is about to go away.
+  During a switch (`"starting"`, `"stopping"`) the message stays in the composer
+  until the profile is on its new backend. During a switch the composer also
+  does not take `host.composer.submit` or other requests sent through it:
+  nothing is sent or queued, although the call still returns `true` while a
+  composer is visible.
+  During `"restarting"` a message waits in the chat's queue and is sent when the
+  backend is back, so report `"restarting"` only when the same backend returns
+  with the same sessions.
+
+Feature-detect with `typeof host.setProfileBackend === 'function'` and
+`host.profileBackendFeatures`.
 
 `host.paneVisibility(paneId)` returns a readonly reactive atom that is `true`
 while a contributed pane is actually on screen: present in the layout tree,
@@ -65304,11 +65373,15 @@ lost-ACK retry protection must retain it. A failed transaction publishes no live
 ### Naming the client
 
 A client may say who it is with an optional `client` object on `session.create`, for example
-`"client": {"name": "my-client", "version": "1.2.0"}`. `name` is 1-64 characters of `a-z`, `0-9`,
-`.`, `_` and `-`, starting with a letter or digit; `version` is optional, 1-64 printable ASCII
-characters without spaces. Anything else is refused with `invalid_params` (field `client`). Send it
-only to an owner whose `runtime.describe` lists `client` in `session_create.parameters` (capability
-`session-client-v1`); an older owner refuses the unknown key.
+`"client": {"name": "my-client", "version": "1.2.0", "kind": "desktop"}`. `name` is 1-64 characters
+of `a-z`, `0-9`, `.`, `_` and `-`, starting with a letter or digit; `version` is optional, 1-64
+printable ASCII characters without spaces; `kind` is optional, a string of 1-32 characters. The
+known kinds are `desktop`, `webapp`, `tui` and `mobile`; an unknown kind is not an error, the label
+is kept and read without it. Anything else is refused with `invalid_params` (field `client`). Send
+`name` and `version` only to an owner whose `runtime.describe` lists `client` in
+`session_create.parameters` (capability `session-client-v1`); an older owner refuses the unknown key.
+Add `kind` only when the owner also lists `client-identity-v1` in its capabilities: an owner with
+`session-client-v1` alone refuses a label that carries one.
 
 The name is stored with the frozen creation request, so it is part of the exact-retry identity
 and survives a restart. `session.info` returns it as `client` (absent when none was sent), and
@@ -65317,6 +65390,39 @@ plugins read it through `hermes_cli.plugin_session.session_client()` and the `cl
 picks the session policy (send `source: "tui"` for terminal-client behaviour), and no toolset,
 approval, permission, prompt text or telemetry reads `client`. Hermes does not verify the name,
 so any client can claim any name: never grant anything based on it.
+
+The same label also names the connection, not just one session: after its
+`client.capabilities {server_requests: true}` call, a client sends
+`client.capabilities {"client": {...}}` as a call of its own, once per connection and again after
+every reconnect, and ignores an error reply (an older owner refuses the unknown param for that
+call only). An owner listing `client-identity-v1` in `runtime.describe` capabilities keeps it for
+the connection's life; a malformed label leaves the earlier one in place and answers `4001` (an
+unknown key in it `4000`, like any unknown param). The Desktop app sends `hermes-desktop` /
+`desktop` and the Webapp `hermes-webapp` / `webapp`.
+
+An owner listing `client-activity-v1` answers `client.capabilities` with `client_activity: true`
+on a connection that keeps presence (a WebSocket; stdio answers `false`), and only then does a
+client send `client.activity {sessions, idle_seconds, basis, can_alert?,
+away?}`: the sessions it has in view (at most 16 ids, each at most 256 characters), how long
+ago the user's last input was,
+whether that comes from the OS idle clock (`basis: "system"`) or from input inside the Hermes
+window (`"page"`), whether it can get the user's attention for those sessions itself, and
+`away: true` when the screen locks. The owner keeps, per connection and session, the newest of
+that report and the input it sees itself (prompts, answers to its requests, interrupts, steers), in
+memory only, and counts a connection only while it is attached to the session. Each report is the
+connection's whole statement: the owner drops that connection's records of every session the report
+does not list, input it saw itself included, so a client that moved to another session (or to a page
+with none) withdraws by reporting what it shows now, and `sessions: []` withdraws everything. Input
+the owner sees after a report counts again. A report names sessions by id only; on a socket that
+serves several profiles it counts for the one profile whose session of that id the connection is
+attached to, and for none while it is attached to same-id sessions in more than one. Notification plugins read it to
+stay quiet while the user is at a computer. Like the name, it is attribution only and grants
+nothing.
+
+Each turn a connection submits is stamped with its label (`surface_v1.client` on the admission,
+never a `prompt.submit` field; a retry from another or no label is the same request). Plugins read
+the turn's label with `hermes_cli.plugin_session.turn_client()` and the attached connections with
+their idle data with `session_viewers()`.
 
 Attach another authenticated viewer with `session.resume({session_id})`, and submit
 through `prompt.submit({session_id, submission_id, text})`. The accepted receipt is durable
@@ -68646,7 +68752,7 @@ Model provider plugins are the third kind of **provider plugin**. The others are
 
 1. **Bundled plugins** — `<repo>/plugins/model-providers/<name>/` — ship with Hermes
 2. **User plugins** — `$HERMES_HOME/plugins/model-providers/<name>/` — drop in a directory; a running process picks it up on its next provider lookup (no restart)
-3. **Installed plugins** — `$HERMES_HOME/plugins/<name>/` (where `hermes plugins install owner/repo` clones) — imported only when `plugin.yaml` declares `kind: model-provider`; every other kind there belongs to the general PluginManager
+3. **Installed plugins** — `$HERMES_HOME/plugins/<name>/` (where `hermes plugins install owner/repo` clones) — imported only when `plugin.yaml` declares `kind: model-provider`; every other kind there belongs to the general PluginManager. `model-providers` is the folder from step 2, so `hermes plugins install` refuses a plugin whose own name is `model-providers` (in any letter case), except a re-install of an existing install of that name from its recorded source
 4. **Legacy single-file** — `<repo>/providers/<name>.py` — back-compat for out-of-tree editable installs
 
 Steps 2 and 3 are **per profile home**: one process that serves several profiles (the multiplex gateway a local Desktop attaches to, a `hermes serve` backend) resolves the plugins of whichever profile's `$HERMES_HOME` is bound at lookup time, and a plugin installed in one profile is not visible from another. Install the plugin in every profile that should use it (`hermes -p <profile> plugins install ...`).
@@ -74776,6 +74882,8 @@ with a name allows that one name only.
 | `gateway.session_context` | `get_session_env` | plugins/index.md § platform plugins: read session identity through the task-local context |
 | `agent.redact` | `redact_sensitive_text` | plugin-llm-access.md § From the plugin's frontend: a plugin RPC method (`force=True` where secrets must never leave) |
 | `hermes_cli.plugin_session` | `session_client` | user-guide/features/plugins.md § Plugin code inside the gateway: which client created the session |
+| `hermes_cli.plugin_session` | `turn_client` | user-guide/features/plugins.md § Plugin code inside the gateway: which client sent the turn and who is attached |
+| `hermes_cli.plugin_session` | `session_viewers` | user-guide/features/plugins.md § Plugin code inside the gateway: which client sent the turn and who is attached |
 | `agent.file_safety` | `get_read_block_error` | plugins/index.md § Check file paths and read YAML with Hermes's own helpers |
 | `agent.file_safety` | `raise_if_read_blocked` | plugins/index.md § Check file paths and read YAML with Hermes's own helpers |
 | `agent.file_safety` | `is_write_denied` | plugins/index.md § Check file paths and read YAML with Hermes's own helpers |
@@ -75107,7 +75215,7 @@ Build on the methods the gateway serves. The methods answered by an older handle
 
 **Served by the gateway** (112): `a2a.forward`, `approval.pending`, `approval.received`, `approval.respond`, `bot_delivery.list`, `bot_relay.cancel`, `bot_relay.deliver`, `bot_relay.outbox.drain`, `bot_relay.reply`, `bot_relay.roster.sync`, `bot_relay.settle`, `clarify.lock`, `clarify.respond`, `command.dispatch`, `command.observe`, `commands.catalog`, `complete.path`, `complete.slash`, `config.get`, `config.set`, `cron.cancel`, `cron.recover`, `cron.status`, `cron.submit`, `delegation.pause`, `file.attach`, `groups.approve`, `groups.attachment.download`, `groups.attachment.upload`, `groups.capabilities`, `groups.context`, `groups.continue`, `groups.create`, `groups.disband`, `groups.discard`, `groups.list`, `groups.log`, `groups.peer.invite`, `groups.peer.register`, `groups.peer.revoke`, `groups.rename`, `groups.retry`, `groups.send`, `groups.state`, `groups.stop`, `handoff.fail`, `handoff.request`, `handoff.state`, `image.attach_bytes`, `kanban.run`, `llm.oneshot`, `message.react`, `model.options`, `onboarding.skip`, `onboarding.start`, `ping`, `plugins.list`, `preview.restart`, `process.kill`, `process.list`, `process.stop`, `profiles.list`, `prompt.background`, `prompt.btw`, `prompt.cancel`, `prompt.receipt`, `prompt.replace_queued`, `prompt.resolve_unknown`, `prompt.steer_queued`, `prompt.submit`, `reload.env`, `reload.mcp`, `rollback.diff`, `rollback.list`, `rollback.restore`, `rollback.session_diff`, `runtime.describe`, `session.account_usage`, `session.active_list`, `session.automation`, `session.context_breakdown`, `session.control`, `session.control.read`, `session.create`, `session.detach`, `session.events.since`, `session.export`, `session.history`, `session.info`, `session.interrupt`, `session.list`, `session.mutate`, `session.prune`, `session.redirect`, `session.resume`, `session.save`, `session.stats`, `session.steer`, `session.transcript`, `setup.runtime_check`, `setup.status`, `shell.exec`, `skills.reload`, `slash.exec`, `subagent.interrupt`, `subagent.list`, `subagent.steer`, `subagent.tail`, `tools.show`, `worker.adopt`, `worker.persist`, `worker.register`
 
-**Answered by an older handler** (161): `billing.auto_reload`, `billing.charge`, `billing.charge_status`, `billing.keep_going_on_credits`, `billing.state`, `billing.step_up`, `browser.manage`, `cli.exec`, `client.capabilities`, `clipboard.paste`, `command.resolve`, `config.show`, `connectors.accounts`, `connectors.accounts.remove`, `connectors.accounts.rename`, `connectors.catalog`, `connectors.list`, `connectors.policy.get`, `connectors.policy.set`, `connectors.tools`, `cron.manage`, `delegation.status`, `diagnostics.share_nous`, `display.install`, `display.lease.acquire`, `display.lease.release`, `display.observe`, `display.start`, `display.status`, `display.stop`, `display.switchSandboxImage`, `display.thumbnail`, `free_tier.ack_notice`, `free_tier.challenge_result`, `free_tier.claim_nudge`, `free_tier.provision`, `free_tier.status`, `gateway.capabilities`, `groups.demote`, `groups.promote`, `groups.replica_state`, `groups.replicate`, `i18n.catalog`, `i18n.languages`, `image.attach`, `image.detach`, `image.generate`, `image.render`, `input.detect_drop`, `insights.get`, `learning.delete`, `learning.detail`, `learning.edit`, `learning.frames`, `machine.facts`, `mcp.catalog`, `mcp.servers.add`, `mcp.servers.list`, `mcp.servers.oauth.callback`, `mcp.servers.oauth.cancel`, `mcp.servers.oauth.poll`, `mcp.servers.oauth.start`, `mcp.servers.remove`, `mcp.servers.set_api_key`, `mcp.servers.status`, `mcp.servers.test`, `model.disconnect`, `model.save_key`, `onboarding.set_run`, `onboarding.state`, `paste.collapse`, `pdf.attach`, `pet.cancel`, `pet.cells`, `pet.disable`, `pet.export`, `pet.gallery`, `pet.generate`, `pet.generate.status`, `pet.hatch`, `pet.info`, `pet.info.meta`, `pet.remove`, `pet.rename`, `pet.scale`, `pet.select`, `pet.thumb`, `plugins.catalog.lookup`, `plugins.manage`, `profiles.configure`, `profiles.create`, `profiles.describe`, `profiles.get_asset`, `profiles.set_asset`, `project.facts`, `projects.add_folder`, `projects.archive`, `projects.create`, `projects.delete`, `projects.discover_repos`, `projects.for_cwd`, `projects.get`, `projects.list`, `projects.project_sessions`, `projects.record_repos`, `projects.remove_folder`, `projects.set_active`, `projects.set_primary`, `projects.tree`, `projects.update`, `request.answer`, `session.events.stats`, `session.foreign.import`, `session.foreign.list`, `session.foreign.preview`, `session.most_recent`, `shared_metrics.desktop_daily`, `shared_metrics.desktop_dislike`, `shared_metrics.desktop_feature_use`, `shared_metrics.desktop_friction`, `shared_metrics.desktop_long_frames`, `shared_metrics.desktop_onboarding`, `shared_metrics.set`, `shared_metrics.slash_command`, `shared_metrics.startup_latency`, `shared_metrics.status`, `shared_metrics.update_run`, `skills.manage`, `spawn_tree.list`, `spawn_tree.load`, `spawn_tree.save`, `subagent.roster`, `subscription.change`, `subscription.preview`, `subscription.resume`, `subscription.state`, `subscription.upgrade`, `system.battery`, `terminal.resize`, `tools.configure`, `tools.list`, `toolsets.list`, `usage.bars`, `vault.add`, `vault.list`, `vault.lock`, `vault.preview.fill`, `vault.remove`, `vault.source.set`, `vault.sources`, `vault.unlock`, `verification.status`, `voice.record`, `voice.toggle`, `voice.tts`, `wake.feed`, `wake.pause`, `wake.resume`, `wake.start`, `wake.status`, `wake.stop`
+**Answered by an older handler** (162): `billing.auto_reload`, `billing.charge`, `billing.charge_status`, `billing.keep_going_on_credits`, `billing.state`, `billing.step_up`, `browser.manage`, `cli.exec`, `client.activity`, `client.capabilities`, `clipboard.paste`, `command.resolve`, `config.show`, `connectors.accounts`, `connectors.accounts.remove`, `connectors.accounts.rename`, `connectors.catalog`, `connectors.list`, `connectors.policy.get`, `connectors.policy.set`, `connectors.tools`, `cron.manage`, `delegation.status`, `diagnostics.share_nous`, `display.install`, `display.lease.acquire`, `display.lease.release`, `display.observe`, `display.start`, `display.status`, `display.stop`, `display.switchSandboxImage`, `display.thumbnail`, `free_tier.ack_notice`, `free_tier.challenge_result`, `free_tier.claim_nudge`, `free_tier.provision`, `free_tier.status`, `gateway.capabilities`, `groups.demote`, `groups.promote`, `groups.replica_state`, `groups.replicate`, `i18n.catalog`, `i18n.languages`, `image.attach`, `image.detach`, `image.generate`, `image.render`, `input.detect_drop`, `insights.get`, `learning.delete`, `learning.detail`, `learning.edit`, `learning.frames`, `machine.facts`, `mcp.catalog`, `mcp.servers.add`, `mcp.servers.list`, `mcp.servers.oauth.callback`, `mcp.servers.oauth.cancel`, `mcp.servers.oauth.poll`, `mcp.servers.oauth.start`, `mcp.servers.remove`, `mcp.servers.set_api_key`, `mcp.servers.status`, `mcp.servers.test`, `model.disconnect`, `model.save_key`, `onboarding.set_run`, `onboarding.state`, `paste.collapse`, `pdf.attach`, `pet.cancel`, `pet.cells`, `pet.disable`, `pet.export`, `pet.gallery`, `pet.generate`, `pet.generate.status`, `pet.hatch`, `pet.info`, `pet.info.meta`, `pet.remove`, `pet.rename`, `pet.scale`, `pet.select`, `pet.thumb`, `plugins.catalog.lookup`, `plugins.manage`, `profiles.configure`, `profiles.create`, `profiles.describe`, `profiles.get_asset`, `profiles.set_asset`, `project.facts`, `projects.add_folder`, `projects.archive`, `projects.create`, `projects.delete`, `projects.discover_repos`, `projects.for_cwd`, `projects.get`, `projects.list`, `projects.project_sessions`, `projects.record_repos`, `projects.remove_folder`, `projects.set_active`, `projects.set_primary`, `projects.tree`, `projects.update`, `request.answer`, `session.events.stats`, `session.foreign.import`, `session.foreign.list`, `session.foreign.preview`, `session.most_recent`, `shared_metrics.desktop_daily`, `shared_metrics.desktop_dislike`, `shared_metrics.desktop_feature_use`, `shared_metrics.desktop_friction`, `shared_metrics.desktop_long_frames`, `shared_metrics.desktop_onboarding`, `shared_metrics.set`, `shared_metrics.slash_command`, `shared_metrics.startup_latency`, `shared_metrics.status`, `shared_metrics.update_run`, `skills.manage`, `spawn_tree.list`, `spawn_tree.load`, `spawn_tree.save`, `subagent.roster`, `subscription.change`, `subscription.preview`, `subscription.resume`, `subscription.state`, `subscription.upgrade`, `system.battery`, `terminal.resize`, `tools.configure`, `tools.list`, `toolsets.list`, `usage.bars`, `vault.add`, `vault.list`, `vault.lock`, `vault.preview.fill`, `vault.remove`, `vault.source.set`, `vault.sources`, `vault.unlock`, `verification.status`, `voice.record`, `voice.toggle`, `voice.tts`, `wake.feed`, `wake.pause`, `wake.resume`, `wake.start`, `wake.status`, `wake.stop`
 
 <!-- gateway-methods:end -->
 
@@ -78162,7 +78270,8 @@ repair a pointer.
 
 Promotion replaces the stable downloads page at `releases/stable/index.html` on
 the R2 public origin. Canary tag builds own `releases/canary/index.html`, and
-commit builds own `releases/commit/<sha>/index.html`. Pages list only staged,
+a commit build owns only its claim archive's page,
+`releases/tag/commit.<stamp>-v<version>/index.html`. Pages list only staged,
 receipt-backed objects; an older run cannot regress a protected channel.
 
 ## Run, publish, or abandon a stable release
@@ -78435,10 +78544,11 @@ creation to organization administrators and the release integration and blocks
 update and deletion. The ruleset is not applied yet; until an admin applies it,
 these locks are honor-system — anyone with push access can delete a marker ref
 or move a receipt tag. Attempt refs, marker refs, and final tags are immutable.
-Channel and commit builds write annotated post-build receipts such as
-`v0.0.7+channel.<YYYYMMDDTHHMMSSZ>.<run-id>` and
-`v0.0.0+commit.<YYYYMMDDTHHMMSSZ>.<run-id>` only after publication succeeds.
-Receipt tags do not create GitHub releases and do not trigger workflows.
+Channel builds write annotated post-build receipts such as
+`v0.0.7+channel.<YYYYMMDDTHHMMSSZ>.<run-id>` only after publication succeeds.
+Receipt tags do not create GitHub releases and do not trigger workflows. A
+commit build writes no receipt: its claim tag, made before the build, is its
+identity (see below).
 
 A canary tag is `canary.<YYYYMMDDTHHMMSSZ>-v<stable>`, the same claim shape as
 a stable `rc.N-v<stable>`, so nothing that lists `v*` release tags mistakes it for
@@ -78496,6 +78606,8 @@ canary feed updates that application only. One-off builds use
 `release.py --build-commit REV --remote REMOTE` (add `--publish` to dispatch).
 Their application identity and CLI command (`hermes-<7-character-sha>`) include
 the pinned commit. Two different commit builds do not replace each other.
+A commit build runs the Stable Release pipeline itself (see
+[Commit builds](#commit-builds)).
 
 Branding is selected from those build inputs, not from runtime settings:
 canary uses yellow/dark-yellow icons; one-off builds use red icons bearing
@@ -78508,20 +78620,66 @@ build. Source checkouts are separate: an official-repository checkout follows
 `stable` and a fork or mirror follows `main`, until
 `hermes update --set-channel` picks another channel.
 
-`--build-commit` prints its deterministic downloads-page URL before dispatch,
-including in dry runs:
-`https://hermes-assets.nousresearch.com/releases/commit/<full-sha>/index.html`.
-`CLOUDFLARE_R2_PUBLIC_URL` overrides the public origin. After admission, the
-commit summary runs even when a build or assembly job fails; it lists only
-receipt-backed existing downloads and marks missing binaries as not built.
-Missing binaries link to the workflow run under **View build run**, not to
-nonexistent downloads. Disabled platforms have no download or failure link.
-Page publication still requires working R2 access. The commit links to its source
-on GitHub; tag and channel pages link to the corresponding GitHub release tag.
-Commit pages also list explicit non-secret `--bundle-env` defaults and
-`--bundle-unset` clears passed to the desktop bundles, not the CI environment.
-Values are shown as JSON strings (including `""` for an empty value); clears are
-labeled **Unset**. The section is omitted when no overrides were supplied.
+### Commit builds
+
+`release.py --build-commit REV --remote REMOTE` claims an exact pushed commit
+with an annotated tag `commit.<YYYYMMDDTHHMMSSZ>-v<version>` (the pyproject
+version at REV) and dispatches `stable-release.yml` on it from the default
+branch, using the same claim/admission pipeline as stable and canary releases.
+Without `--publish` it prints the claim, its lanes and the dispatch command and
+creates nothing. The claim message records the lanes, the green policy and the
+bundle defaults; admission reads only the claim, and `stable verify` refuses
+any candidate leg whose bundle environment differs from it. Stable Release runs
+only from `main`, so a repository whose default branch is another one gets no
+claim: `--build-commit` dispatches the tagless `desktop-bundled-release.yml`
+commit build on that branch instead (its page is
+`releases/commit/<sha>/index.html`), and refuses `--only`, `--with` and
+`--without` there.
+
+Because a commit build runs arbitrary pushed commits rather than reviewed
+release commits, it enforces four trust-boundary rules:
+
+- **Bundles + smoke only:** it starts from `windows`, `macos-arm64` and `smoke`;
+  `--with termux` adds the Termux `.deb` build, and `--only` / `--without`
+  narrow that set. Shared-cache workflows and release-only lanes (`ci`,
+  `docker`, `docker-tests`, `nix`, `pm-bundle`, `install-e2e`, `termux-checks`,
+  `windows-live`, `upgrade`, `windows-store`, `linux`, `bootstrap-version`) are
+  refused.
+- **Read-only caches and no APT signing key:** every native build leg
+  (Windows, macOS and Termux) routes to its `cache-mode: read` branch and skips
+  every cache-save step. The commit Termux leg has no access to
+  `TERMUX_APT_GPG_KEY` or `TERMUX_APT_GPG_PASSPHRASE` and stages only the
+  downloadable `.deb` (never an APT repository).
+- **Identity & pre-PR compatibility:** its packages are versioned like a
+  canary's (`X.Y.Z+commit.<stamp>`, the stamped Windows quad, Debian
+  `X.Y.Z~commit.<stamp>-1`) while keeping the `Commit<sha7>` application
+  identity and `source: commit-build`, so every updater refuses them. A commit
+  whose tree doesn't declare a claim build in
+  `scripts/releases/commit_claim_build.txt` (every commit predating commit-claim
+  packaging) still builds cleanly through the tagless `--commit` path while the
+  default-branch controller records, smokes and stages it under the claim
+  archive; a declared contract the controller doesn't know is refused.
+- **Publication:** none. Its only publication job, `publish-commit`, renders
+  the accepted candidate's full downloadable assets (`.msixbundle`, per-arch
+  `.msix`, macOS `.dmg` and `.zip`, and Termux `.deb`) at
+  `releases/tag/commit.<stamp>-v<version>/index.html` and in the run summary
+  (waiting for every selected check with `--require-green`, the default, or
+  only for the built candidate with `--no-require-green`). Channel and feed
+  writers, APT staging, Docker push and Store submission all refuse commit
+  claims.
+
+The page links its source commit and lists the explicit non-secret
+`--bundle-env` defaults and `--bundle-unset` clears baked into the desktop
+bundles (not the CI environment), as JSON strings with clears labeled
+**Unset**; the section is omitted when there were none. `--build-commit`
+prints the page URL before dispatch, including in dry runs;
+`CLOUDFLARE_R2_PUBLIC_URL` overrides the public origin. Each commit build runs
+in its own concurrency group, so it never queues behind a release, and both the
+stable publication reconciler and sandbox image workflow ignore it.
+
+Commit builds keep 90 days: the daily canary workflow's prune deletes claim
+archives and claim tags older than that (and lets legacy
+`releases/commit/<sha>/` pages from tagless builds age out on the same window).
 
 Tagged builds also publish a per-tag diagnostic page at
 `releases/tag/<tag>/index.html` after build or feed failures, including when no
@@ -93628,6 +93786,12 @@ The dashboard scans three directories for `dashboard/manifest.json`:
 | 2 | `<repo>/plugins/<name>/dashboard/` | `bundled` |
 | 3 | `./.hermes/plugins/<name>/dashboard/` | `project` — only when `HERMES_ENABLE_PROJECT_PLUGINS` is set |
 
+A user plugin's tab, files and backend are served only while it is turned on with `hermes plugins enable <directory name>` (its `plugin.yaml` name or its dashboard `name` also counts, each only when no other installed plugin has that name), and a plugin in `plugins.disabled` is never served. A dashboard `name` that is another installed plugin's name is not registered, so give each plugin its own `name` in `dashboard/manifest.json`.
+
+:::note Upgrading
+A dashboard `name` must be the plugin's own name. The names of plugins that ship with Hermes (including its platform, provider and backend plugins, such as `telegram`, `openai` or `kanban`) and of other installed plugins are not registered as another plugin's dashboard name, and the log says which plugin has the name. If a plugin's tab disappeared after an update, change `name` in its `dashboard/manifest.json` and turn it on by its directory name: `hermes plugins enable <directory name>`.
+:::
+
 On a gateway serving several profiles, a request for a profile other than the one the gateway started
 with sees that profile's own `plugins/<name>/dashboard/`, then the root `~/.hermes/plugins/<name>/dashboard/`
 (as a standalone `hermes --profile <name> dashboard` did; the profile's own copy wins a same-name
@@ -97828,7 +97992,8 @@ Webapp bundle, how many turns are running on the old backend, and the steps in o
 out it probes the old backend on its address as above and reads `systemctl show` / `launchctl`
 and `/proc`; normal Hermes startup runs first, as for the report. Options: `--address HOST:PORT` (plan
 for one backend when several serve this home), `--keep-webapp-address` (keep an already enabled Webapp
-where it is), `--force-interrupt` (plan the move although a turn is running), `--json`.
+where it is), `--force-interrupt` (plan the move although a turn is running or a gateway runs outside its
+service), `--json`.
 
 Exit codes: 0 the move could run, or no old backend serves this home; 2 invalid invocation; 3 blocked
 (the blockers are listed, for example a running turn, an address that matches no backend, a bind the
@@ -97894,8 +98059,9 @@ exactly (for example a `linked` unit), when a hand-started backend's start time 
 `config.yaml` or `.env` is a symbolic link (replace it with a copy first), when `backend_migration/` or
 `backend_migration.json` is a symbolic link (also for `--restore` and the rollback of an unfinished run: the
 backups would land outside the home; put a real folder or file in its place), when the gateway's unit or
-LaunchAgent of the same name belongs to another Hermes home, when a legacy `hermes.service` is installed
-(run `hermes gateway migrate-legacy` first), when a config backend other than the file one is selected
+LaunchAgent of the same name belongs to another Hermes home, when a legacy `hermes.service` cannot be
+replaced (a system-wide one, or one that serves another home or whose home cannot be read: remove it from the
+home it serves first), when a config backend other than the file one is selected
 (`HERMES_CONFIG_BACKEND`, for example `remote`: the backups and the undo cover `config.yaml` only; `--apply
 --detach` checks it before it starts the background run), when the
 old backend requires sign-in but its `/api/auth/providers` list cannot be read (the check after the move compares
@@ -97930,9 +98096,28 @@ rollback undo all three.
 After a migration, `hermes update` leaves the stopped old backend stopped, and a second `--apply` says
 there is nothing to migrate.
 
+The plan's "The move also" list (JSON `takes_over`) names what the move stops or replaces besides the old
+backend:
+
+- **A legacy `hermes.service`** (a user unit from a pre-rename install that serves this home) is replaced by
+  the gateway service. Its own `Environment=` and `EnvironmentFile=` lines are kept in a mode-600
+  `hermes-gateway.service.d/hermes-legacy-environment.conf` drop-in (without the ones the gateway unit sets
+  itself: `HOME`, `PATH`, `HERMES_HOME`, ...), and a private copy of its unit file is kept in
+  `backend_migration/`. Bot tokens and pairings live in the home, so no messaging platform signs in again. A
+  rollback or `--restore` removes the drop-in and puts the unit back, enabled and running as it was.
+- **A gateway of this home running outside its service** (one a dashboard chat window started, which ends
+  itself when idle, or one started by hand) is stopped right after the old backend, and the gateway service
+  takes over its chats and bots. Like a running turn, this needs consent: without `--force-interrupt` it
+  blocks (exit 3), and one that starts after the check holds the old backend's stop (exit 4, nothing stopped).
+
+The dashboard's **Move** button is not held by what consent clears (running turns, unreadable turn
+activity, a gateway outside its service): its confirmation lists what is stopped, and confirming sends the
+move with `--force-interrupt`. Every other blocker still holds the button.
+
 Options: `--address HOST:PORT` (pick one backend when several serve this home), `--keep-webapp-address`
 (retire the old backend but keep an already enabled Webapp where it is), `--force-interrupt` (proceed
-although a turn is running on the old backend, or its turn activity cannot be read; without it either
+although a turn is running on the old backend, its turn activity cannot be read, or a gateway of this home runs
+outside its service, which is then stopped; without it each
 blocks with exit 3, and a forced move past unreadable activity says so before it starts; a turn that starts,
 or activity that becomes unreadable, after that check and before the old backend is stopped rolls the move back
 with exit 4, the old backend never stopped; so does an old backend whose process changed since the check, for
