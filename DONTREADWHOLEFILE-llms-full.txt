@@ -16837,7 +16837,7 @@ Plugins can register the 27 lifecycle events currently accepted by `hermes_cli.p
 |---|---|
 | **Directive/control** | `pre_tool_call`, `pre_llm_call`, `pre_verify`, `pre_gateway_dispatch` |
 | **Transform** | `transform_tool_result`, `transform_terminal_output`, `transform_llm_output`, `pre_transcription` |
-| **Observer** | `post_tool_call`, `post_llm_call`, `pre_api_request`, `post_api_request`, `api_request_error`, `pre_auxiliary_call`, `post_auxiliary_call`, `on_stream_start`, `on_stream_delta`, `on_stream_end`, `on_interim_message`, `on_session_start`, `on_session_end`, `on_session_finalize`, `on_session_reset`, `post_compaction`, `post_curator_run`, `on_session_delete`, `agent_loop_stopped`, `on_skill_lifecycle`, `subagent_start`, `subagent_stop`, `pre_approval_request`, `post_approval_response`, `on_human_input_request`, `on_human_input_resolved`, `pre_command`, `kanban_task_claimed`, `kanban_task_completed`, `kanban_task_blocked` |
+| **Observer** | `post_tool_call`, `post_llm_call`, `pre_api_request`, `post_api_request`, `api_request_error`, `pre_auxiliary_call`, `post_auxiliary_call`, `on_stream_start`, `on_stream_delta`, `on_stream_end`, `on_interim_message`, `on_session_start`, `on_session_end`, `on_session_finalize`, `on_session_reset`, `post_compaction`, `post_curator_run`, `on_session_delete`, `agent_loop_stopped`, `on_skill_lifecycle`, `subagent_start`, `subagent_stop`, `pre_approval_request`, `post_approval_response`, `on_human_input_request`, `on_human_input_resolved`, `on_session_prompt`, `on_session_prompt_settled`, `pre_command`, `kanban_task_claimed`, `kanban_task_completed`, `kanban_task_blocked` |
 
 These categories describe current behavior rather than defining future naming rules. Plugin middleware remains a separate registry/surface.
 ## Plugin types
@@ -21983,7 +21983,7 @@ Every transition appends a row to `task_events`. Each row carries an optional `r
 | `reconciled` | `{reason, claim_lock, claim_expires, worker_pid}` | Orphaned-card reconciliation: the card was `running` with broken claim bookkeeping (`claim_lock` or `claim_expires` NULL — crash mid-claim, manual SQL, DB restore) and no live worker, so none of the TTL/crash/stale paths could ever recover it. The dispatcher requeued it to `ready` with an explanatory comment. Gated by `kanban.reconcile_orphans` in config.yaml (default `true`). |
 | `respawn_guarded` | `{reason}` | Dispatcher refused to re-spawn this ready task this tick. Reasons: `infrastructure_cooldown` (the host refused the last spawn — no restart-safe systemd scope — and the cooldown has not elapsed; never counted against the card), `rate_limit_cooldown` (the last run hit a quota wall; same cooldown, never counted), `blocker_auth` (last failure was a quota/auth/429 error — wait for the rate window to reset), `recent_success` (a completed run happened in the last hour — wait for review before re-running), `active_pr` (a GitHub PR URL appears in a recent comment — a prior worker already opened a PR). The task stays in `ready`; the next tick gets another chance to spawn. If the underlying condition persists, the normal `consecutive_failures` circuit breaker will auto-block via `gave_up` after `failure_limit` failures. |
 | `spawn_failed` | `{error, failures}` | One spawn attempt failed (missing PATH, workspace unmountable, …). Counter increments; task returns to `ready` for retry. |
-| `skipped_nonspawnable` | `{assignee}` | Dispatcher refused to spawn because the assignee profile does not exist in this home (or is not in `kanban.dispatch_profiles`). Written once per card — repeated only when another event landed in between — so `show`/`tail` name the missing profile without a row per tick. The card stays in `ready`; reassign it or install the profile. |
+| `skipped_nonspawnable` | `{assignee}` | Dispatcher refused to spawn because the assignee profile does not exist in this home (or is not in `kanban.dispatch_profiles`, or a plugin runs it elsewhere). Written once per card — repeated only when another event landed in between — so `show`/`tail` name the missing profile without a row per tick. The card stays in `ready`; reassign it or install the profile. |
 | `protocol_violation` | `{pid, claimer, exit_code, protocol_violation, worker_output?}` | Worker exited successfully while the task was still `running`, usually because it answered without a terminal board call (`kanban_complete`, `kanban_request_review` or `kanban_block`). Emitted on every violation (the payload's `protocol_violation: true` marker is copied into the run metadata and feeds the violation-only retry budget). Below the budget — up to `_PROTOCOL_VIOLATION_FAILURE_LIMIT` (default 3) *consecutive* violations, per-task `max_retries` overriding — the task simply returns to `ready` for another attempt; when the streak reaches the bound the dispatcher also emits `gave_up` and auto-blocks. `worker_output` carries the worker's own last printed text (usually its explanation of why it stopped), also folded into `last_failure_error` and shown to the retry worker as the prior-attempt error. |
 | `gave_up` | `{failures, effective_limit, limit_source, error, terminal_provider?}` | Circuit breaker fired after N consecutive non-successful attempts. Task auto-blocks with the last error. The effective limit resolves as task `max_retries`, then dispatcher `failure_limit` / `kanban.failure_limit`, then the built-in default. `terminal_provider: true` means the worker exited `78` on a provider error a retry cannot fix (credential revoked, model gone) — including a startup credential failure that explicitly requires re-login (`hermes auth` / `setup`), which exits `78` before the first turn; other startup failures exit `1` — and the breaker fired on that first attempt, sticky, regardless of the limit. |
 
@@ -23433,6 +23433,8 @@ Payload fields below are the exact event-specific fields supplied by each call s
 | `post_approval_response` | Observer | After a decision, timeout, or gateway notification failure; return ignored. | `command`, `description`, `pattern_key`, `pattern_keys`, `session_key`, `surface`, `turn_id`, `tool_call_id`, `choice`; smart path may add `decided_by` | Same command sensitivity plus decision metadata. |
 | `on_human_input_request` | Observer | The agent is about to block on a person — sudo password prompt, `clarify` question, or dangerous-command approval — on CLI, Ink TUI/Desktop, ACP and gateway platforms; return ignored. | `kind` (`"sudo"` \| `"clarify"` \| `"approval"`), `request_id`, `session_id`, `session_key`, `platform`, `prompt` | `prompt` is always force-redacted; the typed password or answer is never passed. |
 | `on_human_input_resolved` | Observer | Exactly once per `on_human_input_request`, when the wait ends (answered, skipped, timed out, withdrawn, or failed); return ignored. | Same as the request plus `outcome` | Outcome only — never the answer itself. |
+| `on_session_prompt` | Observer | In the gateway, once when a session's owner opens a prompt a person answers for that session's viewers (approval, clarify, sudo, secret, password-manager prompts), after it is registered; queued off the prompt path, in the owning profile; return ignored. | `session_id`, `kind`, `prompt_id`, `execution_generation`, `params` | `params` strings are always force-redacted; never the answer. |
+| `on_session_prompt_settled` | Observer | Exactly once per `on_session_prompt`, when the prompt stops being open (answered, timed out, interrupted, withdrawn, turn ended); return ignored. | `session_id`, `kind`, `prompt_id`, `execution_generation`, `reason` | Identifiers and reason only. |
 | `on_room_member_activity` | Observer | While a hosted Group Chat member turn runs on the Bot Mode gateway, once per runtime event the member session emits (tool start/complete, approval request, message/reasoning deltas, errors); queued per consumer off the token path; return ignored. | `room_id`, `thread_id`, `member_id`, `turn_id`, `task_id`, `execution_generation`, `kind`, `seq`, `payload` | `payload` is the client-safe session event body: tool args and results, redacted approval commands, streamed member text. |
 | `kanban_task_claimed` | Observer | After claim commit, in dispatcher process before worker spawn; return ignored. | `task_id`, `profile_name`, `board`, `assignee`, `run_id` | Board/task/profile/assignee identifiers. |
 | `kanban_task_completed` | Observer | After completion and cleanup, usually in worker process; return ignored. | `task_id`, `profile_name`, `board`, `assignee`, `run_id`, `summary` | Summary may contain project/user content. |
@@ -24602,6 +24604,58 @@ def register(ctx):
 
     ctx.register_hook("on_human_input_request", on_request)
     ctx.register_hook("on_human_input_resolved", on_resolved)
+```
+
+---
+
+### `on_session_prompt`
+
+Fires in the gateway once when a session's owner opens a prompt a person answers for the viewers attached to that session (CLI, Ink TUI, Desktop, a phone app), after the prompt is registered where an answer can find it. Each call carries the id that answers the prompt, so a notification can let the person answer it in place:
+
+| `kind` | Prompt | Answered with `prompt_id` through |
+|--------|--------|-----------------------------------|
+| `"approval"` | Dangerous-command approval (`approval.request` event) | `approval.respond` |
+| `"clarify"` | A clarify question card (`clarify.request` event) | `clarify.respond` |
+| `"sudo"`, `"secret"`, `"vault.unlock_prompt"`, `"vault.code"`, `"vault.save_login"` | Masked sudo password, skill secret, password-manager unlock, one-time code, save-login prompts (server-to-client request frames) | A response frame with that `srq-` id |
+| `"clarify"` (request frame) | The classic CLI's batch clarify panel, or a plugin command's choice | A response frame or `clarify.lock` with that `srq-` id |
+
+Desktop window requests a client app answers without a person (theme, tour, preview, window and terminal reads) never fire it, and neither does a prompt that was never opened because no viewer was attached.
+
+**Callback signature:**
+
+```python
+def my_callback(session_id: str, kind: str, prompt_id: str,
+                execution_generation: int | None, params: dict, **kwargs):
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `session_id` | `str` | The live session id the prompt was opened in (the id viewers pass back) |
+| `kind` | `str` | As in the table above |
+| `prompt_id` | `str` | The id that answers the prompt; the matching `on_session_prompt_settled` carries the same value |
+| `execution_generation` | `int \| None` | The turn's generation for `approval` / `clarify` events, `None` for request frames |
+| `params` | `dict` | A deep copy of the prompt as the viewers received it (event payload or frame `params`). Every string is redacted with the secret redactor, even when `security.redact_secrets` is off |
+
+What the person types is **never** passed. **Return value:** ignored; a raising callback is logged at debug and the prompt is unaffected. Calls run in order on one background worker, never on the agent thread or the event loop and never under a session lock, in the scope of the profile that owns the session (on a multi-profile gateway, only that profile's plugins are called). A slow callback only delays later calls of these two hooks.
+
+**When to use which:** `on_human_input_request` is surface-neutral (it also fires on messaging platforms and for the CLI's in-process prompts) but carries no answerable id, fires once for a whole multi-question clarify, and never for secret or password-manager prompts. Use `on_session_prompt` when you need to answer or track a specific prompt of a gateway session. A plugin can detect support with `importlib.util.find_spec("gateway.session_prompt_hooks")`.
+
+### `on_session_prompt_settled`
+
+Fires exactly once for every `on_session_prompt`, after it, when the prompt stops being open: answered (from any viewer, a chat button or a remote responder), timed out, interrupted, withdrawn, or its turn ended. Kwargs: `session_id`, `kind`, `prompt_id`, `execution_generation` and `reason` — the `request.cancel` reason for a request frame (`"resolved"`, `"timeout"`, `"interrupted"`), or `"settled"` for an approval or clarify event. No `params`, and never the answer.
+
+```python
+def register(ctx):
+    waiting = {}
+
+    def on_prompt(session_id, kind, prompt_id, params, **kwargs):
+        waiting[prompt_id] = (session_id, kind)  # e.g. notify, with prompt_id as the answer target
+
+    def on_settled(prompt_id, **kwargs):
+        waiting.pop(prompt_id, None)  # e.g. withdraw the notification
+
+    ctx.register_hook("on_session_prompt", on_prompt)
+    ctx.register_hook("on_session_prompt_settled", on_settled)
 ```
 
 ---
@@ -49151,6 +49205,10 @@ queries the actual task XML, principal, and installed launcher.
   arbitrary shell launchers and modified Windows launcher scripts are not
   interpreted by `ensure`. Restore an explicit supported definition through an
   intentional service-management operation before retrying.
+- `profile_runs_elsewhere` (state `inaccessible`): a plugin runs this profile's
+  backend somewhere other than this host and has marked it under
+  `<hermes root>/profiles_run_elsewhere/<profile>.json`. `detail` names the
+  profile and the plugin. Turn it off in that plugin to run the profile here.
 
 These refusals do not start a service, rewrite configuration, or launch an
 unmanaged replacement. Standard explicitly bound default and custom-root installs
@@ -56947,6 +57005,7 @@ Advanced per-platform knobs for throttling the outbound message batcher. Most us
 | `HERMES_REDACT_SECRETS` | `true`/`false` — control secret redaction in tool output, logs, and chat responses (default: `true`). |
 | `HERMES_WRITE_SAFE_ROOT` | Optional directory prefix that **hard-blocks** `write_file`/`patch` writes outside the listed roots (no approval prompt). Supports multiple directories separated by `os.pathsep` (`:` on Unix, `;` on Windows). See [HERMES_WRITE_SAFE_ROOT](#hermes_write_safe_root) below. |
 | `HERMES_DISABLE_LAZY_INSTALLS` | Internal PM policy used by tests and install probes. Truthy values refuse on-demand installation. It overrides the user-facing `security.allow_lazy_installs` setting. Do not put it in `.env`. |
+| `HERMES_INSTALL_STATE_DIR` | Set by a launcher that starts Hermes on an interpreter it prepared, for that process and its children: the absolute path of a folder that stands in for `installs/<key>` in the Hermes data folder. Later locks and markers go there. Hermes reads nothing from it at start: the process is not restarted, repairs nothing and selects no recorded dependency environment (a sealed install still uses the environment it ships). `hermes pm install --extra`, `hermes pm repair` and every other command that would build a dependency environment are refused in such a process. The launcher keeps the interpreter's environment in place while the process runs: a Hermes process that runs on one of the install's environments holds its lease, and a launcher that is not one uses an interpreter it controls. Launch-only: a value in `.env` or from a secret source is ignored. A sandbox launcher uses it where the install's own state can be seen but neither read nor locked. |
 | `HERMES_DISABLE_FILE_STATE_GUARD` | Set to `1` to turn off the "file changed since you read it" guard on `patch`/`write_file`. |
 | `HERMES_BUNDLED_SKILLS` | Comma-separated override for the list of bundled skills loaded at startup. |
 | `HERMES_OPTIONAL_SKILLS` | Comma-separated list of optional-skill names to auto-install on first run. |
@@ -70132,6 +70191,48 @@ where the agent blocks for a person: sudo password prompts (`kind="sudo"`),
 The typed password or answer is never included. Smart (aux-LLM) approvals do
 not fire it. Source: `tools/human_input_hooks.py`.
 
+### Session Prompt Lifecycle
+
+`on_session_prompt` / `on_session_prompt_settled` fire in the gateway when the
+session owner opens a prompt that a person answers for a session's viewers
+(CLI, Ink TUI, Desktop or a phone app attached to that session), and again
+when it stops being open. Unlike `on_human_input_request`, each call carries
+the id that answers the prompt:
+
+| `kind` | Opened when the owner | `prompt_id` answers it through |
+| --- | --- | --- |
+| `approval` | publishes an `approval.request` event | `approval.respond` |
+| `clarify` | publishes a `clarify.request` event | `clarify.respond` |
+| `sudo`, `secret`, `clarify`, `vault.unlock_prompt`, `vault.code`, `vault.save_login` | writes that server-to-client request frame (`clarify` here is the batch panel) | a response frame with that `srq-` id, or `clarify.lock` |
+
+Window requests a client app answers on its own (`theme.*`, `tour`,
+`preview.*`, `window.read`, `terminal.read`, `setup_beat`) and requests that
+are never replayed to a reconnecting viewer do not fire, and neither does a
+prompt nobody could be asked (no viewer attached).
+
+Fields: `session_id`, `kind`, `prompt_id`, `execution_generation` (the turn's
+generation for `approval` / `clarify`, `None` for request frames), and on the
+opened hook `params`: a deep copy of what the viewers received, with every
+string force-redacted the way `on_human_input_request` redacts `prompt` (even
+with `security.redact_secrets: false`). The settled hook adds `reason`: the
+`request.cancel` reason for a frame (`resolved`, `timeout`, `interrupted`) or
+`settled` for an `approval.settled` / `clarify.settled` event. What the person
+typed is never included. Each prompt id gets exactly one opened and one
+settled call, in that order.
+
+Calls are queued and run in order on one worker thread, never under the
+session's locks, on the agent thread or on the event loop, and always in the
+scope of the profile that owns the session, so on a multi-profile gateway only
+that profile's plugins see them. A slow callback delays later calls of these
+two hooks, nothing else.
+
+Use these hooks when you need to answer or track a specific prompt of a
+gateway session (a notification someone answers in place); use
+`on_human_input_request` for a surface-neutral "Hermes is waiting on you"
+signal, which also covers messaging platforms and the CLI's in-process
+prompts but has no answerable id and fires once per `clarify` call. Source:
+`gateway/session_prompt_hooks.py`.
+
 ### Approval Lifecycle
 
 Approval hooks describe dangerous-command approval prompts:
@@ -73043,6 +73144,7 @@ Every name in `hermes_cli.plugins.VALID_HOOKS` has at least one core fire site. 
 | `agent_loop_stopped` | `gateway/run_agent_cache.py` `GatewayAgentCacheMixin._interrupt_and_clear_session`; `tui_gateway/session_lifecycle.py` `_interrupt_session_turn` |
 | `pre_approval_request` / `post_approval_response` | `tools/approval_context.py` `_fire_approval_hook`, called from `tools/approval.py`, `tools/approval_prompt.py`, `tools/approval_gateway_wait.py`, `tools/approval_smart.py` and `tools/file_tools_write_guards.py` |
 | `on_human_input_request` / `on_human_input_resolved` | `tools/human_input_hooks.py` `human_input_request` |
+| `on_session_prompt` / `on_session_prompt_settled` | `gateway/session_prompt_hooks.py`, called from `gateway/session_authority.py` `SessionAuthority.register_approval` / `register_clarify`, `gateway/session_pending_controls.py` (a prompt leaving `PendingControls.pending`) and `gateway/session_server_requests.py` `_ask` |
 | `on_room_member_activity` | `tui_gateway/hosted_room_member_activity.py` `emit_room_member_activity` |
 | `pre_transcription` | `tools/transcription_command.py` `_apply_pre_transcription_hook` |
 | `kanban_task_claimed` | `hermes_cli/kanban_db.py` `claim_task` (through `_fire_task_hook`) |
@@ -74899,6 +75001,9 @@ with a name allows that one name only.
 | `hermes_cli.session_worktree` | `create` | user-guide/features/plugins.md § A plugin with its own chat client |
 | `hermes_cli.session_worktree` | `restore` | user-guide/features/plugins.md § A plugin with its own chat client |
 | `hermes_cli.session_worktree` | `finish` | user-guide/features/plugins.md § A plugin with its own chat client |
+| `hermes_cli.profiles_run_elsewhere` | `mark_profile_run_elsewhere` | user-guide/multi-profile-gateways.md § Profiles a plugin runs elsewhere |
+| `hermes_cli.profiles_run_elsewhere` | `clear_profile_run_elsewhere` | user-guide/multi-profile-gateways.md § Profiles a plugin runs elsewhere |
+| `hermes_cli.profiles_run_elsewhere` | `run_elsewhere` | user-guide/multi-profile-gateways.md § Profiles a plugin runs elsewhere |
 
 ---
 
@@ -76708,6 +76813,25 @@ offline (no network call, no subprocess):
   the agent uses (absent or false reads `off`), from the profile's own `config.yaml` like the other
   snapshot fields (a managed-scope overlay is not read). Snapshots counted before this field
   existed carry no value for it and still package.
+- Group chats, four size buckets (`0` … `gte_251`): `group_chat_count_bucket` (group chats that exist,
+  not disbanded), `group_chat_active_7d_count_bucket` (those with a message posted in the last 7 days, by
+  a person or a scheduled post; bot replies alone do not count), `group_chat_created_7d_count_bucket`
+  (those created in the last 7 days) and `group_chat_peer_count_bucket` (those with a member served by
+  another gateway).
+  Each profile's snapshot counts the group chats its gateway hosts (in its `state.db`); the root
+  profile's also counts a standalone `hermes serve` backend's (in the root `shared-state.db`) that its
+  gateway has not taken over, so each group chat is counted once.
+  The stores are only read and never created: no store reads `0`, and a store that cannot be read leaves
+  the four fields out rather than reporting a false zero.
+  This read adds no `-wal`/`-shm` files to a store no process has open; a store copied with its `-wal` but
+  not its `-shm` gains the `-shm` SQLite needs to read that `-wal`.
+  A group chat created and disbanded inside the window is not counted as created.
+  Room ids, names, members, link targets and message text are never read into the event.
+- `hosting` (`self_hosted`, `nous_cloud`): who hosts the install.
+  It reads `nous_cloud` only when the `HERMES_HOSTING` environment variable says so (Hermes Cloud sets it on
+  the agents it runs); anything else, or nothing, reads `self_hosted`, and the variable's raw value is never
+  recorded.
+  It carries no account, agent or machine identifier.
 
 ### Decision-data metrics
 
@@ -77013,7 +77137,7 @@ packages use v4, which adds `failure_class` to `hermes.compression.count` and
 `hermes.memory.op.count` and still accepts their v3 field sets (and, extended in place with additive values only, also after v4 shipped in a stable release,
 `failure_class` on `hermes.extension.install.count` / `hermes.update.run` plus `registry` on the
 former, still accepting their earlier v4 field sets; `hermes.prepared_compaction.count` and the
-snapshot's optional `compression_prepare_ahead` arrived the same way), as v3 accepted the v2
+snapshot's optional `compression_prepare_ahead`, `group_chat_*` counts and `hosting` arrived the same way), as v3 accepted the v2
 field sets of `hermes.model_route.count`, `hermes.tool_call.count` and the task
 counters, so counters recorded before an upgrade drain safely.
 Vocabularies derived from in-repo registries (tool names, platforms, memory
@@ -106418,6 +106542,79 @@ standalone profile and never serves it, parked or not, so `stop` and `start` on
 that profile keep their per-process meaning. Parking is the multiplex-native way
 to take one profile offline — it is what closes the "per-profile stop/restart"
 gap the [temporary shim](#temporary-gatewaystandalone-true) was kept open for.
+
+### Profiles a plugin runs elsewhere
+
+A plugin that runs a profile's whole backend somewhere other than this host (for
+example in a sandbox) marks the profile with
+`<hermes root>/profiles_run_elsewhere/<profile>.json`, containing
+`{"plugin": "<plugin name>", "since": "<ISO 8601 time>"}`. While that file
+exists, nothing on the host runs the profile, whether or not the plugin is
+running:
+
+- the host gateway does not serve it (platforms, cron, Kanban watchers,
+  `/p/<profile>/` routes), and the Desktop cron ticker skips it;
+- no agent is built for it, an agent built before the profile was marked runs
+  no further turn, and no cron ticker on the host (the gateway's, the
+  Desktop's, a cron provider's built-in fallback) runs its jobs;
+- `hermes -p <profile> chat`, `acp`, `cron run`, `cron tick`, `serve` and
+  `dashboard` exit with a message naming the plugin;
+- `hermes -p <profile> gateway run` exits 78, and `hermes gateway ensure`
+  refuses it (`profile_runs_elsewhere`);
+- the dashboard's cron, session, file and Webapp requests for it answer `409`,
+  and the Kanban dispatcher leaves cards assigned to it in `ready`
+  (`skipped_nonspawnable`).
+
+The default profile can be marked too. The host gateway runs as the default
+profile, so it then refuses to start; stop it before marking `default`. A
+running host gateway drops a newly marked named profile at its next rescan
+(30 seconds). A gateway or a `hermes serve` / `hermes dashboard` backend that
+was started as the marked profile itself is not stopped by the marker: it runs
+no further turn and no cron job for the profile, but it stays up until it is
+stopped, so stop it before marking. A marker that cannot be read still counts;
+only the plugin name is then unknown.
+
+While a profile is marked, host processes load no env file and no secret source
+from its home when they start: a `hermes -p <profile> …` command, and a plugin's
+own host process started under that home, read no `.env` or `.op.env` there and
+resolve none of its `secrets:` sources, and a host gateway or dashboard that
+serves the profile resolves none of them either. The marking plugin supplies
+what its own host process needs. A command that looks up one value later gets
+none from that `.env` either, so `hermes -p <profile> status` and `hermes -p
+<profile> config` show the profile's keys as not set, with one line saying why;
+a key saved through the plugin's host process is still written to the file.
+Host commands also start nothing the profile's own files name: `hermes -p
+<profile> hooks test` runs no shell hook, and `hermes -p <profile> mcp test`
+(or `mcp add`) refuses before it starts or calls an MCP server.
+
+The marker lives under the Hermes root, never in a profile home, so the
+profile's own backend cannot remove it. Host-side plugin code sets, reads and
+clears it with three functions of the
+[public plugin API](../developer-guide/plugins/public-api.md):
+
+```python
+from hermes_cli.profiles_run_elsewhere import (
+    clear_profile_run_elsewhere, mark_profile_run_elsewhere, run_elsewhere,
+)
+
+mark_profile_run_elsewhere("ops", "my-plugin")   # before the backend starts elsewhere
+entry = run_elsewhere("ops")                     # entry.plugin == "my-plugin"; None when unmarked
+clear_profile_run_elsewhere("ops", "my-plugin")  # once that backend has stopped
+```
+
+`mark_profile_run_elsewhere` and `clear_profile_run_elsewhere` raise
+`ValueError` for a marker another plugin owns. Other writers write the file
+under a name that starts with `.` in that folder and rename it over
+`<profile>.json`. Only a missing folder means that nothing is marked: if
+anything else is in its place, or it cannot be read, the host runs no profile
+until that is fixed. The one exception is a process that is denied the folder.
+The plugin keeps the folder out of the backend it runs, so such a process
+applies none of these refusals, and that backend keeps running its own
+profile. To run the profile on this host again,
+turn it off in the plugin. If the plugin is no longer installed or no longer
+loads, the refusal names the marker file: deleting that file lets Hermes run
+the profile on this host again. Do not delete it while the plugin still runs
+the profile.
 
 ### No new per-profile gateways
 
