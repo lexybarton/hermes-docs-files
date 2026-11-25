@@ -5482,7 +5482,7 @@ A keep-alive that goes out while a tool call is still running is a separate side
 
 If the clock cannot vouch for the window (`unknown` or `assumed` on `/context`), nothing is warmed and nothing is compacted at the cache edge. A keep-alive is sent only when its cache read, plus the output it may generate (1 token, or 16 on GPT-5/o-series) and any per-request fee, costs less than the full re-send it prevents and the keep-alives of one idle set, or of one tool wait, together cost no more than that re-send; there is no fixed dollar minimum, so cheap models are warmed too. It also needs known cache prices (an unpriced or subscription-included route is never warmed) and a cached prompt of at least 1,024 tokens (no smaller prompt is cached). Route ceilings apply: a route capped at `5m` is warmed on the 5-minute schedule. Requests with budget-based extended thinking are never warmed because a 1-token cap would change the budget Anthropic keys the cache on. A keep-alive only goes out through a client that really sends the small cap: native Gemini raises any cap to 65,535 tokens when thinking is on, so those chats are not warmed (with thinking off they are, at 1 token), and a long-decode budget is dropped from the replay. Every stop is logged at INFO (`prompt cache warming stopped: <reason>` in `agent.log`); keep-alives count toward the session totals (`session_cache_warm_calls`, `task=cache_warm` usage rows) but never enter the conversation, and a cache-edge compaction is recorded as a `cache_expiry` compression.
 
-Every compaction (automatic, prepared, `/compress`, gateway hygiene and the cache-edge one) summarizes the original tool results first, so the summary reads what the tools actually returned. Only after the summary is written does it save each tool result it removed or shortened to `$HERMES_HOME/cache/pruned/`, byte for byte, once, and leave a `— full result: <path>` pointer in its place, so the model can still reach the exact output; short and duplicate results the summary drops are saved too. Planning whether to compact writes nothing, and a summary that fails writes nothing. The committed summary ends with an `Archived tool output` list naming every saved file, so no file loses its last reference (the retention sweep keeps files a stored message names). A shortened result whose file cannot be written (disk full, read-only home) stays whole; one the summary replaces is then kept only by the summary and the original rows in `state.db`, and a warning is logged. The built-in sandboxed backends (docker, modal, ssh, daytona, vercel_sandbox) get the same archive at the path the sandbox reads (see above). On a backend that does not publish `cache/pruned` (plugin backends, a hosted sandbox) tool output is summarized and shortened without an archive: the removed text is gone from the live context (the original rows stay in `state.db`).
+Every compaction (automatic, prepared, `/compress`, gateway hygiene and the cache-edge one) summarizes the original tool results first, so the summary reads what the tools actually returned. Only after the summary is written does it save each tool result it removed or shortened to `$HERMES_HOME/cache/pruned/`, byte for byte, once, and leave a `— full result: <path>` pointer in its place, so the model can still reach the exact output; short and duplicate results the summary drops are saved too. Planning whether to compact writes nothing, and a summary that fails writes nothing. The committed summary ends with an `Archived tool output` list naming every saved file that would otherwise leave the live context (no kept message and no part of the generated summary still names it), so no file loses its last reference (the retention sweep keeps files a stored message names); an earlier summary's list is not repeated once that summary is stored in `state.db`, where it stays. A shortened result whose file cannot be written (disk full, read-only home) stays whole; one the summary replaces is then kept only by the summary and the original rows in `state.db`, and a warning is logged. The built-in sandboxed backends (docker, modal, ssh, daytona, vercel_sandbox) get the same archive at the path the sandbox reads (see above). On a backend that does not publish `cache/pruned` (plugin backends, a hosted sandbox) tool output is summarized and shortened without an archive: the removed text is gone from the live context (the original rows stay in `state.db`).
 
 ## Auxiliary Models
 
@@ -28565,7 +28565,12 @@ probes (default 3), housekeeping, the cron scheduler and the embedded kanban
 dispatcher have all frozen with it, so the watchdog dumps every thread's stack
 to the log, stamps `gateway_state.json` with `gateway_state: degraded` and
 `exit_reason: loop_liveness_watchdog`, and exits with code `75` so the service
-supervisor restarts the process. `hermes gateway status` renders that record as
+supervisor restarts the process. The dump and the stamp are best effort: if
+writing them stalls in Python (a full stderr pipe, a wedged log handler, a held
+status lock), the watchdog still exits within about 5 seconds, and the stamp
+may be missing or partial. The dump file itself is written by `faulthandler`,
+which holds the interpreter lock while it writes, so a disk that stops
+answering mid-dump can still hold the process until the write returns. `hermes gateway status` renders that record as
 `⚠ Gateway exited degraded: event loop stopped dispatching …` until a new
 gateway process overwrites it, and the dashboard's gateway badge shows
 **Degraded** with the same reason. Set `gateway.loop_watchdog: false` in
@@ -65788,6 +65793,7 @@ integration and explicitly configured Relay subscribers or exporters.
 | Gateway gauges | `/v1/metrics` | `hermes.gateway.up/state/busy/drainable/active_agents/background_work/background_delegations/restart_requested`, `hermes.platform.up/degraded` with bounded `error_code` attributes |
 | Health/lifecycle events | `/v1/traces` | `gateway.lifecycle` state transitions (`starting -> running -> draining -> stopped`, `startup_failed`, exit), `gateway.health_snapshot`, platform state changes |
 | Diagnostics | `/v1/logs` | Warning/error gateway events with a constant body and bounded subsystem, severity, error class, and error code attributes; rendered log messages are never exported |
+| Gateway memory gauges | `/v1/metrics` | `hermes.gateway.previous_exit` = 1 with `hermes.previous_exit` in `none`, `unclean`, `suspected_oom`, `oom_kill_host`, `watchdog`, `watchdog_memory_starved`, `oom_kill_cgroup`, `unknown` (the strongest evidence recorded on how the previous gateway life ended; one series per boot); `hermes.gateway.memory_pressure` = 1 with `hermes.memory_pressure` in `ok`, `elevated`, `critical`, `unknown` (live host pressure from the 30 s heartbeat) |
 | Cron scheduler gauges | `/v1/metrics` | Ticker heartbeat and last-success age (omitted when unavailable), a monotonic catch-up-occurrence count from the scheduler's stale-window branch, enabled/running job counts, and overdue count derived from persisted `next_run_at` plus the scheduler's existing grace rule |
 | Cron execution lifecycle | `/v1/traces` | Durable `claimed/running/completed/failed/unknown` states, bounded source and error class, opaque hashed job key, elapsed duration when timestamps exist, and delivery outcome when the scheduler knows it; terminal states make a fail-open flush attempt that can delay completion by up to one second |
 
@@ -65808,6 +65814,38 @@ one), matching the async pool's capacity accounting; alert it against
 `delegation.max_concurrent_children` to see slot pressure. Sum `active_agents`
 and `background_work` for total live work per instance; use
 `background_delegations` for pool-saturation.
+
+`hermes.gateway.previous_exit` and `hermes.gateway.memory_pressure` come from
+the same lifecycle-ledger and heartbeat files as the `memory` block of
+`/api/status`. `previous_exit` names the strongest evidence recorded on the
+previous life, in this order:
+
+- `oom_kill_cgroup`: the gateway died uncleanly and, between its last
+  heartbeat and this boot, the kernel OOM-killed a process in the gateway's
+  cgroup (the gateway itself or a tool subprocess there; the counter does not
+  say which);
+- `watchdog_memory_starved`: a watchdog killed it while host memory pressure
+  was `critical`;
+- `watchdog`;
+- `oom_kill_host`: the gateway died uncleanly and, in that window, the kernel
+  OOM-killed a process somewhere on the host (any process, not necessarily the
+  gateway);
+- `suspected_oom`: an unclean death whose last heartbeat already showed
+  critical pressure;
+- `unclean`;
+- `none`: no adverse evidence recorded (this includes a first boot);
+- `unknown`: this life has no ledger claim.
+
+The OOM-kill scopes come from the kernel's `oom_kill` counters (cgroup v2
+`memory.events`, `/proc/vmstat`), compared only when the dead life's last
+heartbeat is from that same life and at most 15 minutes old. A systemd unit or
+container restart recreates the cgroup with its counter at 0, so after a
+supervisor restart the comparison is usually host-scoped (`oom_kill_host`);
+`oom_kill_cgroup` applies only when the gateway restarts inside a surviving
+cgroup. The value only changes on the next boot. Nothing is exported when a watchdog fires: the process
+hard-exits right after and the emitter is asynchronous, so the record would
+never leave; the next boot's `previous_exit` carries it. `memory_pressure`
+reads `unknown` when the heartbeat is older than 150 s.
 
 ## Enabling
 
@@ -65897,7 +65935,15 @@ hermes_cron_jobs_overdue > 0
 # Catch-up counter increased, proving at least one stale occurrence was
 # collapsed and run once after a delay.
 increase(hermes_cron_scheduler_catch_up_occurrences[15m]) > 0
+
+# The previous gateway life died uncleanly while the kernel OOM-killed a process
+# in its cgroup, or a watchdog killed it while the host was out of memory.
+hermes_gateway_previous_exit{hermes_previous_exit=~"oom_kill_cgroup|watchdog_memory_starved"} == 1
 ```
+
+Collectors that front the exporter with a metric-name allowlist must add
+`hermes.gateway.previous_exit` and `hermes.gateway.memory_pressure` (see step 4
+of "Adding a new gauge/metric" below).
 
 Cron execution lifecycle records arrive as `hermes.cron_execution` spans.
 Alert or derive events from bounded attributes such as:
@@ -67409,7 +67455,7 @@ Existing tagged clients retain their native feed URLs. The generic
 register channels. The builder writes the legacy URL into `app-update.yml`;
 `updates.desktop_feed_base_url` can supply an explicit bucket-base URL.
 
-- Stable: `releases/darwin/stable/stable-mac.yml`
+- Stable: `releases/darwin/stable/stable-mac.yml` (and the unversioned Apple Silicon DMG alias at `releases/darwin/stable/HermesBundled-mac-arm64.dmg`, updated during stable desktop promotion with `Cache-Control: no-store`)
 - Canary: `releases/darwin/canary/canary-mac.yml`
 - Light: the same paths with `light/` between `darwin/` and the channel.
 - Artifacts: `releases/tag/TAG/FILENAME`, shared by download links and feeds.
@@ -78451,11 +78497,29 @@ run it again and let every mutation verify its current state before continuing.
 The final tag is the custody receipt. Never rebuild or replace accepted bytes to
 repair a pointer.
 
-Promotion replaces the stable downloads page at `releases/stable/index.html` on
-the R2 public origin. Canary tag builds own `releases/canary/index.html`, and
-a commit build owns only its claim archive's page,
-`releases/tag/commit.<stamp>-v<version>/index.html`. Pages list only staged,
-receipt-backed objects; an older run cannot regress a protected channel.
+Promotion replaces the stable downloads page at `releases/stable/index.html` and
+the unversioned stable macOS Apple Silicon installer at
+`releases/darwin/stable/HermesBundled-mac-arm64.dmg` (server-side R2 `CopyObject`
+from the accepted attempt archive, served with `Cache-Control: no-store` and
+`Content-Disposition: attachment; filename="HermesBundled-mac-arm64.dmg"`) on
+the R2 public origin, alongside `releases/darwin/stable/stable-mac.yml` and
+`releases/win32/stable/stable.appinstaller`. Canary tag builds own
+`releases/canary/index.html`, and a commit build owns only its claim archive's
+page, `releases/tag/commit.<stamp>-v<version>/index.html`. Pages list only
+staged, receipt-backed objects; an older run cannot regress a protected channel.
+Only the publication controller promotes stable. The standalone
+`python -m scripts.bundles.release_artifacts promote` refuses a stable candidate
+because it skips the published-release check, and
+`python -m scripts.releases.channel_releases` refuses the `stable` role because
+it skips the check of the candidate digest against the final release receipt.
+Both would also run outside the serialized `stable-release` group. Repair a partial stable publication by
+running Stable Release Publication again. A rerun repeats only an unfinished
+advance (a head, candidate pointer or Docker alias still behind); it never
+re-promotes a release that finished, so it never backfills the unversioned DMG
+or the downloads page. The DMG changes only with a full-desktop promotion. The
+page also changes when `complete` renders a full-desktop release, which can put
+it ahead of an older advance still pending; that promotion then leaves the
+newer page as it is.
 
 ## Run, publish, or abandon a stable release
 
@@ -78562,7 +78626,8 @@ What a release publishes follows what it built:
   manifest with exactly the targets it built, and submits the Store bundle when
   `windows-store` is on. A Store-only release has no package rows, only the Store
   bundle file, and moves no channel. The protected R2 stable head, the App Installer and macOS
-  feeds, the APT channel, downloads page,
+  feeds, the unversioned stable macOS DMG (`releases/darwin/stable/HermesBundled-mac-arm64.dmg`),
+  the APT channel, downloads page (`releases/stable/index.html`),
   `releases/stable/release-candidates.json` and the signed-package baseline stay
   on the previous full release. Source checkouts of the official repository on
   `stable`, their default channel, do not stay: that channel is GitHub's latest
@@ -88495,6 +88560,16 @@ dates, so package mirrors that publish no upload times work. The one exemption
 is CA trust stores (`certifi`): a release that distrusts a compromised CA is
 locked the day it ships, since waiting keeps the bad root trusted. Set a mirror with `index-url` in `pip.conf`,
 which Hermes passes to uv, or with `UV_INDEX_URL`.
+
+Ambient `UV_*` settings cannot redirect the project, interpreter or cache Hermes
+installs into. Regular builds keep uv's index settings (including
+`UV_EXTRA_INDEX_URL` and named-index credentials) and these transport settings:
+`UV_NATIVE_TLS`, `UV_INSECURE_HOST`, `UV_HTTP_TIMEOUT`, `UV_HTTP_RETRIES` and
+`UV_CONCURRENT_DOWNLOADS`. The pinned runtime build keeps only the transport
+settings. On a slow link where `hermes update` times out downloading several
+large wheels at once, set `UV_CONCURRENT_DOWNLOADS=1` before raising
+`UV_HTTP_TIMEOUT`. An update started from an older Hermes may drop both while
+it hands off; if that update times out, run `hermes update` again.
 
 `hermes pm lock` is the one step that applies the check. Run against a mirror
 without upload times, it stops with `has no publish time`; use
@@ -98442,7 +98517,18 @@ The response also carries two advisory resource blocks (they never affect the
   lifecycle ledger. Fields: `pressure` (`ok` / `elevated` / `critical` /
   `unknown`), `gateway_rss_mb`, `system_total_mb`, `system_available_mb`,
   `swap_used_mb`, `sampled_at`, `boot_id`, `last_boot_unclean`,
-  `last_boot_suspected_oom`. Pressure is `elevated` below 128 MiB (or 15%) of
+  `last_boot_suspected_oom`, `last_boot_oom_kill` (`null`, `cgroup` or
+  `host`: the gateway died uncleanly and, between its last heartbeat and this
+  boot, the kernel OOM-killed a process in the gateway's cgroup (`cgroup`) /
+  somewhere on the host (`host`); the counter does not say which process, and
+  `host` also counts any other process on the machine. A systemd unit or
+  container restart recreates the cgroup, so after one this is usually
+  `host`; `cgroup` applies only when the gateway restarts inside a surviving
+  cgroup. Compared only when the last heartbeat is at most 15 minutes old;
+  Linux only), `last_boot_watchdog_exit` (the previous gateway
+  life was ended by a watchdog: either the event-loop liveness watchdog or the
+  shutdown watchdog), `last_boot_memory_starved` (that watchdog kill happened
+  while host memory pressure was `critical`). Pressure is `elevated` below 128 MiB (or 15%) of
   available system memory and `critical` below 64 MiB (or 5%) — the same
   levels at which a subsequent unclean exit would be flagged as a suspected
   OOM kill. Heartbeats older than 150 seconds (or future-dated) keep their
