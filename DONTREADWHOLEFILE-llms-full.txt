@@ -17644,6 +17644,9 @@ Hooks, tools and injected turns of every chat and every local session (CLI, TUI,
 - `ctx.session_surface()` names the calling session's client: `"cli"`, `"tui"`, `"desktop"`, `"acp"`, or the messaging platform (`"telegram"`, …); `""` outside a session.
 - `hermes_cli.plugin_session.session_client()` returns the client that created the calling local session, as it named itself on `session.create` (`{"name": "my-client", "version": "1.2.0"}`; `version` only when sent), or `None`: outside a session, for a messaging chat, and for a client that sent no name (the TUI, Desktop, the classic CLI and ACP send none today). Under `plugins.isolation: host` the plugin's process has no session context, so read `info["client"]` in a system prompt section instead. The name is a label the client chose, not an authentication: never grant anything, or skip a check, because of it.
 - `hermes_cli.plugin_session.turn_client()` (also `ctx.turn_client()`) returns the client that submitted the turn running now, as its connection announced itself (`{"name": "hermes-desktop", "version": "2.1.0", "kind": "desktop"}`; `version` and `kind` only when sent), or `None`: outside a turn, in a delegated child, for a client that announced nothing, and for a messaging, cron or other automation turn. `hermes_cli.plugin_session.session_viewers()` (also `ctx.session_viewers()`) lists the clients attached to the calling session right now, one dict per connection: `name` and `kind` (`None` when it announced nothing), `idle_seconds` since the user's last input there (`None` when none was seen), `basis` (`"system"`: the device's idle clock, `"page"`: input inside the Hermes window, `"input"`: only what the gateway saw itself) and `can_alert` (whether that client can get the user's attention itself; `None` while no report of that client counts for this session, and a report that leaves it out says `True`). It is `[]` when the calling code is bound to no session, in a delegated child, in a managed worker, and when the session is not live. Under `plugins.isolation: host` the two forms answer differently: the module-level `plugin_session.turn_client()` / `session_viewers()` run in the plugin's own process, which has no gateway and no turn, so they always return `None` / `[]` there, while `ctx.turn_client()` / `ctx.session_viewers()` call back into the gateway with the calling hook's context and answer as they would in-process. Use the `ctx` form in a plugin that may run hosted; the module-level form answers only inside the gateway process. Both read the calling context, so they answer for the right session in turn hooks such as `post_llm_call` and `on_session_end`. In the plugin's own slash command no turn is running: `turn_client()` is `None` there, and `session_viewers()` answers for the session the command was typed in. A notification plugin uses them to skip a phone alert while the user is active at the client that sent the turn. Detect them with `getattr(plugin_session, "turn_client", None)`. Like `session_client()`, these are labels and reports the clients chose: never grant anything on them.
+- `hermes_cli.plugin_session.session_source()` (also `ctx.session_source()`) returns the label the calling session was created with, its `source`: `"cli"`, `"tui"`, `"gui"` or `"acp"` for a chat opened in that client, `"tool"` for a run a third-party integration launched (`hermes chat --source tool`), `"oneshot"` for a finite `chat -q` / `-z` run. Any other non-empty value is a label Hermes gives a session it starts itself. It is a launch label, not proof that a person is waiting. `""` says only that no launch policy is bound, not who started the session: it is what you get outside a session, for a person's messaging chat turn (use `session_surface()` for the platform there) and for a cron run (use `ctx.current_cron_execution()` to recognize one). A delegated child reads its parent session's label. It reads only the running turn, never the process environment.
+- `hermes_cli.plugin_session.in_delegated_child()` (also `ctx.in_delegated_child()`) is `True` while the calling code runs for a `delegate_task` child, `False` otherwise. Pass `include_subprocesses=True` to also get `True` in a process a delegated child started, such as a terminal command it ran.
+- `hermes_cli.plugin_session.fork_origin()` (also `ctx.fork_origin()`) is `""` for a session's own agent and every other regular agent (CLI, gateway, cron, subagent). Inside a detached fork Hermes runs beside a turn it returns the fork's label: `"background_review"` (the self-improvement review), `"side_question"` (`/btw` or `ctx.side_question()`), or `"plugin_fork:<plugin id>"` for a fork started with `ctx.fork_session()`. A notification plugin uses these three to alert only for the user's own turn: `if ctx.in_delegated_child() or ctx.fork_origin(): return`. Under `plugins.isolation: host` use the `ctx` forms: they run in the gateway in the calling hook's context, while the module-level forms answer for the plugin's own process.
 - `print()` output goes to the gateway's `gateway-stdio.log`, not to your terminal. Use `logging` instead.
 - `input()` gets end-of-file: the gateway has no terminal. Ask through a tool result or a slash command.
 
@@ -51653,6 +51656,7 @@ lists each import of it.
 | Refuse a picker-card (`send_model_picker` / `send_choice_picker`) or `/update` prompt click from someone other than its opener | `from gateway.approval_actor import picker_refusal, update_prompt_refusal, refusal_text`: `picker_refusal(on_selected, clicker_id, extra=self.config.extra)` with the callback the picker was sent with, or `update_prompt_refusal(clicker_id, extra=self.config.extra)`; a non-`None` result is the opener's name: reply privately with `refusal_text(name)` and leave the card open. The opener and the chat scope's admins always pass |
 | Native clarify buttons | `tools.clarify_gateway`: `get_pending(clarify_id)` (the pending entry or `None`; read `session_key`, `choices`, `multi_select`), `resolve_gateway_clarify(clarify_id, text)`, `mark_awaiting_text(clarify_id)`, `SKIPPED` |
 | `setup_fn` wizard steps | `hermes_cli.gateway_setup_wizard`: `print_setup_header(title)`, `confirm_reconfigure(label, *env_vars)`, `offer_home_channel(home_var, user_id, what)`, `save_env_values(**values)`, `prompt_csv(text, default)`; prompts from `hermes_cli.setup` (`prompt`, `prompt_choice`, `prompt_yes_no`); output from `hermes_cli.cli_output` (`print_info`, `print_success`, `print_warning`, `print_error`); `.env` access through `hermes_cli.config` (`save_env_value`, `get_env_value`) |
+| Recognize a silence marker (`[SILENT]`, `NO_REPLY`) in reply text and strip a closing one, by the text rules Hermes uses (a reply that is only a marker; a marker closing a real reply on its own line; a marker inside a sentence is prose). These are text checks: whether a turn may stay silent is the gateway's decision, and where a reply is expected it can send a notice in place of a bare marker, so do not use them to drop text the gateway hands your adapter to send | `from gateway.response_filters import is_intentional_silence_response, strip_trailing_silence_marker, is_autonomous_silence_response`: `is_intentional_silence_response(text)` is `True` only when the whole reply is a marker; `strip_trailing_silence_marker(text)` returns the reply without a closing own-line marker (anything else, a bare marker included, comes back unchanged); for an autonomous run with no user waiting (cron, webhook) use `is_autonomous_silence_response(text)`, which is also `True` when the bracketed sentinel opens the reply (`[SILENT] nothing new`) or a marker sits on its own first or last line |
 
 ```python
 from gateway.platforms.helpers import platform_http_client
@@ -54975,7 +54979,7 @@ Set or change the username and password the dashboard sign-in asks for, without 
 
 `-p <profile>` sets that profile's own sign-in. Dashboard sign-in belongs to the home a listener was started from, so it is used by `hermes -p <profile> dashboard --isolated` (or `serve --isolated`) and by a gateway that profile runs by itself. `hermes -p <profile> dashboard` without `--isolated` opens the machine dashboard, and a gateway that serves several profiles signs in with its own home's credentials: set those with `hermes -p default dashboard password`. When such a gateway serves the profile, the command names its home instead of a restart hint. Every command the output suggests names its home (`hermes -p default ...` for the default home, `hermes --profile <name> ...` for a profile), because after `hermes profile use <name>` a bare `hermes ...` would act on that sticky profile instead.
 
-The same sign-in works on `hermes dashboard` / `hermes serve` and on the gateway's Webapp. Each reads it when it starts, so restart a running one; the command says which one is running. A listener started with a new password ends every sign-in made with the old one. `HERMES_DASHBOARD_BASIC_AUTH_USERNAME`, `_PASSWORD` and `_PASSWORD_HASH` override `config.yaml`: the command removes them from this home's `.env` (it names them, never their values). It refuses, before changing anything, when your administrator pins one in the managed `.env`, when the managed `config.yaml` pins `dashboard.basic_auth.password_hash` or pins the username to another name, when the checkout's own `.env` (loaded after the home's on every start of a source checkout) would supply one (judged the way the loader applies it: `${...}` expanded, and only filling gaps when the home has its own `.env`, so an empty or unresolved value overrides nothing; the command never edits that shared file), or when `dashboard.basic_auth.username` is a `${...}` reference to a key it would remove (make the username literal first). On Windows, where environment names ignore case, it also refuses when this home's `.env` or the checkout's has one of those keys spelled in another case (such as `hermes_dashboard_basic_auth_password`): it names the file, line and key (never the value); delete or rename that line, then run it again. Lines are read one at a time, so a look-alike line inside a quoted multi-line value counts too. When the environment the command runs in sets one, it warns: a gateway or backend started from that environment still signs in with that value, so unset it there too.
+The same sign-in works on `hermes dashboard` / `hermes serve` and on the gateway's Webapp. Each reads it when it starts, so restart a running one; the command says which one is running. A listener started with a new password ends every sign-in made with the old one. `HERMES_DASHBOARD_BASIC_AUTH_USERNAME`, `_PASSWORD` and `_PASSWORD_HASH` override `config.yaml`: the command removes them from this home's `.env` (it names them, never their values). When that `.env` holds a quoted value over several lines (a PEM key), it removes whole assignments as the loader reads them, so a look-alike line inside another value stays and every other byte, line endings included, is written back as it was; such a file that is not UTF-8 is refused before anything is written when it has one of those keys to remove (with none, it is left alone). It refuses, before changing anything, when your administrator pins one in the managed `.env`, when the managed `config.yaml` pins `dashboard.basic_auth.password_hash` or pins the username to another name, when the checkout's own `.env` (loaded after the home's on every start of a source checkout) would supply one (judged the way the loader applies it: `${...}` expanded, and only filling gaps when the home has its own `.env`, so an empty or unresolved value overrides nothing; the command never edits that shared file), or when `dashboard.basic_auth.username` is a `${...}` reference to a key it would remove (make the username literal first). On Windows, where environment names ignore case, it also refuses when this home's `.env` or the checkout's has one of those keys spelled in another case (such as `hermes_dashboard_basic_auth_password`): it names the file, line and key (never the value); delete or rename that line, then run it again. Lines are read one at a time, so a look-alike line inside a quoted multi-line value counts too. When the environment the command runs in sets one, it warns: a gateway or backend started from that environment still signs in with that value, so unset it there too.
 
 | Option | Description |
 |--------|-------------|
@@ -54989,7 +54993,7 @@ hermes dashboard password --username admin --password-stdin < /run/secrets/dashb
 hermes gateway restart
 ```
 
-Exit codes: `0` stored, `2` refused (no password; an empty, overlong or non-UTF-8 one; `--password-stdin` on a terminal; prompts that don't match; a username with spaces; nothing is changed), `1` the prompt was cancelled, a refusal above (an administrator pin, the checkout's `.env`, a username reference; nothing is changed), `config.yaml` could not be written, an overriding key could not be removed from `.env` after `config.yaml` was updated (the message names the key and the file), or the install is managed (Nix or a package manager owns its configuration).
+Exit codes: `0` stored, `2` refused (no password; an empty, overlong or non-UTF-8 one; `--password-stdin` on a terminal; prompts that don't match; a username with spaces; nothing is changed), `1` the prompt was cancelled, a refusal above (an administrator pin, the checkout's `.env`, a username reference, a multi-line `.env` that is not UTF-8 and has a key to remove; nothing is changed), `config.yaml` could not be written, an overriding key could not be removed from `.env` after `config.yaml` was updated (the message names the key and the file), or the install is managed (Nix or a package manager owns its configuration).
 
 ### `hermes dashboard register`
 
@@ -69143,6 +69147,18 @@ A provider's own `hermes model` step calls these instead of re-implementing core
 | `hermes_cli.model_setup.note_setup_failure(failure_class)` | Records why the flow ended without a pick (`"auth"`, `"no_models"`, ...) for the opt-in provider-setup metric; a no-op outside a tracked flow. |
 | `agent.secret_scope.secret_source_label(name)` | `" (from Bitwarden)"`-style suffix naming the secret-source plugin that supplied env var `name`; `""` for `.env` / shell values. |
 
+### Public helpers for native Gemini reasoning
+
+A provider on the native Gemini wire (`generateContent`) maps the reasoning config with these, so its efforts follow
+the same per-model rules as the built-in `gemini` provider. The profile still chooses the request field and its own
+output budget.
+
+| Helper | What it does |
+|---|---|
+| `agent.reasoning_effort.gemini_thinking_config(model, reasoning_config)` | Native camelCase `thinkingConfig` for a Hermes reasoning config (`{"enabled": False}` gives the lowest level the model allows, with thoughts hidden; `xhigh` and above reach `xhigh` on the models that take it), or `None` for a non-Gemini model or no reasoning config. |
+| `agent.reasoning_effort.clamp_effort(effort, supported, overrides=None)` | Clamps an effort onto a declared level tuple: unchanged when supported, else the nearest weaker level (the weakest one when nothing is weaker). |
+| `agent.reasoning_effort.bare_gemini_model_id(model)` | The model id the native Gemini client sends (`gemini/` and `google/` prefixes stripped). `gemini_thinking_config` already applies it; it imports no HTTP stack. |
+
 ## Account usage
 
 Model-provider plugins can provide account or plan usage to `/usage` by
@@ -71687,6 +71703,8 @@ Session storage sits behind a storage interface: typed contracts in `persistence
 | `divert_session_transcript_jsonl(session_id, messages)` | `session_rescue.divert_session_transcript_jsonl(session_id, messages, sessions_dir=get_hermes_home() / "sessions")` |
 | `session_db`, the `SessionDB` a context engine's `bind_session_state` and `on_session_start` receive | `persistence`, the agent's store handle, passed beside it to a hook that accepts that keyword ([Context engine plugins](../context-engine-plugin.md#session-storage)) |
 
+The old class's `get_compression_lineage(session_id)` is not carried by the stand-in. Read it from the handle instead: `store.lineage.lineage(session_id)` returns the ids of the compression chain the read walks as a tuple, root first, so `[0]` is the first id of the returned chain, not necessarily the original session. It is `(session_id,)` for a session with no compression chain, for a fork child or any `tool`-sourced session (the read treats `tool` sessions as forks, so a `tool` run that continued after compression returns only its own id), or for a session outside the oldest-continuation chain the lookup follows (such as a later sibling continuation). It is `()` for an unknown id, and works on a read-only handle.
+
 `NewSession` and `SessionQuery`/`SessionWindow` come from `persistence.conversation.sessions`; `NewMessage` and `ReplaceMode` from `persistence.conversation.messages`. A dashboard route that listed sessions migrates like this:
 
 ```python
@@ -73713,6 +73731,37 @@ def register(ctx):
     ctx.register_hook("pre_tool_call", guard)
 ```
 
+### Schedule a job once and read where cron delivers it
+
+`cron.plugin_api` is for plugin code that works with cron jobs directly, including code with no `ctx` (a dashboard route, a standalone process). Both functions call the code cron itself runs.
+
+`ensure_named_job(name, *, prompt, schedule, repeat=None, deliver=None, enabled_toolsets=None, home=None)` returns the stored job named exactly `name` (a job dict, as `hermes cron list` stores it) and creates it when no job has that name:
+
+- `name` must be a non-empty string with no leading or trailing whitespace; cron could not find any other name again. Anything else raises `ValueError` and nothing is created.
+- Disabled jobs count. Two or more jobs with that name raise `AmbiguousJobReference` (importable from the same module) and nothing is created.
+- An existing enabled job has its trigger registered with the active scheduler provider again. Its prompt and schedule are not updated.
+- A new job is created and registered the way `hermes cron add` does it. When registration fails, for a new job or an existing one, the call raises `CronSchedulerRegistrationError` (importable from the same module): a `RuntimeError` whose `.job` is the saved job and `.cause` the provider's error. The job is already saved: call `ensure_named_job` again and it registers that job instead of creating a second one.
+- The lookup and the create are not atomic across processes. If your plugin can call it from two places at once, serialize those calls yourself (a file lock, for example).
+
+`ctx.cron_delivery_platforms(job_id=None)` and `delivery_platforms(job_id=None, *, home=None)` return the platforms cron would deliver the job's output to right now, as a tuple of lower-cased names in cron's order, each once. `()` means the job delivers nowhere (`local`). They answer for the job's normal delivery (`deliver`); a `failure_deliver` override, which routes failure notices, is not consulted. With `job_id=None`, they answer for the firing cron run using the settings that run started with — edits or deletions saved to the job store mid-run do not change the answer — and return `None` outside a cron run (or in a delegated child). Passing an explicit `job_id` previews the saved job currently in the store (returning `None` when no stored job has that id). Under `plugins.isolation: host`, a hook runs in the plugin host process where no cron run is bound, so hooks call `ctx.cron_delivery_platforms()` — which runs in the gateway in the calling hook's context and works in both isolation modes. Use `delivery_platforms(job_id, home=...)` when code has no `ctx` or targets another profile. They use cron's own resolver, so `all`, the `origin` fallback to a home channel and `bot-chat` follow cron's rules. They return no chat ids, thread ids or tokens. Use them to skip a notification of your own when cron already delivers the output to your platform. They do the work cron does when it delivers: for `all`, that reads the gateway config once for each platform whose home channel is not set in the environment. Call once per run and keep the answer.
+
+Both `cron.plugin_api` functions take `home`: a profile's Hermes home, with `~` and environment variables expanded once. `delivery_platforms` requires an explicit `job_id` whenever `home` is not `None` and raises `ValueError` otherwise. To look up the firing job's delivery, omit both arguments; the lookup stays in the firing profile. With an explicit `home`, the call runs with that profile's home, cron store, secrets (its `.env`, so its home channels too) and settings (its time zone for a schedule), and yours are restored afterwards, also when it raises. The secrets are read from that profile's own files, also when you name the profile that is already active. For a profile other than the process's own that configures an external secret source, the first call runs that source, as Hermes does when it starts work for that profile. For the process's own profile the call runs no source: it reads the profile's `.env` and the external values this process has already loaded, so a standalone process that has not loaded them does not see them. A `home` that is not an existing directory is never created: `ensure_named_job` raises `FileNotFoundError` and `delivery_platforms` returns `None`. A hosted activity cannot act for a profile, so a call that has to bind `home` raises there. `home=None` uses the active profile.
+
+```python
+from cron.plugin_api import AmbiguousJobReference, ensure_named_job
+
+def register(ctx):
+    def on_post_llm_call(**kwargs):
+        if "push" in (ctx.cron_delivery_platforms() or ()):
+            return  # cron delivers this run's output through push already
+        try:
+            ensure_named_job("follow-up", prompt="Check on the deploy.", schedule="in 30m")
+        except AmbiguousJobReference:
+            pass  # the user has two jobs with that name; leave them alone
+
+    ctx.register_hook("post_llm_call", on_post_llm_call)
+```
+
 ### Add Automation Blueprints
 
 `ctx.register_automation_blueprint(key, *, title, description, schedule_template, prompt_template, category="general", slots=(), deliver_default="origin", skills=(), tags=())` adds a fill-in-the-blanks automation to the [Automation Blueprints catalog](../../reference/automation-blueprints-catalog.mdx). It appears next to the built-ins in `/blueprint` (CLI, TUI, messengers), the dashboard's Blueprints tab, and the Desktop Cron page, labelled with your plugin's name. The arguments are the fields of the built-in `AutomationBlueprint` (`cron/blueprint_catalog.py`); each slot is a dict of `BlueprintSlot` fields.
@@ -74972,6 +75021,9 @@ with a name allows that one name only.
 | `hermes_cli.setup` | `prompt_choice` | adding-platform-adapters.md § Public helpers for platform plugins |
 | `hermes_cli.setup` | `prompt_yes_no` | adding-platform-adapters.md § Public helpers for platform plugins |
 | `hermes_cli.cli_output` | whole module | adding-platform-adapters.md § Public helpers for platform plugins |
+| `gateway.response_filters` | `is_autonomous_silence_response` | adding-platform-adapters.md § Public helpers for platform plugins |
+| `gateway.response_filters` | `is_intentional_silence_response` | adding-platform-adapters.md § Public helpers for platform plugins |
+| `gateway.response_filters` | `strip_trailing_silence_marker` | adding-platform-adapters.md § Public helpers for platform plugins |
 | `gateway.platforms.session_model` | `SessionModelPickerProvider` | adding-platform-adapters.md § Conversation model settings and picker providers (BasePlatformAdapter) |
 | `gateway.platforms.session_model` | `SessionModelSettings` | adding-platform-adapters.md § Conversation model settings and picker providers (BasePlatformAdapter) |
 | `tools.skills_tool` | `find_all_skills` | plugins/index.md § Read the skill catalog |
@@ -74986,6 +75038,9 @@ with a name allows that one name only.
 | `hermes_cli.plugin_session` | `session_client` | user-guide/features/plugins.md § Plugin code inside the gateway: which client created the session |
 | `hermes_cli.plugin_session` | `turn_client` | user-guide/features/plugins.md § Plugin code inside the gateway: which client sent the turn and who is attached |
 | `hermes_cli.plugin_session` | `session_viewers` | user-guide/features/plugins.md § Plugin code inside the gateway: which client sent the turn and who is attached |
+| `hermes_cli.plugin_session` | `session_source` | user-guide/features/plugins.md § Plugin code inside the gateway: how the session was created, delegated children and forks |
+| `hermes_cli.plugin_session` | `in_delegated_child` | user-guide/features/plugins.md § Plugin code inside the gateway: how the session was created, delegated children and forks |
+| `hermes_cli.plugin_session` | `fork_origin` | user-guide/features/plugins.md § Plugin code inside the gateway: how the session was created, delegated children and forks |
 | `agent.file_safety` | `get_read_block_error` | plugins/index.md § Check file paths and read YAML with Hermes's own helpers |
 | `agent.file_safety` | `raise_if_read_blocked` | plugins/index.md § Check file paths and read YAML with Hermes's own helpers |
 | `agent.file_safety` | `is_write_denied` | plugins/index.md § Check file paths and read YAML with Hermes's own helpers |
@@ -75004,6 +75059,10 @@ with a name allows that one name only.
 | `hermes_cli.profiles_run_elsewhere` | `mark_profile_run_elsewhere` | user-guide/multi-profile-gateways.md § Profiles a plugin runs elsewhere |
 | `hermes_cli.profiles_run_elsewhere` | `clear_profile_run_elsewhere` | user-guide/multi-profile-gateways.md § Profiles a plugin runs elsewhere |
 | `hermes_cli.profiles_run_elsewhere` | `run_elsewhere` | user-guide/multi-profile-gateways.md § Profiles a plugin runs elsewhere |
+| `cron.plugin_api` | whole module | plugins/index.md § Schedule a job once and read where cron delivers it |
+| `agent.reasoning_effort` | `gemini_thinking_config` | model-provider-plugin.md § Public helpers for native Gemini reasoning |
+| `agent.reasoning_effort` | `clamp_effort` | model-provider-plugin.md § Public helpers for native Gemini reasoning |
+| `agent.reasoning_effort` | `bare_gemini_model_id` | model-provider-plugin.md § Public helpers for native Gemini reasoning |
 
 ---
 
@@ -98109,7 +98168,13 @@ stops and says to restart that backend with the updated hermes, then run the dry
 The plan names the old backend (its supervisor, pid and address) and the address the Webapp would
 take: the same bind and port (loopback stays loopback, a wildcard stays a wildcard, one IP address
 stays that address). It says whether sign-in is required, which `HERMES_DASHBOARD_*` settings would be
-copied into `.env` (names only; values are never printed), the public URL it would copy into
+copied into `.env` (names only; values are never printed; one `.env` already sets is not copied, and a
+`.env` line that sets a sign-in setting as a `${VAR}` template reading a VAR from outside the `.env` blocks
+the move when the gateway's service would not start with the value VAR has for the old backend (a gateway
+service not installed yet is judged as `hermes gateway install` would write it: the user manager's
+environment plus the unit's `Environment=` lines, or the LaunchAgent's variables), or when
+the old unit's `env` launcher sets VAR: put the literal value in `.env`, or set VAR where the gateway
+runs), the public URL it would copy into
 `webapp.public_url` (only one the gateway accepts; a refused one is a blocker and is not printed), the
 state of the gateway service and the
 Webapp bundle, how many turns are running on the old backend, and the steps in order. To find this
@@ -98142,7 +98207,15 @@ the gateway cannot be a service, the last step is `hermes gateway run`, for the 
 stopped system unit counts for this home only when it runs as you (`User=`) and pins no other
 `HERMES_HOME`, judged by the environment systemd gives it (`Environment=`, then each `EnvironmentFile=`
 in order, the later value winning); when a file it needs cannot be read, the dry run is blocked instead
-of guessing. A backend whose command line cannot be read shows no address, and no step that needs one. On Windows the report names the Task Scheduler task that starts the old backend, or the
+of guessing. An `env` launcher in its ExecStart (`/usr/bin/env HERMES_HOME=/srv/other hermes dashboard`)
+runs after that environment, and `systemctl show` joins its arguments with spaces, so the planner does
+not read values on that line: one that sets or unsets a home variable (`HERMES_HOME`, `HOME`), uses an
+option that changes the environment as a whole (`-i`, `-S`) or one it does not know, or has a `$` anywhere
+but inside another variable's value (`-u ${DROP}`), blocks the dry run for that unit. Put `HERMES_HOME` in the unit's `Environment=` instead, or stop and disable that unit by
+hand. A line that sets or unsets only other variables leaves the home to the unit's environment. A `.env`
+sign-in template that reads a variable from outside the `.env` blocks the move when that line sets that
+variable, or has a `-u`, `-C` or `-S` option at all, because the joined line does not show what those
+leave set: put the literal value in `.env`. A backend whose command line cannot be read shows no address, and no step that needs one. On Windows the report names the Task Scheduler task that starts the old backend, or the
 Startup-folder entry whose target and arguments are exactly the backend's command (when more than one
 matches, or a matching entry may not be what started it, the steps say so and ask you to pick). The
 steps end and disable that task (`schtasks /End`, `schtasks /Change ... /DISABLE`) or set the entry
