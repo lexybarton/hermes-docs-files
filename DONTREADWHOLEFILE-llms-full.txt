@@ -28,15 +28,20 @@ platform-gated features are supported), see **[Platform Support](./platform-supp
 Download the package for your platform from the
 [Hermes website](https://hermes-agent.nousresearch.com/).
 
-- **Windows:** open the `.appinstaller` download with Windows App Installer.
-  It installs the signed MSIX bundle and records its update source.
-  Microsoft Store packages have separate Store ownership.
-- **macOS:** open the DMG, then copy `Hermes.app` to Applications. The ZIP
-  artifact carries the signed app used by the automatic updater.
+- **Windows (Windows 11 22H2 / `10.0.22621.0` or later, x64 or ARM64):**
+  install from the Microsoft Store, or download the `.appinstaller` file and
+  open it with Windows App Installer to install the signed MSIX bundle and
+  register its update source. Microsoft Store packages have separate Store
+  ownership.
+- **macOS (macOS 13 Ventura or later, Apple Silicon `arm64`):** open the DMG,
+  then copy `Hermes Agent.app` to Applications. The ZIP artifact carries the
+  signed app used by the in-app updater.
 
 Bundled packages contain the agent, Python, supported dependencies, and prebuilt
 interfaces. First launch does not build that base runtime. Provider access and
-optional integrations can still require network access.
+optional integrations can still require network access. See
+[Bundled desktop updates](./updating.md#bundled-desktop-updates) for package
+sizes and expected download versus local install/swap times.
 
 A `Hermes-Setup` bootstrap installer is different: it downloads a source
 installation and builds the desktop app. See [Hermes Desktop](../user-guide/desktop.md).
@@ -46,8 +51,9 @@ backend on another machine, install one of the packages above and connect it
 from **Settings → Gateways**; see
 [Connecting to a remote backend](../user-guide/desktop.md#connecting-to-a-remote-backend).
 
-:::note
-The macOS installer is **Apple Silicon only**. macOS on x86 (Intel) processors is [not a supported platform](./platform-support.md#unsupported).
+:::note Desktop bundle OS requirements and fallbacks
+- **macOS Desktop Bundle:** requires **macOS 13 Ventura or later on Apple Silicon (`arm64`)**. Intel (x86_64) Macs and macOS 12 Monterey or earlier are not supported by the desktop bundle — use the [CLI / source installer (`install.sh`)](#linux--macos--wsl2) below.
+- **Windows Desktop Bundle (Microsoft Store & `.appinstaller` MSIX):** requires **Windows 11 22H2 or later (`10.0.22621.0`)**, x64 or ARM64. On Windows 10 or Windows 11 earlier than 22H2, use the [Windows source installer (`install.ps1`)](#windows-native) below or [WSL2](../user-guide/windows-wsl-quickstart.md).
 :::
 
 ### Without Hermes Desktop:
@@ -925,21 +931,43 @@ is baked into the package (see below).
 
 ### Bundled desktop updates
 
+Packaged desktop bundles require **macOS 13 Ventura or later on Apple Silicon
+(`arm64`)** (`Hermes Agent.app`) or **Windows 11 22H2 or later (`10.0.22621.0`)**,
+x64 or ARM64 (both Microsoft Store and `.appinstaller` MSIX). Intel Macs and
+macOS 12 or earlier use the CLI / source installer (`install.sh`); Windows 10
+and Windows 11 earlier than 22H2 use `install.ps1` or
+[WSL2](../user-guide/windows-wsl-quickstart.md).
+
 On Windows, the sideload app checks the registered App Installer source. Apply
 downloads the `.appinstaller` descriptor before stopping app-owned backends,
 opens that local file, and quits for Windows to replace the package.
 A detached waiter attempts automatic relaunch after the package version changes.
 A waiter-registration failure produces a manual-reopen warning.
 
-On macOS, apply downloads the ZIP update and waits for Squirrel.Mac to accept
-the signed app before stopping backends. Only that apply flow requests install
-and relaunch. An ordinary quit does not install a pending download.
-Download or verification failures leave backends running.
+On macOS, apply downloads the signed ZIP update and waits for Squirrel.Mac to
+accept the signed app before stopping backends. Only that apply
+flow requests install and relaunch. An ordinary quit does not install a pending
+download. Download or verification failures leave backends running.
 
 Store packages use the Store instead of either sideload feed. A broken or
 unavailable update check must not be interpreted as "already up to date."
 The application and its bundled base runtime update together; user data stays
 outside the package. See [Desktop installation](../user-guide/desktop.md#install).
+
+**Download sizes and update timing:** bundled updates split into network
+download time (which depends on your connection) and local verification/swap
+time. The sizes below are approximate and change between releases:
+
+- **macOS:** a fresh DMG install is ~948 MB, and choosing **Update** in the
+  app downloads the signed update ZIP (~983 MB in full). After the ZIP finishes
+  downloading, Squirrel.Mac unpack, code-signature verification, and bundle
+  swap take roughly **50 seconds** on Apple Silicon (measured on an M4 Mac)
+  before the app relaunches.
+- **Windows:** full per-architecture MSIX packages are ~1.89 GB (ARM64) to
+  ~2.86 GB (x64). Windows App Installer and the Microsoft Store download only
+  your host architecture and apply differential block updates between releases,
+  so incremental downloads are typically smaller than a fresh install, followed
+  by local package deployment.
 
 Stable and canary desktop bundles are separate applications. Installing canary
 does not replace stable, including on Windows with MSIX. Each application keeps
@@ -1494,7 +1522,9 @@ removes data. `--data` removes user data without deleting package-owned code.
 These modes are destructive; make a backup first.
 
 For MSIX/Store, use Windows Settings → Apps → Installed apps. For macOS,
-quit Hermes and move its app bundle to Trash. Docker, Nix, and Termux use the
+quit Hermes and move the app for your channel to Trash: `Hermes Agent.app`
+(stable), `Hermes Agent Canary.app` (canary), or `Hermes.app` for a
+source-built desktop. Docker, Nix, and Termux use the
 same manager that installed them. Their package files are not removed by the
 source uninstaller. Data deletion is separate from package removal.
 
@@ -17643,7 +17673,7 @@ Hooks, tools and injected turns of every chat and every local session (CLI, TUI,
 - `os.getcwd()` is the gateway's own directory, shared by every session; Hermes never changes it. Use `ctx.session_cwd()` for the working directory of the session the hook or tool runs for: the workspace a CLI/TUI/Desktop session was started in, or the profile's terminal cwd for a chat (`""` when there is none). Pass it as `cwd=` to subprocesses. It reads the session from the running turn, so it works in code that runs for a session: turn hooks, tool handlers and approval hooks. Ingress hooks such as `pre_gateway_dispatch` run before the message is admitted to any session; there it returns the profile's terminal cwd, or `""` when none is configured.
 - `ctx.session_surface()` names the calling session's client: `"cli"`, `"tui"`, `"desktop"`, `"acp"`, or the messaging platform (`"telegram"`, …); `""` outside a session.
 - `hermes_cli.plugin_session.session_client()` returns the client that created the calling local session, as it named itself on `session.create` (`{"name": "my-client", "version": "1.2.0"}`; `version` only when sent), or `None`: outside a session, for a messaging chat, and for a client that sent no name (the TUI, Desktop, the classic CLI and ACP send none today). Under `plugins.isolation: host` the plugin's process has no session context, so read `info["client"]` in a system prompt section instead. The name is a label the client chose, not an authentication: never grant anything, or skip a check, because of it.
-- `hermes_cli.plugin_session.turn_client()` (also `ctx.turn_client()`) returns the client that submitted the turn running now, as its connection announced itself (`{"name": "hermes-desktop", "version": "2.1.0", "kind": "desktop"}`; `version` and `kind` only when sent), or `None`: outside a turn, in a delegated child, for a client that announced nothing, and for a messaging, cron or other automation turn. `hermes_cli.plugin_session.session_viewers()` (also `ctx.session_viewers()`) lists the clients attached to the calling session right now, one dict per connection: `name` and `kind` (`None` when it announced nothing), `idle_seconds` since the user's last input there (`None` when none was seen), `basis` (`"system"`: the device's idle clock, `"page"`: input inside the Hermes window, `"input"`: only what the gateway saw itself) and `can_alert` (whether that client can get the user's attention itself; `None` while no report of that client counts for this session, and a report that leaves it out says `True`). It is `[]` when the calling code is bound to no session, in a delegated child, in a managed worker, and when the session is not live. Under `plugins.isolation: host` the two forms answer differently: the module-level `plugin_session.turn_client()` / `session_viewers()` run in the plugin's own process, which has no gateway and no turn, so they always return `None` / `[]` there, while `ctx.turn_client()` / `ctx.session_viewers()` call back into the gateway with the calling hook's context and answer as they would in-process. Use the `ctx` form in a plugin that may run hosted; the module-level form answers only inside the gateway process. Both read the calling context, so they answer for the right session in turn hooks such as `post_llm_call` and `on_session_end`. In the plugin's own slash command no turn is running: `turn_client()` is `None` there, and `session_viewers()` answers for the session the command was typed in. A notification plugin uses them to skip a phone alert while the user is active at the client that sent the turn. Detect them with `getattr(plugin_session, "turn_client", None)`. Like `session_client()`, these are labels and reports the clients chose: never grant anything on them.
+- `hermes_cli.plugin_session.turn_client()` (also `ctx.turn_client()`) returns the client that submitted the turn running now, as its connection announced itself (`{"name": "hermes-desktop", "version": "2.1.0", "kind": "desktop"}`; `version` and `kind` only when sent), or `None`: outside a turn, in a delegated child, for a client that announced nothing, and for a messaging, cron or other automation turn. `hermes_cli.plugin_session.session_viewers()` (also `ctx.session_viewers()`) lists the clients attached to the calling session right now, one dict per connection: `name` and `kind` (`None` when it announced nothing), `idle_seconds` since the user's last input there (`None` when none was seen), `basis` (`"system"`: the device's idle clock, `"page"`: input inside the Hermes window, `"input"`: only what the gateway saw itself) and `can_alert` (whether that client can get the user's attention itself; `None` while no report of that client counts for this session, and a report that leaves it out says `True`). It is `[]` when the calling code is bound to no session, in a delegated child, in a managed worker, and when the session is not live. `hermes_cli.plugin_session.turn_origin()` (also `ctx.turn_origin()`) names the Hermes producer of the turn running now, only where Hermes knows it: `"process_notification"` for a turn a background process's completion, watch match or liveness tick started, and `"delegation_result"` for an async delegation's result re-entering its parent session. It is `None` for every other turn, whoever started it: typed in a client (whether or not its connection announced itself), sent on a messaging chat, an API request, a Bot Chat delivery or `hermes peer dm`, a restart resuming an interrupted turn, a goal continuation, cron, Kanban and other automation wakes, a message a plugin injected, and a steer or interrupt text that runs as the next turn. It is `None` too outside a turn, in a delegated child, in a detached fork (a plugin fork, a side question or a background review: `fork_origin()` is not empty), in a managed worker and in a plugin's own slash command. Once a person's input joins the running turn (an accepted steer or redirect: Steer or `/steer` in a client, a steered or redirected chat message), it is `None` for the rest of that turn, since the reply now answers that person too; a steer that is refused changes nothing. More values may be added later, so compare against the ones you handle rather than testing for `None`. `turn_client()` is `None` both for a client that announced nothing and for a process or delegation wake; `turn_origin()` tells those two apart. Under `plugins.isolation: host` the two forms answer differently: the module-level `plugin_session.turn_client()` / `turn_origin()` / `session_viewers()` run in the plugin's own process, which has no gateway and no turn, so they always return `None` / `None` / `[]` there, while `ctx.turn_client()` / `ctx.turn_origin()` / `ctx.session_viewers()` call back into the gateway with the calling hook's context and answer as they would in-process. Use the `ctx` form in a plugin that may run hosted; the module-level form answers only inside the gateway process. Both read the calling context, so they answer for the right session in turn hooks such as `post_llm_call` and `on_session_end`. In the plugin's own slash command no turn is running: `turn_client()` is `None` there, and `session_viewers()` answers for the session the command was typed in. A notification plugin uses them to skip a phone alert while the user is active at the client that sent the turn. Detect them with `getattr(plugin_session, "turn_client", None)` (and `"turn_origin"`, which is newer). Like `session_client()`, these are labels and reports the clients chose: never grant anything on them.
 - `hermes_cli.plugin_session.session_source()` (also `ctx.session_source()`) returns the label the calling session was created with, its `source`: `"cli"`, `"tui"`, `"gui"` or `"acp"` for a chat opened in that client, `"tool"` for a run a third-party integration launched (`hermes chat --source tool`), `"oneshot"` for a finite `chat -q` / `-z` run. Any other non-empty value is a label Hermes gives a session it starts itself. It is a launch label, not proof that a person is waiting. `""` says only that no launch policy is bound, not who started the session: it is what you get outside a session, for a person's messaging chat turn (use `session_surface()` for the platform there) and for a cron run (use `ctx.current_cron_execution()` to recognize one). A delegated child reads its parent session's label. It reads only the running turn, never the process environment.
 - `hermes_cli.plugin_session.in_delegated_child()` (also `ctx.in_delegated_child()`) is `True` while the calling code runs for a `delegate_task` child, `False` otherwise. Pass `include_subprocesses=True` to also get `True` in a process a delegated child started, such as a terminal command it ran.
 - `hermes_cli.plugin_session.fork_origin()` (also `ctx.fork_origin()`) is `""` for a session's own agent and every other regular agent (CLI, gateway, cron, subagent). Inside a detached fork Hermes runs beside a turn it returns the fork's label: `"background_review"` (the self-improvement review), `"side_question"` (`/btw` or `ctx.side_question()`), or `"plugin_fork:<plugin id>"` for a fork started with `ctx.fork_session()`. A notification plugin uses these three to alert only for the user's own turn: `if ctx.in_delegated_child() or ctx.fork_origin(): return`. Under `plugins.isolation: host` use the `ctx` forms: they run in the gateway in the calling hook's context, while the module-level forms answer for the plugin's own process.
@@ -63658,9 +63688,12 @@ host.openSession(id, { profile?, intent? }) // open a stored session core-style;
                                            //   profile: soft-swap to that profile's backend first
                                            //   intent: 'in-place' (default) | 'stack' | 'tab' | 'window'
 host.newChat(profile?)                     // fresh chat draft, optionally in another profile
-host.openWorkspace(id, { render, title?, minWidth?, onClose? })
+host.openWorkspace(id, { render, title?, minWidth?, onClose?, approvalScope? })
                                            // dock a plugin-rendered tab into the MAIN
-                                           //   workspace zone and reveal it; returns a disposer
+                                           //   workspace zone and reveal it; returns a disposer.
+                                           //   approvalScope: 'per-profile' (a room of several
+                                           //   profiles) shows a per-profile approvals hint in
+                                           //   the statusbar instead of the active profile's mode
 host.paneVisibility(paneId)                // ReadableAtom<boolean> — is a contributed pane
                                            //   actually on screen (its zone's active tab)?
 host.onEvent(type, fn)                     // gateway event stream ('*' = all); returns disposer.
@@ -65489,8 +65522,9 @@ nothing.
 
 Each turn a connection submits is stamped with its label (`surface_v1.client` on the admission,
 never a `prompt.submit` field; a retry from another or no label is the same request). Plugins read
-the turn's label with `hermes_cli.plugin_session.turn_client()` and the attached connections with
-their idle data with `session_viewers()`.
+the turn's label with `hermes_cli.plugin_session.turn_client()`, the Hermes producer of a turn no
+connection submitted (a process notification or a delegation result) with `turn_origin()`, and the
+attached connections with their idle data with `session_viewers()`.
 
 Attach another authenticated viewer with `session.resume({session_id})`, and submit
 through `prompt.submit({session_id, submission_id, text})`. The accepted receipt is durable
@@ -67501,9 +67535,13 @@ The existing `release-signing` environment supplies:
   `CLOUDFLARE_R2_SECRET_ACCESS_KEY`: bucket access secrets.
 - `CLOUDFLARE_R2_BUCKET`, `CLOUDFLARE_R2_PUBLIC_URL`: repository/environment vars.
 
-Publishing requires the Apple credentials. The existing after-sign hook owns
-notarization, so electron-builder's second notarization path is disabled.
-The publish gate verifies the signature, stapled ticket and Gatekeeper assessment.
+Publishing requires the Apple credentials. The `afterSign` hook owns `.app`
+notarization (so electron-builder's second notarization path is disabled), and
+`artifactBuildCompleted` (`scripts/notarize-dmg.mjs`) signs the outer `.dmg`
+with `--timestamp`, notarizes and staples it, verifies `codesign`, `stapler`,
+and `spctl -t open --context context:primary-signature`, and refreshes
+`.dmg.blockmap` and feed hashes from the stapled bytes. The publish gate and
+macOS smoke verify both the outer `.dmg` and the contained `.app`.
 Recording the build refuses an update ZIP of 1 GiB (1,073,741,824 bytes) or
 more: Squirrel.Mac before Electron 44.7, which v0.22.0 ships, reads the whole ZIP
 into memory and crashes downloading one that size
@@ -75083,6 +75121,7 @@ with a name allows that one name only.
 | `agent.redact` | `redact_sensitive_text` | plugin-llm-access.md § From the plugin's frontend: a plugin RPC method (`force=True` where secrets must never leave) |
 | `hermes_cli.plugin_session` | `session_client` | user-guide/features/plugins.md § Plugin code inside the gateway: which client created the session |
 | `hermes_cli.plugin_session` | `turn_client` | user-guide/features/plugins.md § Plugin code inside the gateway: which client sent the turn and who is attached |
+| `hermes_cli.plugin_session` | `turn_origin` | user-guide/features/plugins.md § Plugin code inside the gateway: which client sent the turn and who is attached |
 | `hermes_cli.plugin_session` | `session_viewers` | user-guide/features/plugins.md § Plugin code inside the gateway: which client sent the turn and who is attached |
 | `hermes_cli.plugin_session` | `session_source` | user-guide/features/plugins.md § Plugin code inside the gateway: how the session was created, delegated children and forks |
 | `hermes_cli.plugin_session` | `in_delegated_child` | user-guide/features/plugins.md § Plugin code inside the gateway: how the session was created, delegated children and forks |
@@ -81014,8 +81053,8 @@ We strive to never break installations and updates for these. Issues & regressio
 
 | OS / Architecture                                                             | Installation methods                                                                                                           | Notes                                                                                                                                                     |
 | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **macOS** (Apple Silicon)                                                     | [Hermes Desktop](https://hermes-agent.nousresearch.com/), [`install.sh`](./installation.md) |
-| [**Windows 10 / 11**](../user-guide/windows-native.md) (x86_64, aarch64) | [`install.ps1`](./installation.md), [MSIX desktop](../user-guide/windows-native.md) | The MSIX package requires Windows 11 22H2 or later. Optional dependencies have [architecture limits](../user-guide/windows-native.md). |
+| **macOS** (Apple Silicon)                                                     | [Hermes Desktop](https://hermes-agent.nousresearch.com/), [`install.sh`](./installation.md) | The macOS desktop bundle (`Hermes Agent.app`) requires **macOS 13 Ventura or later** on Apple Silicon (`arm64`). Intel Macs and macOS 12 or earlier use [`install.sh`](./installation.md#linux--macos--wsl2). |
+| [**Windows 10 / 11**](../user-guide/windows-native.md) (x86_64, aarch64) | [Microsoft Store / MSIX desktop](../user-guide/windows-native.md), [`install.ps1`](./installation.md) | Desktop bundles (Microsoft Store and `.appinstaller` MSIX, x64 or ARM64) require **Windows 11 22H2 or later (`10.0.22621.0`)**. Windows 10 and Windows 11 earlier than 22H2 use [`install.ps1`](./installation.md#windows-native) or [WSL2](../user-guide/windows-wsl-quickstart.md). Optional dependencies have [architecture limits](../user-guide/windows-native.md). |
 | **Linux / [WSL2](../user-guide/windows-wsl-quickstart.md)** (x86_64, aarch64) | [`install.sh`](./installation.md)                                                           | We test on the latest Ubuntu and WSL2. If your distro has glibc, systemd, and follows the Filesystem Hierarchy Standard, it's likely to work pretty well. |
 | [**Docker Container**](../user-guide/docker.md) (x86_64, aarch64) | [`docker pull`](../user-guide/docker.md)                                                                           | Docker installs do not support `hermes update`. Updating is done by running a new image.                                                                  |
 
@@ -81035,15 +81074,25 @@ PRs will be accepted to fix issues with them, but they will take precedence belo
 
 ### Build targets and support priority
 
-Releases build the macOS desktop bundle for Apple Silicon (`arm64`) only; no
-release or CI workflow builds or tests an Intel macOS (`x64`) bundle. The macOS
-update feed is arm64-only, so Intel Macs installed from an older desktop bundle
-get no update. The Termux APT package is **not built by default**: a release
-includes it only when it is cut with `release.py release --with termux`. A
-release without Termux leaves the Termux APT channel on its previous release.
-The `Hermes-Setup.dmg` bootstrap installer is built for Apple Silicon only, so
-on an Intel Mac it reports "not supported on this Mac". Intel Macs can install
-the [CLI](./installation.md#linux--macos--wsl2) and run `hermes desktop`.
+Releases build the macOS desktop bundle (`Hermes Agent.app`) for **Apple Silicon
+(`arm64`) on macOS 13 Ventura or later** (`LSMinimumSystemVersion`
+`13.0`, matching Electron 44's OS floor); no release or CI workflow builds or
+tests an Intel macOS (`x64`) bundle. The macOS update feed is arm64-only, so
+Intel Macs installed from an older desktop bundle get no update. Intel Macs and
+macOS 12 Monterey or earlier should use the
+[CLI / source installer (`install.sh`)](./installation.md#linux--macos--wsl2).
+
+Windows desktop bundles (both the Microsoft Store package and the signed
+`.appinstaller` MSIX bundle, x64 and ARM64) require **Windows 11 22H2 or later
+(`10.0.22621.0`)**. Windows 10 and Windows 11 earlier than 22H2 are supported
+through the [Windows source installer (`install.ps1`)](./installation.md#windows-native)
+or [WSL2](../user-guide/windows-wsl-quickstart.md).
+
+The Termux APT package is **not built by default**: a release includes it only
+when it is cut with `release.py release --with termux`. A release without Termux
+leaves the Termux APT channel on its previous release.
+The legacy `Hermes-Setup.dmg` bootstrap installer is built for Apple Silicon
+only, so on an Intel Mac it reports "not supported on this Mac".
 Linux desktop AppImages are built on canary tags as diagnostic artifacts that no
 release offers yet; local AppImage builds and native Linux PM bundle checks exist.
 
@@ -81056,7 +81105,8 @@ PRs to fix them will _not_ be accepted, and any code that keeps compatibility wi
 
 - Android / Termux on non-aarch64 devices (aarch64 is [supported](./termux.md) via our APT package)
 - installs via the AUR (we might upstream patches if it helps out &lt;3)
-- 32-bit x86 macOS, and Intel x86_64 macOS desktop bundles (none are built).
+- 32-bit x86 macOS, Intel x86_64 macOS desktop bundles (none are built), and desktop bundles on macOS 12 Monterey or earlier (use [`install.sh`](./installation.md#linux--macos--wsl2) instead)
+- Windows desktop bundles (Microsoft Store or `.appinstaller` MSIX) on Windows 10 or Windows 11 earlier than 22H2 (use [`install.ps1`](./installation.md#windows-native) or [WSL2](../user-guide/windows-wsl-quickstart.md) instead)
 - installs via `pypi` (e.g. `uv tool install hermes-agent`, `pip install hermes-agent`, etc.)
 - installs via `brew` (`brew install hermes-agent`)
 
@@ -89224,7 +89274,7 @@ See [Profiles](./profiles.md) for the underlying primitive and [Profile Commands
 
 The Hermes desktop app is a native app built around the **same** agent you get from the CLI and the gateway — same config, same API keys, same sessions, same skills, same memory. It is not a separate product or a lightweight clone; it uses the same Hermes Agent core and settings, and drives it through a modern & thoughtfully designed UI. If you have used `hermes` in a terminal, everything you set up there is already here, and anything you do here shows up there.
 
-It runs on **macOS (Apple Silicon), Windows, and Linux** — see [Platform Support](../getting-started/platform-support.md) for the full matrix.
+It runs on **macOS (Apple Silicon), Windows, and Linux**. Packaged bundles cover macOS and Windows; [Platform Support](../getting-started/platform-support.md) lists the OS versions each bundle requires and the installers to use on other systems.
 
 :::tip Which interface is which?
 Hermes has several front ends that all talk to the same agent:
@@ -89238,9 +89288,9 @@ Pick whichever fits the moment. They share state, so you can start a session in 
 
 ## Install
 
-Download the app from the [Hermes Desktop product page](https://hermes-agent.nousresearch.com/desktop), or follow the [installation instructions for Hermes Desktop](../getting-started/installation.md).
+Download the desktop package from the [Hermes Desktop product page](https://hermes-agent.nousresearch.com/desktop), or follow the [installation instructions for Hermes Desktop](../getting-started/installation.md), which give each package's OS requirements and the installer to use on older systems.
 
-If you already have Hermes installed, simply run
+On Linux, follow the [source install instructions](../getting-started/installation.md#linux--macos--wsl2) first. Once you have a source install of Hermes, run
 
 ```bash
 hermes desktop
@@ -89780,7 +89830,9 @@ chats decide who replies: [Bot Mode: A Roster of Agents](./bot-mode.md).
 
 The app checks for updates in the background and offers a one-click update when one is ready.
 
-The background check asks the GitHub API for the branch tip. Anonymous GitHub requests are limited to 60 per hour **per network address**, so on a shared connection (office NAT, VPN, proxy) the check can report `GitHub API rate limit reached` even though this machine made almost none of them. To spend a 5,000/hour budget instead, the check uses the first credential it finds, in this order:
+For **bundled desktop installs** (signed macOS `Hermes Agent.app`, Windows `.appinstaller` MSIX, and Microsoft Store), updates replace the packaged app and its bundled runtime together. [Bundled desktop updates](../getting-started/updating.md#bundled-desktop-updates) gives the download sizes and how long the local install takes.
+
+For **source-built desktop installs**, the background check asks the GitHub API for the branch tip. Anonymous GitHub requests are limited to 60 per hour **per network address**, so on a shared connection (office NAT, VPN, proxy) the check can report `GitHub API rate limit reached` even though this machine made almost none of them. To spend a 5,000/hour budget instead, the check uses the first credential it finds, in this order:
 
 1. `GITHUB_TOKEN`, then `GH_TOKEN`, from the environment the app was launched from — read on each request, never stored.
 2. The [GitHub CLI](https://cli.github.com/)'s own login (`gh auth token`). This is the rung that helps an app started from the Dock, Finder, or a desktop launcher, which inherits a minimal environment without your shell's variables. `gh` is looked up on `PATH` and in the usual install locations (Homebrew, `/usr/local/bin`, `~/.local/bin`, the Windows GitHub CLI installer); the answer is cached until the app restarts, so `gh` runs at most once per session.
@@ -90253,7 +90305,7 @@ with Hermes' stable signing identities it survives every update:
 
 1. System Settings → **Privacy & Security → Full Disk Access** (or run
    `open "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"`)
-2. Enable your terminal app — and **Hermes.app** if you use Desktop.
+2. Enable your terminal app — and, if you use Desktop, the app for your channel: **Hermes Agent.app** (stable), **Hermes Agent Canary.app** (canary), or **Hermes.app** (source-built). Each app needs its own grant.
 3. Fully quit and relaunch them once.
 
 `hermes doctor` reports whether the current terminal context already has the
@@ -109851,14 +109903,18 @@ To diagnose an unexpected short Windows path, use `-ShowResolvedPaths` first.
 
 ### MSIX / App Installer and Microsoft Store
 
-The bundled desktop is separate from the source script. Its MSIX package
-requires **Windows 11 22H2 or later**. Windows 10 source-script support does
-not mean the MSIX package supports Windows 10.
+The bundled desktop is separate from the source script. Both the Microsoft Store
+package and the sideload `.appinstaller` MSIX bundle (x64 and ARM64) require
+**Windows 11 22H2 or later (`10.0.22621.0`)**. Windows 10 source-script support
+does not extend to MSIX packages: on Windows 10 or Windows 11 earlier than 22H2,
+use the [Windows source installer (`install.ps1`)](#quick-install) above or
+[WSL2](./windows-wsl-quickstart.md).
 
-Open the downloaded `.appinstaller` file with Windows App Installer. It installs
-a signed universal bundle and records the update source. The package includes
-Python, Node, supported dependencies, and prebuilt interfaces. It does not clone
-a checkout or build the base runtime on first launch.
+Install from the Microsoft Store, or open the downloaded `.appinstaller` file
+with Windows App Installer. It installs a signed universal bundle and records
+the update source. The package includes Python, Node, supported dependencies,
+and prebuilt interfaces. It does not clone a checkout or build the base runtime
+on first launch.
 
 The MSIX execution aliases expose `hermes`, `hermes-agent`, and `hermes-acp`.
 If another installation shadows an alias, inspect `Get-Command hermes -All`.
@@ -109868,7 +109924,9 @@ controls the aliases.
 Sideload updates use the app's Update control and Windows App Installer.
 Hermes downloads a local descriptor before teardown and registers automatic
 relaunch. It does not require the `ms-appinstaller:` URL protocol. An unknown
-update-check result is not a claim that the package is current.
+update-check result is not a claim that the package is current. See
+[Bundled desktop updates](../getting-started/updating.md#bundled-desktop-updates)
+for package sizes and update timing.
 
 The Microsoft Store variant uses its Partner Center package identity and Store
 updates. It does not use the sideload feed. `hermes update` inside either
