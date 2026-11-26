@@ -7961,7 +7961,7 @@ Each session is tagged with its source platform:
 | Source | Description |
 |--------|-------------|
 | `cli` | Interactive CLI (`hermes` or `hermes chat`) |
-| `oneshot` | Finite non-interactive runs: `hermes chat --oneshot -q`, `-Q`, `hermes -z`, and `-q` on non-TTY stdio. Hidden from the TUI, Desktop and dashboard session pickers (like `kanban` and `tool`), even when launched from inside a TUI or Desktop session — the run inherits that transport's environment but is not that conversation. Still counts as CLI history: `hermes -c` / `--resume latest` continue the last one-shot, and `hermes sessions list` shows it. An explicit `--source <tag>` always wins (`hermes chat -q --source tui` is stored as `tui`). |
+| `oneshot` | Finite non-interactive runs: `hermes chat --oneshot -q`, `-Q`, `hermes -z`, and `-q` on non-TTY stdio. Hidden from the TUI, Desktop and dashboard session pickers (like `kanban` and `tool`), even when launched from inside a TUI or Desktop session — the run inherits that transport's environment but is not that conversation. Still counts as CLI history: `hermes -c` / `--resume latest` continue the last one-shot, and `hermes sessions list --all` (or `--source oneshot`) shows it. An explicit `--source <tag>` always wins (`hermes chat -q --source tui` is stored as `tui`). |
 | `telegram` | Telegram messenger |
 | `discord` | Discord server/DM |
 | `slack` | Slack workspace |
@@ -8204,6 +8204,9 @@ Hermes provides a full set of session management commands via `hermes sessions`:
 ### List Sessions
 
 ```bash
+# Pick a recent conversation with the arrow keys and resume it (prints the list when not on a terminal)
+hermes sessions
+
 # List recent sessions (default: last 20)
 hermes sessions list
 
@@ -8212,7 +8215,12 @@ hermes sessions list --source telegram
 
 # Show more sessions
 hermes sessions list --limit 50
+
+# Show every source (cron, webhook, push, kanban, tool, one-shot) and sessions with no messages
+hermes sessions list --all
 ```
+
+The list holds the conversations you resume: one row per thread, ranked by its last message. A thread that was compressed shows once, under the id of its live continuation (the one `hermes --resume` continues) and the title of the most recent part of the thread that has one. Subagent runs never appear here. Cron, webhook, push, kanban, tool and one-shot runs and empty sessions stay out unless you pass `--all` (or name a `--source`).
 
 When more sessions exist than `--limit` allows, the listing ends with a `… more not shown (use --limit N to see more)` footer, so a capped page is never mistaken for the full list.
 
@@ -54885,14 +54893,16 @@ You can also generate a brand-new pet from a text description with the `/hatch` 
 ## `hermes sessions`
 
 ```bash
-hermes sessions <subcommand>
+hermes sessions [<subcommand>]
 ```
+
+With no subcommand on a terminal, `hermes sessions` opens the same picker as `browse`: pick a recent conversation with the arrow keys and Enter resumes it (`hermes --resume <id>`). Off a terminal it prints the `list` output.
 
 Subcommands:
 
 | Subcommand | Description |
 |------------|-------------|
-| `list` | List recent sessions. |
+| `list` | List recent conversations: one row per thread (a compressed thread shows its live continuation's id), ranked by last message. Subagent runs are left out; so are cron/webhook/push/kanban/tool/one-shot runs and empty sessions unless you pass `--all`. |
 | `browse` | Interactive session picker with search and resume. Each row shows a lifecycle status tag (`done` / `intr` / `err` / `empty`, derived from the session's final message) and its message count. Press `d` on a highlighted row (while the search filter is empty) to delete that session after a y/N confirmation; while a filter is active, `d` types into the search instead. |
 | `export <output> [--session-id ID]` | Export sessions to JSONL. |
 | `delete <session-id>` | Delete one session. |
@@ -57330,7 +57340,7 @@ Tools for driving desktop [Projects](../user-guide/cli.md) — named, multi-fold
 
 | Tool | Description | Requires environment |
 |------|-------------|----------------------|
-| `desktop_project` | One action enum for the three Project verbs: `create` makes a desktop Project (a named workspace) and switches this chat into it — pass `path` to anchor it to a repo/folder; `list` shows the desktop Projects and which one is active; `switch` moves this chat into an existing Project (by name, slug, or id), moving the session workspace to the project's primary folder. | — |
+| `desktop_project` | One action enum for the three Project verbs: `create` makes a desktop Project (a named workspace); pass `path` to anchor it to a repo/folder. The chat stays where it is and the active project is unchanged. `list` shows the desktop Projects and which one this chat is in (the active project, for CLI and messaging callers). `switch` moves this chat into an existing Project (by name, slug, or id), moving the session workspace to the project's primary folder; in a Desktop or TUI chat the move lands when the turn ends (`moved: "pending"`), and a chat that cannot move gets `moved: false` with the reason while the active project changes instead. | — |
 
 ## `memory` toolset
 
@@ -95983,6 +95993,16 @@ plus the workflow for using it; the catalog name and manifest name match:
 hermes plugins install snyk
 hermes plugins enable snyk
 ```
+
+### Platform plugins whose credentials are already set
+
+When the gateway starts (or rescans a served profile after its `.env` changes), it looks for
+`category: platform` entries whose `capabilities.requires_env` variables are all set for that profile
+while the plugin is not installed. A `default: true` entry (official or verified) is installed then, so
+its adapter starts in the same gateway start. Any other entry is never installed unattended: the gateway
+logs, and the profile's next chat shows, one line naming `hermes plugins install <name>`. A plugin that
+was installed automatically once and then removed, or that `plugins.disabled` names, is left alone, and
+nothing is fetched where `security.allow_lazy_installs` is off.
 
 ### Updating a catalog install
 
